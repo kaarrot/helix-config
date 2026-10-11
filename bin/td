@@ -1,0 +1,1079 @@
+#!/usr/bin/env python3
+"""Todo scheduler + agenda for Helix.
+
+Two tiers of tasks:
+
+  Inbox bullets in $TD_FILE (default $TL_DIR/todo.md). Lightweight, fire-and-forget.
+      - [ ] call jon                            # [ ] todo
+      - [y] pay rent                            # [y] today
+      - [a] refactor td parser                  # [a] active (promoted — see $TL_DIR/)
+      - [x] took bins out                       # [x] done
+      - [!] call mom                            # [!] ignore
+
+  Dedicated files in $TL_DIR/*.md, one per follow-up task. Notes + optional
+  "SCHEDULE: YYYY-MM-DD HH:MM" line to fire a termux notification. The agenda
+  marks a bullet with " (*)" when a dedicated file with the same slug exists.
+
+      # refactor td parser
+      SCHEDULE: 2026-11-01 10:00
+
+      notes/subtasks...
+
+Commands:
+  td install           register a 15-min termux-job-scheduler job that runs `td tick`
+  td uninstall         cancel it
+  td tick              scan dedicated files, fire due SCHEDULEs
+  td list [--state todo|today|active|all] [--sort added|modified]
+                       build the agenda from $TD_FILE bullets; write to
+                       ~/.cache/td/last-list.md and stdout. Appends " (*)" to
+                       bullets whose slug has a dedicated file. Lists orphan
+                       dedicated files (no matching bullet) in # ORPHANS.
+  td promote           stdin: a bullet line. Creates (or reuses) ~/tasks/<slug>.md
+                       and prints the bullet unchanged.
+  td jump --from PATH:LINE
+                       read line LINE from file PATH, slugify its bullet text,
+                       print ~/tasks/<slug>.md if it exists, else print PATH.
+  td set PATH LINE S   rewrite checkbox char at PATH:LINE to S (" "/y/a/x/!)
+  td toggle S          stdin: a line. If agenda row, update source via `set`
+                       and print the row with the new state char. Else, toggle
+                       the checkbox between " " and S in-place.
+  td new [--state todo|today|active]
+                       print "- [S] " for pipe/insert
+  td fire PATH         fire a dedicated file's SCHEDULE now (testing)
+  td test [-v]         run tests
+
+Env: $TL_DIR (default ~/tasks), $TD_FILE (default $TL_DIR/todo.md),
+     $TL_NOW="YYYY-MM-DD HH:MM" fakes the clock,
+     $TD_CATCHUP_H (default 6), $TD_LEAD_MIN (default 0),
+     $TD_DRY_RUN=1 skips notifications and prints "would fire: ..." instead.
+"""
+import hashlib
+import os
+import re
+import subprocess
+import sys
+from collections import namedtuple
+from datetime import datetime, timedelta
+from pathlib import Path
+
+TASK = re.compile(r"^(?P<indent>\s*)- \[(?P<state>[ xXya!])\]\s+(?P<text>.*?)\s*$")
+SCHEDULE_MARK = re.compile(r"\bSCHEDULE\b")
+SCHEDULE_TS = re.compile(r"(\d{4}-\d{2}-\d{2}) (\d{1,2}:\d{2})")
+TAG = re.compile(r"#(\w+)")
+LINK = re.compile(r"\s*→\s*\S+\s*$")
+MARKER = re.compile(r"\s*\(\*\)\s*$")
+AGENDA_ROW = re.compile(
+    r"^(?P<rest>- \[[ xXya!]\].*?)\s{2,}(?P<path>\S+?):(?P<line>\d+):\d+\s*$")
+H1 = re.compile(r"^#\s+(.+?)\s*$")
+SLUG_SPLIT = re.compile(r"[^a-z0-9]+")
+CHECKBOX = re.compile(r"- \[[ xXya!]\]")
+
+STATE_NAMES = {" ": "todo", "y": "today", "a": "active",
+               "x": "done", "X": "done", "!": "ignore"}
+STATE_FROM_NAME = {"todo": " ", "today": "y", "active": "a",
+                   "done": "x", "ignore": "!"}
+VISIBLE = {" ", "y", "a"}
+GROUPS = ("active", "today", "todo")
+
+JOB_ID = 7421
+CACHE = Path("~/.cache/td").expanduser()
+FIRED_PATH = CACHE / "fired"
+ADDED_PATH = CACHE / "added"
+LIST_PATH = CACHE / "last-list.md"
+TICK_SHIM = Path("~/.config/helix/bin/td-tick").expanduser()
+
+LEGEND = "# td: [ ] todo  [y] today  [a] active"
+
+Bullet = namedtuple("Bullet", "path line raw indent state text tags hash")
+Scheduled = namedtuple("Scheduled", "path line due title hash")
+
+
+def now():
+    fake = os.environ.get("TL_NOW")
+    return datetime.strptime(fake, "%Y-%m-%d %H:%M") if fake else datetime.now()
+
+
+def tilde(path):
+    home = str(Path.home())
+    s = str(path)
+    return "~" + s[len(home):] if s.startswith(home + os.sep) else s
+
+
+def task_folder():
+    return Path(os.environ.get("TL_DIR", "~/tasks")).expanduser()
+
+
+def td_file():
+    env = os.environ.get("TD_FILE")
+    if env:
+        return Path(env).expanduser()
+    return task_folder() / "todo.md"
+
+
+def bullet_hash(path, text):
+    """Stable hash: invariant under state char changes; strips → link suffix."""
+    core = LINK.sub("", text).strip()
+    core = re.sub(r"\s+", " ", core)
+    h = hashlib.sha1(f"{path}\t{core}".encode("utf-8", "surrogateescape"))
+    return h.hexdigest()[:16]
+
+
+def schedule_hash(path, due_iso):
+    h = hashlib.sha1(f"{path}\t{due_iso}".encode("utf-8", "surrogateescape"))
+    return h.hexdigest()[:16]
+
+
+def slugify(text):
+    s = MARKER.sub("", LINK.sub("", text)).lower().strip()
+    s = SLUG_SPLIT.sub("-", s).strip("-")
+    return s or "untitled"
+
+
+def parse_bullet(path, lineno, raw):
+    m = TASK.match(raw)
+    if not m:
+        return None
+    text = m["text"]
+    tags = TAG.findall(text)
+    return Bullet(path, lineno, raw, m["indent"], m["state"], text, tags,
+                  bullet_hash(str(path), text))
+
+
+def scan_inbox():
+    """-> (path, [Bullet]). (path, []) if missing."""
+    p = td_file()
+    if not p.is_file():
+        return p, []
+    try:
+        lines = p.read_bytes().decode("utf-8", "surrogateescape").splitlines()
+    except OSError:
+        return p, []
+    out = []
+    for i, raw in enumerate(lines, 1):
+        b = parse_bullet(p, i, raw)
+        if b:
+            out.append(b)
+    return p, out
+
+
+def scan_dedicated():
+    """Dedicated-task files in $TL_DIR with a SCHEDULE: line (inbox excluded)."""
+    folder = task_folder()
+    if not folder.is_dir():
+        return []
+    try:
+        inbox = td_file().resolve()
+    except OSError:
+        inbox = None
+    out = []
+    for f in sorted(folder.glob("*.md")):
+        try:
+            if inbox and f.resolve() == inbox:
+                continue
+        except OSError:
+            continue
+        try:
+            lines = f.read_bytes().decode("utf-8", "surrogateescape").splitlines()
+        except OSError:
+            continue
+        title = f.stem
+        title_found = False
+        due = None
+        schedule_line = None
+        for i, raw in enumerate(lines, 1):
+            hm = H1.match(raw)
+            if hm and not title_found:
+                title = hm[1]
+                title_found = True
+            if SCHEDULE_MARK.search(raw):
+                ts = SCHEDULE_TS.search(raw)
+                if ts:
+                    try:
+                        due = datetime.strptime(f"{ts[1]} {ts[2]}", "%Y-%m-%d %H:%M")
+                        schedule_line = i
+                    except ValueError:
+                        pass
+        if due:
+            iso = due.isoformat(timespec="minutes")
+            out.append(Scheduled(f, schedule_line, due, title,
+                                 schedule_hash(str(f), iso)))
+    return out
+
+
+# ---------------------------------------------------------------- sidecars
+
+def _read_sidecar(path):
+    if not path.exists():
+        return []
+    return path.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
+
+
+def _append_sidecar(path, rows):
+    CACHE.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", errors="surrogateescape") as f:
+        for row in rows:
+            f.write("\t".join(str(x) for x in row) + "\n")
+
+
+def load_fired():
+    """-> set of (hash, due_iso)."""
+    out = set()
+    for line in _read_sidecar(FIRED_PATH):
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            out.add((parts[1], parts[0]))
+    return out
+
+
+def load_added():
+    """-> {hash: first_seen_iso}."""
+    out = {}
+    for line in _read_sidecar(ADDED_PATH):
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            out[parts[1]] = parts[0]
+    return out
+
+
+def update_added(pairs, when_iso):
+    """pairs: list of (hash, label). Appends unseen hashes to the added sidecar."""
+    seen = load_added()
+    new = []
+    for h, label in pairs:
+        if h not in seen:
+            new.append((when_iso, h, label[:80]))
+            seen[h] = when_iso
+    if new:
+        _append_sidecar(ADDED_PATH, new)
+    return seen
+
+
+def prune_fired(now_dt, max_age):
+    lines = _read_sidecar(FIRED_PATH)
+    if not lines:
+        return
+    kept = []
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        try:
+            due = datetime.fromisoformat(parts[0])
+        except ValueError:
+            kept.append(line)
+            continue
+        if now_dt - due < max_age:
+            kept.append(line)
+    FIRED_PATH.write_text("\n".join(kept) + ("\n" if kept else ""),
+                          encoding="utf-8", errors="surrogateescape")
+
+
+# ---------------------------------------------------------------- fire
+
+def fire_notification(title, body, open_path):
+    if os.environ.get("TD_DRY_RUN") == "1":
+        print(f"would fire: {tilde(open_path)}  {title}: {body}")
+        return
+    subprocess.run(["termux-notification",
+                    "--title", title,
+                    "--content", body,
+                    "--sound",
+                    "--action", f"termux-open {open_path}"], check=False)
+    nudge = Path("~/dotemacs/Nudge.wav").expanduser()
+    if nudge.exists():
+        subprocess.run(["termux-media-player", "play", str(nudge)],
+                       check=False, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_tick():
+    t = now()
+    catchup = timedelta(hours=int(os.environ.get("TD_CATCHUP_H", "6")))
+    lead = timedelta(minutes=int(os.environ.get("TD_LEAD_MIN", "0")))
+    items = scan_dedicated()
+    update_added([(s.hash, s.title) for s in items], t.isoformat(timespec="minutes"))
+    fired = load_fired()
+    for s in items:
+        fire_at = s.due - lead
+        if fire_at > t:
+            continue
+        if (t - fire_at) > catchup:
+            continue
+        due_iso = s.due.isoformat(timespec="minutes")
+        if (s.hash, due_iso) in fired:
+            continue
+        fire_notification("TODO", s.title, s.path)
+        _append_sidecar(FIRED_PATH, [(due_iso, s.hash, s.title[:80])])
+        fired.add((s.hash, due_iso))
+    prune_fired(t, catchup * 2)
+    return 0
+
+
+def _parse_list_args(args):
+    state = "all"
+    sort = "added"
+    i = 0
+    while i < len(args):
+        if args[i] == "--state" and i + 1 < len(args):
+            state = args[i + 1]; i += 2
+        elif args[i] == "--sort" and i + 1 < len(args):
+            sort = args[i + 1]; i += 2
+        else:
+            i += 1
+    if state not in ("todo", "today", "active", "all"):
+        sys.exit(f"bad --state: {state}")
+    if sort not in ("added", "modified"):
+        sys.exit(f"bad --sort: {sort}")
+    return state, sort
+
+
+def _row(b, has_file):
+    marker = " (*)" if has_file else ""
+    return f"- [{b.state}] {b.text}{marker}"
+
+
+def _existing_slugs():
+    """-> set of file-stem slugs under $TL_DIR (dedicated files, inbox excluded)."""
+    folder = task_folder()
+    if not folder.is_dir():
+        return set()
+    try:
+        inbox = td_file().resolve()
+    except OSError:
+        inbox = None
+    out = set()
+    for f in folder.glob("*.md"):
+        try:
+            if inbox and f.resolve() == inbox:
+                continue
+        except OSError:
+            continue
+        out.add(f.stem)
+    return out
+
+
+def build_list(args):
+    state, sort = _parse_list_args(args)
+    inbox, bullets = scan_inbox()
+    update_added([(b.hash, b.text) for b in bullets],
+                 now().isoformat(timespec="minutes"))
+    added = load_added()
+    existing = _existing_slugs()
+    bullet_slugs = {slugify(b.text) for b in bullets}
+    kept = [b for b in bullets if b.state in VISIBLE
+            and (state == "all" or STATE_NAMES[b.state] == state)]
+    if sort == "modified":
+        kept.sort(key=lambda b: b.path.stat().st_mtime, reverse=True)
+    else:
+        kept.sort(key=lambda b: added.get(b.hash, "0"), reverse=True)
+
+    def row(b):
+        return _row(b, slugify(b.text) in existing)
+
+    out = [LEGEND, ""]
+    if state == "all":
+        groups = {name: [] for name in GROUPS}
+        for b in kept:
+            groups[STATE_NAMES[b.state]].append(b)
+        for name in GROUPS:
+            items = groups[name]
+            if not items:
+                continue
+            out.append(f"# {name.upper()}")
+            out.append("")
+            for b in items:
+                out.append(row(b))
+            out.append("")
+    else:
+        out.append(f"# {state.upper()}")
+        out.append("")
+        for b in kept:
+            out.append(row(b))
+        out.append("")
+
+    orphans = sorted(existing - bullet_slugs)
+    if orphans and state == "all":
+        out.append("# ORPHANS")
+        out.append("")
+        for slug in orphans:
+            path = task_folder() / f"{slug}.md"
+            out.append(f"- {slug}  {tilde(path)}:1:1")
+        out.append("")
+    return "\n".join(out).rstrip() + "\n"
+
+
+def cmd_list(args):
+    text = build_list(args)
+    CACHE.mkdir(parents=True, exist_ok=True)
+    LIST_PATH.write_text(text, encoding="utf-8", errors="surrogateescape")
+    sys.stdout.write(text)
+    return 0
+
+
+def refresh_list():
+    """Write last-list.md without touching stdout (used after a state mutation)."""
+    try:
+        text = build_list([])
+        CACHE.mkdir(parents=True, exist_ok=True)
+        LIST_PATH.write_text(text, encoding="utf-8", errors="surrogateescape")
+    except Exception:
+        pass
+
+
+def cmd_next():
+    t = now()
+    future = [s for s in scan_dedicated() if s.due >= t]
+    if not future:
+        print("")
+        return 0
+    nxt = min(future, key=lambda s: s.due)
+    print(f"{nxt.due.strftime('%Y-%m-%d %H:%M')}  {nxt.title}")
+    return 0
+
+
+def cmd_new(args):
+    state_name = "todo"
+    i = 0
+    while i < len(args):
+        if args[i] == "--state" and i + 1 < len(args):
+            state_name = args[i + 1]; i += 2
+        else:
+            i += 1
+    if state_name not in STATE_FROM_NAME:
+        sys.exit(f"bad --state: {state_name}")
+    sys.stdout.write(f"- [{STATE_FROM_NAME[state_name]}] ")
+    return 0
+
+
+def cmd_promote():
+    """stdin: a bullet line. Creates/reuses ~/tasks/<slug>.md; echoes bullet unchanged."""
+    raw = sys.stdin.read().rstrip("\n")
+    m = TASK.match(raw)
+    if not m:
+        sys.exit("not a bullet line")
+    core = LINK.sub("", MARKER.sub("", m["text"])).strip()
+    if not core:
+        sys.exit("empty bullet text")
+    slug = slugify(core)
+    folder = task_folder()
+    folder.mkdir(parents=True, exist_ok=True)
+    dedicated = folder / f"{slug}.md"
+    if not dedicated.exists():
+        dedicated.write_text(f"# {core}\n\n",
+                             encoding="utf-8", errors="surrogateescape")
+    sys.stdout.write(f"{m['indent']}- [{m['state']}] {core}")
+    return 0
+
+
+def cmd_jump(args):
+    """Print ~/tasks/<slug>.md if it exists for the bullet at --from PATH:LINE.
+
+    Fallback (file missing, line unreadable, not a bullet) prints PATH so that
+    `:open %sh{td jump ...}` becomes a no-op reopen of the current buffer.
+    """
+    source = None
+    lineno = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--from" and i + 1 < len(args):
+            spec = args[i + 1]
+            m = re.match(r"^(.+):(\d+)$", spec)
+            if m:
+                source = Path(m[1]).expanduser()
+                lineno = int(m[2])
+            i += 2
+        else:
+            i += 1
+    fallback = str(source) if source else str(td_file())
+    if not source or not source.is_file():
+        print(fallback)
+        return 0
+    try:
+        lines = source.read_bytes().decode("utf-8", "surrogateescape").splitlines()
+    except OSError:
+        print(fallback)
+        return 0
+    if lineno is None or lineno < 1 or lineno > len(lines):
+        print(fallback)
+        return 0
+    raw = lines[lineno - 1]
+    # Orphan row (and legacy agenda rows): line ends with `path:line:col` —
+    # the path is the jump target.
+    tail = re.search(r"(\S+):\d+:\d+\s*$", raw)
+    if tail:
+        candidate = Path(tail[1]).expanduser()
+        if candidate.is_file():
+            print(str(candidate))
+            return 0
+    bm = TASK.match(raw)
+    if not bm:
+        print(fallback)
+        return 0
+    slug = slugify(bm["text"])
+    target = task_folder() / f"{slug}.md"
+    print(str(target) if target.is_file() else fallback)
+    return 0
+
+
+def _rewrite_checkbox(path, lineno, state):
+    """Rewrite the checkbox char at path:lineno. -> True on success."""
+    data = path.read_bytes().decode("utf-8", "surrogateescape")
+    lines = data.splitlines(keepends=True)
+    if lineno < 1 or lineno > len(lines):
+        return False
+    new = CHECKBOX.sub(f"- [{state}]", lines[lineno - 1], count=1)
+    if new == lines[lineno - 1]:
+        return False
+    lines[lineno - 1] = new
+    path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
+    return True
+
+
+def cmd_set(args):
+    if len(args) < 3:
+        sys.exit("usage: td set PATH LINE STATE")
+    path = Path(args[0]).expanduser()
+    try:
+        lineno = int(args[1])
+    except ValueError:
+        sys.exit("line must be integer")
+    state = args[2]
+    if state not in STATE_NAMES:
+        sys.exit(f"bad state: {state!r}")
+    if not path.is_file():
+        sys.exit(f"no such file: {path}")
+    if not _rewrite_checkbox(path, lineno, state):
+        sys.exit(f"no checkbox at {path}:{lineno}")
+    return 0
+
+
+def cmd_toggle(args):
+    """Toggle state on stdin bullet; propagate to $TD_FILE when called from
+    outside it (e.g., the agenda buffer) via first-exact-text-match."""
+    if not args:
+        sys.exit("usage: td toggle STATE [--from PATH]")
+    state = args[0]
+    if state not in STATE_NAMES:
+        sys.exit(f"bad state: {state!r}")
+    from_path = None
+    i = 1
+    while i < len(args):
+        if args[i] == "--from" and i + 1 < len(args):
+            from_path = Path(args[i + 1]).expanduser()
+            i += 2
+        else:
+            i += 1
+    raw = sys.stdin.read().rstrip("\n")
+    bm = TASK.match(raw)
+    if not bm:
+        sys.stdout.write(raw)
+        return 0
+    new_state = " " if bm["state"] == state else state
+    new_raw = CHECKBOX.sub(f"- [{new_state}]", raw, count=1)
+    # Propagate to inbox when the caller isn't editing $TD_FILE itself.
+    inbox = td_file()
+    try:
+        same = from_path and from_path.resolve() == inbox.resolve()
+    except OSError:
+        same = False
+    if from_path and not same and inbox.is_file():
+        _retag_in_file(inbox, bm["text"], bm["state"], new_state)
+        refresh_list()
+    sys.stdout.write(new_raw)
+    return 0
+
+
+def _retag_in_file(path, text, old_state, new_state):
+    """Find the first `- [old_state] <same core text>` line and flip its checkbox."""
+    needle = MARKER.sub("", LINK.sub("", text)).strip()
+    data = path.read_bytes().decode("utf-8", "surrogateescape")
+    lines = data.splitlines(keepends=True)
+    for i, raw in enumerate(lines):
+        m = TASK.match(raw.rstrip("\n"))
+        if not m or m["state"] != old_state:
+            continue
+        core = MARKER.sub("", LINK.sub("", m["text"])).strip()
+        if core == needle:
+            lines[i] = CHECKBOX.sub(f"- [{new_state}]", raw, count=1)
+            path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
+            return True
+    return False
+
+
+def cmd_fire(args):
+    """td fire PATH -> fire the SCHEDULE in that dedicated file now."""
+    if not args:
+        sys.exit("usage: td fire PATH")
+    path = Path(args[0]).expanduser()
+    if not path.is_file():
+        sys.exit(f"no such file: {path}")
+    lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines()
+    title = path.stem
+    title_found = False
+    due = None
+    for raw in lines:
+        hm = H1.match(raw)
+        if hm and not title_found:
+            title = hm[1]; title_found = True
+        if SCHEDULE_MARK.search(raw):
+            ts = SCHEDULE_TS.search(raw)
+            if ts:
+                try:
+                    due = datetime.strptime(f"{ts[1]} {ts[2]}", "%Y-%m-%d %H:%M")
+                except ValueError:
+                    pass
+    fire_notification("TODO", title, path)
+    due_iso = (due or now()).isoformat(timespec="minutes")
+    _append_sidecar(FIRED_PATH,
+                    [(due_iso, schedule_hash(str(path), due_iso), title[:80])])
+    return 0
+
+
+def cmd_install():
+    TICK_SHIM.parent.mkdir(parents=True, exist_ok=True)
+    TICK_SHIM.write_text(
+        f"#!/bin/sh\nexec {sys.executable} {Path(__file__).resolve()} tick\n")
+    TICK_SHIM.chmod(0o755)
+    subprocess.run(["termux-job-scheduler", "--cancel", str(JOB_ID)],
+                   check=False, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL)
+    r = subprocess.run([
+        "termux-job-scheduler",
+        "--job-id", str(JOB_ID),
+        "--script", str(TICK_SHIM),
+        "--period-ms", "900000",
+        "--persisted", "true",
+    ])
+    if r.returncode != 0:
+        return r.returncode
+    print(f"td: installed, job-id {JOB_ID}, every 15 min, shim at {tilde(TICK_SHIM)}")
+    return 0
+
+
+def cmd_uninstall():
+    subprocess.run(["termux-job-scheduler", "--cancel", str(JOB_ID)],
+                   check=False, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL)
+    if TICK_SHIM.exists():
+        TICK_SHIM.unlink()
+    print(f"td: uninstalled, job-id {JOB_ID}")
+    return 0
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else ""
+    rest = argv[2:]
+    if cmd == "install":
+        return cmd_install()
+    if cmd == "uninstall":
+        return cmd_uninstall()
+    if cmd == "tick":
+        return cmd_tick()
+    if cmd == "list":
+        return cmd_list(rest)
+    if cmd == "next":
+        return cmd_next()
+    if cmd == "new":
+        return cmd_new(rest)
+    if cmd == "promote":
+        return cmd_promote()
+    if cmd == "jump":
+        return cmd_jump(rest)
+    if cmd == "set":
+        return cmd_set(rest)
+    if cmd == "toggle":
+        return cmd_toggle(rest)
+    if cmd == "fire":
+        return cmd_fire(rest)
+    if cmd == "test":
+        return run_tests("-v" in rest)
+    sys.exit(__doc__)
+
+
+# -------------------------------------------------------------------- tests
+
+def run_tests(verbose=False):
+    import subprocess as sp
+    import tempfile
+    import unittest
+
+    NOW = "2026-10-10 11:00"
+    TD = os.path.abspath(__file__)
+
+    class Case(unittest.TestCase):
+        maxDiff = None
+
+        def setUp(self):
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            self.home = Path(tmp.name)
+            self.tasks = self.home / "tasks"
+            self.tasks.mkdir()
+            self.cache = self.home / ".cache" / "td"
+            self.inbox = self.tasks / "todo.md"
+
+        def put_inbox(self, text):
+            self.inbox.write_bytes(text.encode("utf-8", "surrogateescape"))
+            return self.inbox
+
+        def put_dedicated(self, name, text):
+            p = self.tasks / name
+            p.write_bytes(text.encode("utf-8", "surrogateescape"))
+            return p
+
+        def td(self, *args, stdin="", now_=NOW, **env):
+            e = {**os.environ, "HOME": str(self.home), "TL_DIR": str(self.tasks),
+                 "TL_NOW": now_, "TD_DRY_RUN": "1", **env}
+            r = sp.run([sys.executable, TD, *args], env=e, capture_output=True,
+                       input=stdin.encode("utf-8", "surrogateescape"), check=True)
+            return r.stdout.decode("utf-8", "surrogateescape")
+
+        def read_cache(self, name):
+            p = self.cache / name
+            return p.read_text(encoding="utf-8", errors="surrogateescape") if p.exists() else ""
+
+    class Parse(unittest.TestCase):
+        def test_bullet_shapes(self):
+            p = Path("x.md")
+            b = parse_bullet(p, 1, "- [ ] call jon")
+            self.assertEqual((b.state, b.text, b.tags), (" ", "call jon", []))
+            b = parse_bullet(p, 2, "- [y] pay rent #errand")
+            self.assertEqual((b.state, b.tags), ("y", ["errand"]))
+            b = parse_bullet(p, 3, "  - [a] indented")
+            self.assertEqual((b.indent, b.state), ("  ", "a"))
+            self.assertIsNone(parse_bullet(p, 4, "not a task"))
+
+        def test_hash_invariant_under_link_suffix(self):
+            p = "/x.md"
+            a = bullet_hash(p, "refactor td parser")
+            b = bullet_hash(p, "refactor td parser → ~/tasks/refactor-td-parser.md")
+            self.assertEqual(a, b)
+            c = bullet_hash(p, "refactor td parser V2")
+            self.assertNotEqual(a, c)
+
+        def test_slugify(self):
+            self.assertEqual(slugify("Costco run!"), "costco-run")
+            self.assertEqual(slugify("costCo RUN"), "costco-run")
+            self.assertEqual(slugify("hello / world"), "hello-world")
+            self.assertEqual(slugify("___"), "untitled")
+
+    class List(Case):
+        def test_groups_and_sort(self):
+            self.put_inbox("- [ ] call jon\n- [a] refactor\n- [y] pay rent\n")
+            out = self.td("list")
+            self.assertIn(LEGEND, out)
+            self.assertLess(out.index("# ACTIVE"), out.index("# TODAY"))
+            self.assertLess(out.index("# TODAY"), out.index("# TODO"))
+            for word in ("refactor", "call jon", "pay rent"):
+                self.assertIn(word, out)
+
+        def test_filter_state(self):
+            self.put_inbox("- [ ] a\n- [y] b\n- [a] c\n- [x] d\n")
+            out = self.td("list", "--state", "today")
+            self.assertIn("# TODAY", out)
+            self.assertIn("- [y] b", out)
+            self.assertNotIn("- [ ] a", out)
+            self.assertNotIn("- [a] c", out)
+
+        def test_done_and_ignore_hidden(self):
+            self.put_inbox("- [x] done\n- [X] also done\n- [!] ignore\n- [ ] visible\n")
+            out = self.td("list")
+            self.assertIn("visible", out)
+            for word in ("done", "also done", "ignore"):
+                self.assertNotIn(word, out)
+
+        def test_bullet_rows_have_no_path(self):
+            self.put_inbox("- [ ] call jon\n")
+            out = self.td("list")
+            self.assertIn("- [ ] call jon", out)
+            self.assertNotIn("todo.md:", out)
+
+        def test_orphan_rows_keep_path(self):
+            self.put_inbox("- [ ] alpha\n")
+            self.put_dedicated("costco-run.md", "# Costco run!\n")
+            out = self.td("list")
+            self.assertIn("# ORPHANS", out)
+            self.assertRegex(out, r"- costco-run\s+~/tasks/costco-run\.md:1:1")
+
+        def test_writes_cache_file(self):
+            self.put_inbox("- [ ] call jon\n")
+            self.td("list")
+            self.assertIn("call jon", self.read_cache("last-list.md"))
+
+        def test_only_inbox_scanned(self):
+            self.put_inbox("- [ ] from inbox\n")
+            self.put_dedicated("other.md", "- [ ] from dedicated\n")
+            out = self.td("list")
+            self.assertIn("from inbox", out)
+            self.assertNotIn("from dedicated", out)
+
+        def test_sort_modified(self):
+            p = self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
+            os.utime(p, (0, 1000))
+            out = self.td("list", "--sort", "modified")
+            # single file, order comes from file order
+            self.assertIn("alpha", out)
+            self.assertIn("bravo", out)
+
+    class Tick(Case):
+        def test_schedule_fires(self):
+            self.put_dedicated("rent.md",
+                               "# rent\nSCHEDULE: 2026-10-10 10:55\n")
+            out = self.td("tick")
+            self.assertIn("would fire", out)
+            self.assertIn("rent", out)
+
+        def test_schedule_flexible_tl_style(self):
+            # tl-style "space . i" line: `YYYY-MM-DD HH:MM - SCHEDULE: body`
+            self.put_dedicated("rent.md",
+                               "# rent\n2026-10-10 10:55 - SCHEDULE: pay it\n")
+            out = self.td("tick")
+            self.assertIn("would fire", out)
+            self.assertIn("rent", out)
+
+        def test_schedule_requires_both_marker_and_date(self):
+            self.put_dedicated("nope1.md", "# nope\n2026-10-10 10:55 - just a log\n")
+            self.put_dedicated("nope2.md", "# nope\nSCHEDULE: see you later\n")
+            out = self.td("tick")
+            self.assertNotIn("would fire", out)
+
+        def test_future_not_fired(self):
+            self.put_dedicated("later.md",
+                               "# later\nSCHEDULE: 2026-10-11 09:00\n")
+            out = self.td("tick")
+            self.assertNotIn("would fire", out)
+
+        def test_dedup(self):
+            self.put_dedicated("rent.md",
+                               "# rent\nSCHEDULE: 2026-10-10 10:55\n")
+            self.td("tick")
+            second = self.td("tick")
+            self.assertNotIn("would fire", second)
+
+        def test_reschedule_rearms(self):
+            p = self.put_dedicated("rent.md",
+                                   "# rent\nSCHEDULE: 2026-10-10 10:55\n")
+            self.td("tick")
+            p.write_text("# rent\nSCHEDULE: 2026-10-10 10:57\n")
+            out = self.td("tick")
+            self.assertIn("would fire", out)
+
+        def test_catchup_window(self):
+            self.put_dedicated("stale.md",
+                               "# stale\nSCHEDULE: 2026-10-10 04:00\n")
+            out = self.td("tick")
+            self.assertNotIn("would fire", out)
+
+        def test_lead_minutes(self):
+            self.put_dedicated("rent.md",
+                               "# rent\nSCHEDULE: 2026-10-10 11:10\n")
+            out = self.td("tick", TD_LEAD_MIN="15")
+            self.assertIn("would fire", out)
+
+        def test_no_schedule_no_fire(self):
+            self.put_dedicated("note.md", "# just a note\n\nsome content\n")
+            out = self.td("tick")
+            self.assertNotIn("would fire", out)
+
+        def test_inbox_bullets_dont_fire(self):
+            self.put_inbox("- [ ] no fire please\n")
+            out = self.td("tick")
+            self.assertNotIn("would fire", out)
+
+        def test_title_from_h1(self):
+            self.put_dedicated("x.md",
+                               "# nice title\nSCHEDULE: 2026-10-10 10:55\n")
+            out = self.td("tick")
+            self.assertIn("nice title", out)
+
+        def test_title_fallback_to_stem(self):
+            self.put_dedicated("stemmed.md",
+                               "SCHEDULE: 2026-10-10 10:55\n")
+            out = self.td("tick")
+            self.assertIn("stemmed", out)
+
+    class New(Case):
+        def test_defaults(self):
+            self.assertEqual(self.td("new"), "- [ ] ")
+
+        def test_states(self):
+            self.assertEqual(self.td("new", "--state", "today"), "- [y] ")
+            self.assertEqual(self.td("new", "--state", "active"), "- [a] ")
+
+    class Next(Case):
+        def test_soonest_future(self):
+            self.put_dedicated("a.md", "# a\nSCHEDULE: 2026-10-10 15:00\n")
+            self.put_dedicated("b.md", "# b\nSCHEDULE: 2026-10-10 12:00\n")
+            self.put_dedicated("c.md", "# c\nSCHEDULE: 2026-10-09 09:00\n")
+            out = self.td("next").strip()
+            self.assertTrue(out.startswith("2026-10-10 12:00"))
+            self.assertIn("b", out)
+
+        def test_none(self):
+            self.put_inbox("- [ ] no stamp\n")
+            self.assertEqual(self.td("next").strip(), "")
+
+    class Promote(Case):
+        def test_creates_dedicated_file(self):
+            out = self.td("promote", stdin="- [ ] Costco run!\n")
+            self.assertEqual(out.strip(), "- [ ] Costco run!")
+            p = self.tasks / "costco-run.md"
+            self.assertTrue(p.is_file())
+            txt = p.read_text()
+            self.assertIn("# Costco run!", txt)
+
+        def test_reuses_existing(self):
+            existing = self.put_dedicated(
+                "costco-run.md", "# Costco run!\nSCHEDULE: 2026-10-10 09:00\n\nnotes\n")
+            self.td("promote", stdin="- [ ] costCo RUN\n")
+            self.assertIn("notes", existing.read_text())
+
+        def test_preserves_state_and_indent(self):
+            out = self.td("promote", stdin="  - [a] refactor TD parser\n")
+            self.assertEqual(out.strip(), "- [a] refactor TD parser")
+            self.assertTrue(out.startswith("  - "))
+
+        def test_strips_existing_link_from_bullet(self):
+            out = self.td("promote",
+                          stdin="- [y] Pay rent → ~/tasks/pay-rent.md\n")
+            self.assertEqual(out.strip(), "- [y] Pay rent")
+
+    class Marker(Case):
+        def test_bullet_with_dedicated_file_gets_marker(self):
+            self.put_inbox("- [a] refactor td parser\n- [ ] call jon\n")
+            self.put_dedicated("refactor-td-parser.md", "# refactor td parser\n")
+            out = self.td("list")
+            self.assertIn("- [a] refactor td parser (*)", out)
+            self.assertIn("- [ ] call jon", out)
+            self.assertNotIn("call jon (*)", out)
+
+        def test_orphans_section(self):
+            self.put_inbox("- [a] refactor td parser\n")
+            self.put_dedicated("refactor-td-parser.md", "# refactor td parser\n")
+            self.put_dedicated("costco-run.md", "# Costco run!\n")
+            out = self.td("list")
+            self.assertIn("# ORPHANS", out)
+            self.assertIn("costco-run", out)
+            self.assertNotIn("- refactor-td-parser", out)
+
+        def test_no_orphans_section_when_empty(self):
+            self.put_inbox("- [ ] alpha\n")
+            out = self.td("list")
+            self.assertNotIn("# ORPHANS", out)
+
+    class Jump(Case):
+        def test_jumps_to_dedicated_when_exists(self):
+            inbox = self.put_inbox("- [a] refactor td parser\n")
+            target = self.put_dedicated("refactor-td-parser.md",
+                                        "# refactor td parser\n")
+            out = self.td("jump", "--from", f"{inbox}:1").strip()
+            self.assertEqual(out, str(target))
+
+        def test_fallback_when_missing(self):
+            inbox = self.put_inbox("- [ ] call jon\n")
+            out = self.td("jump", "--from", f"{inbox}:1").strip()
+            self.assertEqual(out, str(inbox))
+
+        def test_fallback_on_non_bullet(self):
+            inbox = self.put_inbox("just a note\n")
+            out = self.td("jump", "--from", f"{inbox}:1").strip()
+            self.assertEqual(out, str(inbox))
+
+        def test_jump_from_agenda_row(self):
+            inbox = self.put_inbox("- [a] refactor td parser\n")
+            target = self.put_dedicated("refactor-td-parser.md",
+                                        "# refactor td parser\n")
+            # Simulate the user running `space . l` then pressing `space . p`
+            # from an agenda row in last-list.md.
+            self.td("list")
+            cache_list = self.home / ".cache" / "td" / "last-list.md"
+            lines = cache_list.read_text().splitlines()
+            lineno = next(i for i, line in enumerate(lines, 1)
+                          if "refactor td parser" in line and "- [a]" in line)
+            out = self.td("jump", "--from", f"{cache_list}:{lineno}").strip()
+            self.assertEqual(out, str(target))
+
+        def test_jump_from_orphan_row(self):
+            self.put_inbox("- [ ] alpha\n")
+            orphan = self.put_dedicated("costco-run.md", "# Costco run!\n")
+            self.td("list")
+            cache_list = self.home / ".cache" / "td" / "last-list.md"
+            lines = cache_list.read_text().splitlines()
+            lineno = next(i for i, line in enumerate(lines, 1)
+                          if "costco-run" in line)
+            out = self.td("jump", "--from", f"{cache_list}:{lineno}").strip()
+            self.assertEqual(out, str(orphan))
+
+    class SetToggle(Case):
+        def test_set_rewrites_checkbox(self):
+            p = self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
+            self.td("set", str(p), "2", "y")
+            self.assertEqual(p.read_text(), "- [ ] alpha\n- [y] bravo\n")
+
+        def test_set_bad_state(self):
+            self.put_inbox("- [ ] alpha\n")
+            with self.assertRaises(sp.CalledProcessError):
+                self.td("set", str(self.inbox), "1", "z")
+
+        def test_toggle_in_place_set(self):
+            out = self.td("toggle", "y", stdin="- [ ] alpha\n")
+            self.assertEqual(out.strip(), "- [y] alpha")
+
+        def test_toggle_in_place_unset(self):
+            out = self.td("toggle", "y", stdin="- [y] alpha\n")
+            self.assertEqual(out.strip(), "- [ ] alpha")
+
+        def test_toggle_from_agenda_mutates_source(self):
+            p = self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
+            agenda = self.home / ".cache" / "td" / "last-list.md"
+            out = self.td("toggle", "a", "--from", str(agenda),
+                          stdin="- [ ] bravo\n")
+            self.assertEqual(out.strip(), "- [a] bravo")
+            self.assertEqual(p.read_text(), "- [ ] alpha\n- [a] bravo\n")
+
+        def test_toggle_from_agenda_toggle_off(self):
+            p = self.put_inbox("- [a] alpha\n")
+            agenda = self.home / ".cache" / "td" / "last-list.md"
+            out = self.td("toggle", "a", "--from", str(agenda),
+                          stdin="- [a] alpha\n")
+            self.assertEqual(out.strip(), "- [ ] alpha")
+            self.assertEqual(p.read_text(), "- [ ] alpha\n")
+
+        def test_toggle_from_agenda_with_marker(self):
+            p = self.put_inbox("- [a] refactor td parser\n")
+            self.put_dedicated("refactor-td-parser.md", "# refactor td parser\n")
+            agenda = self.home / ".cache" / "td" / "last-list.md"
+            out = self.td("toggle", "a", "--from", str(agenda),
+                          stdin="- [a] refactor td parser (*)\n")
+            self.assertEqual(out.strip(), "- [ ] refactor td parser (*)")
+            self.assertEqual(p.read_text(), "- [ ] refactor td parser\n")
+
+        def test_toggle_from_inbox_no_double_write(self):
+            p = self.put_inbox("- [ ] alpha\n")
+            # Caller is TD_FILE itself: td toggle must NOT also mutate disk.
+            out = self.td("toggle", "y", "--from", str(p),
+                          stdin="- [ ] alpha\n")
+            self.assertEqual(out.strip(), "- [y] alpha")
+            # Disk still has old state — Helix will :write it with the new state.
+            self.assertEqual(p.read_text(), "- [ ] alpha\n")
+
+    class Fire(Case):
+        def test_fire_by_file(self):
+            p = self.put_dedicated("ping.md",
+                                   "# ping\nSCHEDULE: 2026-10-10 09:00\n")
+            out = self.td("fire", str(p))
+            self.assertIn("would fire", out)
+            self.assertIn("ping", out)
+
+    loader = unittest.defaultTestLoader
+    suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
+                               for c in (Parse, List, Tick, New, Next,
+                                         Promote, Marker, Jump, SetToggle, Fire))
+    ok = unittest.TextTestRunner(verbosity=2 if verbose else 1).run(suite).wasSuccessful()
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

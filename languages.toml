@@ -1,0 +1,119 @@
+[language-server.clangd]
+command = "clangd"
+# these flags make clangd robust in real projects
+args = [
+  "--background-index",
+  "--clang-tidy",
+  "--header-insertion=iwyu",
+  # tell clangd where your compilers live (helps with GCC projects too)
+  "--query-driver=/usr/bin/clang*;/usr/bin/g++*;/usr/bin/cc*;/usr/bin/c++*"
+]
+
+[[language]]
+name = "cpp"
+language-servers = ["clangd"]
+# add common roots so Helix finds the project AND clangd finds flags
+roots = [".git", "compile_commands.json", "CMakeLists.txt", ".clangd", "compile_flags.txt"]
+# (optional) if Helix mis-detects headers, list filetypes explicitly:
+# file-types = ["c","h","cpp","hpp","cc","hh","cxx","ixx","ipp"]
+
+
+[[language]]
+name = "rust"
+auto-format = true
+roots = ["Cargo.toml", "Cargo.lock"]
+
+[language.debugger]
+name = "lldb-dap"
+transport = "stdio"
+command = "lldb-dap"
+
+[[language.debugger.templates]]
+name = "binary"
+request = "launch"
+completion = [ { name = "binary", completion = "filename" } ]
+args = { program = "{0}", initCommands = [
+  "command script import /data/data/com.termux/files/usr/lib/rustlib/etc/lldb_lookup.py",
+  "command source -s 0 /data/data/com.termux/files/usr/lib/rustlib/etc/lldb_commands",
+  "type summary add -c -x \"^(alloc::([a-z_]+::)+)Vec<.+>$\" --category Rust",
+  "type summary add -c -x \"^(alloc::([a-z_]+::)+)VecDeque<.+>$\" --category Rust",
+  "type summary add -c -x \"^&(mut )?\\[.+\\]$\" --category Rust",
+] }
+
+[[language.debugger.templates]]
+name = "binary (with args)"
+request = "launch"
+completion = [
+  { name = "binary", completion = "filename" },
+  { name = "args" },
+]
+args = { program = "{0}", args = "{1}", initCommands = [
+  "command script import /data/data/com.termux/files/usr/lib/rustlib/etc/lldb_lookup.py",
+  "command source -s 0 /data/data/com.termux/files/usr/lib/rustlib/etc/lldb_commands",
+  "type summary add -c -x \"^(alloc::([a-z_]+::)+)Vec<.+>$\" --category Rust",
+  "type summary add -c -x \"^(alloc::([a-z_]+::)+)VecDeque<.+>$\" --category Rust",
+  "type summary add -c -x \"^&(mut )?\\[.+\\]$\" --category Rust",
+] }
+
+[language-server.rust-analyzer]
+command = "rust-analyzer"
+environment = { RUST_ANALYZER_INTERNALS_DO_NOT_USE ="1" }
+# command = "rust-analyzer-wrapper"
+
+[language-server.rust-analyzer.config]
+inlayHints.bindingModeHints.enable = false
+inlayHints.typeHints.hideClosureInitialization = false
+check = { command = "clippy" }
+# Disable proc-macros due to version mismatch
+procMacro.enable = false
+
+
+[language-server.ty]
+command = "ty"
+args = ["server"]
+
+[language-server.harper-ls]
+command = "harper-ls"
+args = ["--stdio"]
+
+[language-server.harper-ls.config]
+[language-server.harper-ls.config.harper-ls]
+
+[language-server.polski-ls]
+command = "polski-ls"
+args = ["--stdio"]
+
+
+[[language]]
+name = "python"
+language-id = "python"
+file-types = ["py"]
+roots = [".git", "CMakeLists.txt"]
+comment-token = "#"
+language-servers = [ "harper-ls", "ty" ]
+
+[language.debugger]
+name = "debugpy"
+transport = "stdio"
+command = "python"
+args = ["-m", "debugpy.adapter"]
+
+
+[[language.debugger.templates]]
+name = "source"
+request = "launch"
+completion = [ { name = "entrypoint", completion = "filename" } ]
+args = { program = "{0}" }
+
+
+[[language]]
+name = "plaintext"
+scope = "text.plain"
+file-types = ["txt"]
+language-id = "plaintext"
+language-servers = ["polski-ls"]
+
+[[language]]
+name = "markdown"
+language-servers = ["harper-ls"]
+comment-token = ["-", "+", "*", "- [ ]", ">"]

@@ -1,0 +1,141 @@
+
+ theme = "github_light"
+ 
+#theme = "acme"
+
+[editor.soft-wrap]
+enable = true
+wrap-indicator = "\t"
+
+[editor]
+scroll-lines = 1
+gutters = ["diagnostics", "spacer", "diff"]
+shell = ["bash", "-lc"]
+end-of-line-diagnostics = "disable"
+auto-completion = true
+completion-trigger-len = 3  
+#completion-auto-select=true
+
+
+completion-display = "statusline"
+completion-mouse-append-whitespace = true
+
+
+auto-reload = true
+
+[editor.cursorline]
+normal = true
+insert = false
+select = false
+
+[editor.statusline]
+left = ["mode", "spinner", "completion-suggestions", "file-name", "read-only-indicator",
+  "file-modification-indicator"]
+
+
+[keys.insert]
+# Press 'jk' quickly to leave insert mode
+#"a" = { "a" = "normal_mode" }
+# "j" = { "k" = "normal_mode" }
+"h" = { "h" = "normal_mode" }
+
+[keys.normal]
+C-4 = ":run-shell-command echo -n \"%(buffer_name)\" | xclip -selection clipboard"
+"}" = "goto_next_paragraph"
+"{" = "goto_prev_paragraph"
+# ryk rewind: poke the live --serve daemon (~10s of already-played PCM).
+# Same script Grok/Claude `/rr` will run. Needs ~/.local/bin/ryk-rewind and a
+# warm daemon (first `space+. d` / `ryk --send` auto-starts it). Helix stays
+# free because speak uses --send, not one-shot ryk. See kukuryku docs/rewind-plan.md.
+A-r = ":sh ryk-rewind"
+
+[keys.normal.g]
+    "\\" = ":sh echo 'https://...myaddress.../-/blob/master/%{buffer_name}#L%{cursor_line}' | xclip -selection clipboard"
+    "|" = ":sh echo 'https://...myaddress.../-/blob/'$(git branch --show-current)'/%{buffer_name}#L%{cursor_line}' | xclip -selection clipboard"
+
+
+[keys.normal.space."."]
+"." = ":insert-output date +\"<%%Y-%%m-%%d %%a>\""
+m = ":sh echo 'https://ADDRESS/-/blob/master/%{buffer_name}#L%{cursor_line}' | xclip -selection clipboard"
+b = ":sh echo 'https://ADDRESS/-/blob/'$(git branch --show-current)'/%{buffer_name}#L%{cursor_line}' | xclip -selection clipboard"
+x = [":pipe sed 's/^\\(.*\\[\\) \\(\\].*\\)$/\\1X\\2/; t; s/^\\(.*\\[\\)X\\(\\].*\\)$/\\1 \\2/'", ":write"]
+
+
+# with std err output
+# v = "@:: sh -c 'echo \"$0\" | codex exec --skip-git-repo-check resume --last -'<ret>"
+# V = "@:: sh -c 'echo \"$0\" | codex exec --skip-git-repo-check -'<ret>"
+
+
+
+v = "@:: sh -c 'echo \"$0\" | codex exec --skip-git-repo-check resume --last - 2<gt>/dev/null'<ret>"
+V = "@:: sh -c 'echo \"$0\" | codex exec --skip-git-repo-check - 2<gt>/dev/null'<ret>"
+
+# Some actions in cocontinue mode would need more permissin permissions
+c = "@:: claude -c -p --permission-mode acceptEdits 2<gt>/dev/null<ret>"
+C = "@:: claude -p 2<gt>/dev/null<ret>"
+
+# grok -p takes the next arg as the prompt; keep it last so the selection is appended
+g = "@:: grok -c --permission-mode acceptEdits -p 2<gt>/dev/null<ret>"
+G = "@:: grok -p 2<gt>/dev/null<ret>"
+
+# agy -p takes the next arg as the prompt; keep it last so the selection is appended
+a = "@:: agy -c --dangerously-skip-permissions -p 2<gt>/dev/null<ret>"
+A = "@:: agy --dangerously-skip-permissions -p 2<gt>/dev/null<ret>"
+
+# ryk TTS: pipe the selection to the warm daemon (`ryk --send`), not one-shot
+# `ryk`. One-shot blocks Helix until playback ends, so Alt-r rewind cannot
+# fire while audio is playing. --send returns once queued; --serve owns pacat.
+# `/spk` in Grok/Claude already --sends into the same daemon, so Alt-r also
+# rewinds that speech if Helix can take the key.
+d = "@:: /data/data/com.termux/files/home/PRJ/kukuryku/target/release/ryk --send<ret>"
+
+### Time logging ###
+
+# Time log helper for ~/.config/helix/bin/tl, task files in $TL_DIR, default ~/tasks
+# Start a new entry at the end of the buffer, so the latest is always last: "YYYY-MM-DD HH:MM - " then type the note.
+# First stops entries still running (started <12h ago): other task files on disk, this buffer via :pipe
+# (not :write + disk: a write in a key sequence lands only after the sequence).
+i = [":echo %sh{~/.config/helix/bin/tl stop --skip %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl stop -", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/tl start", "insert_at_line_end"]
+# Clock out: saves all, then waits in the command prompt for what you did ("# done: "); Enter ends the running
+# entry, whichever task file it is in, on disk (auto-reload shows it), with that text as its "# heading" bullet.
+# Empty: no heading. Esc: nothing happens. The text is a shell comment read back from $BASH_EXECUTION_STRING, so it
+# needs no quoting; only "%" is special (Helix expansions), "%%" types one. A macro so the prompt stays open.
+o = "@:write-all<ret>:sh ~/.config/helix/bin/tl out \"$BASH_EXECUTION_STRING\" # done: "
+# Recently modified task files, newest first, in a popup (no new buffer): open one with :o <path>
+r = ":sh ~/.config/helix/bin/tl recent"
+# Per-day summary of all task files, or just this file if it is not in the task folder (saves first so unsaved entries count)
+# align_view_top (zt) first: a popup opens below the cursor's screen row when 6 rows fit there, so it gets the full height.
+S = [":write", "align_view_top", ":sh ~/.config/helix/bin/tl summary --file %{buffer_name}"]
+
+### TODO scheduler ###
+
+# td — ~/.config/helix/bin/td. Inbox bullets live in $TD_FILE (default ~/tasks/todo.md).
+# States live in the checkbox: [ ] todo  [y] today  [a] active  [x] done  [!] ignore.
+# Scheduling lives in dedicated files: a `SCHEDULE: YYYY-MM-DD HH:MM` line fires
+# a Termux notification. Install the 15-min job once from the shell: `td install`.
+
+# Open the inbox file.
+t = ":open ~/tasks/todo.md"
+# Reusable agenda buffer, grouped ACTIVE / TODAY / TODO, newest-added at the top.
+# auto-reload = true refreshes the same buffer on re-run (no new window).
+l = [":sh ~/.config/helix/bin/td list >/dev/null", ":open /data/data/com.termux/files/home/.cache/td/last-list.md"]
+# Same agenda, sorted by file mtime (recently modified at the top).
+L = [":sh ~/.config/helix/bin/td list --sort modified >/dev/null", ":open /data/data/com.termux/files/home/.cache/td/last-list.md"]
+# Promote the current bullet to a dedicated ~/tasks/<slug>.md file (reuses if exists).
+# The bullet itself is left unchanged — the agenda renders ' (*)' next to bullets
+# whose slug has a dedicated file. `extend_to_line_bounds` first so :pipe gets the
+# whole line, not just the cursor char.
+P = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td promote", ":write", ":open %sh{~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}}"]
+# Jump: slugify the current bullet, open ~/tasks/<slug>.md if it exists. If not,
+# `td jump` prints the current buffer path, so :open becomes a no-op reopen.
+# Works from the inbox AND from an agenda row in last-list.md.
+p = ":open %sh{~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}}"
+# Toggle state of the current line between [ ] and [y]. If called from the
+# agenda buffer (--from != $TD_FILE), `td toggle` text-matches the bullet in
+# the inbox and flips it on disk; otherwise toggles the checkbox in place
+# (Helix saves normally).
+y = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle y --from %{buffer_name}"]
+# NOTE: `a` is already bound to `agy -c …` above (line ~82). Pick a free key
+# for the active-state toggle, e.g. uncomment one of:
+# A = ":pipe ~/.config/helix/bin/td toggle a"   # also taken (agy no-perms)
+# w = ":pipe ~/.config/helix/bin/td toggle a"   # mnemonic: "work on it"

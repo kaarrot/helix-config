@@ -1,0 +1,600 @@
+#!/usr/bin/env python3
+"""Time-log helper for Helix (keys: space . i / o / S).
+
+An entry is any line that starts with a date (optionally after indentation and
+a list bullet), so entries can sit anywhere in a file, in any order:
+
+    2026-10-09 09:30 - 10:45 = 1h 15min  note
+    - 2026-10-09 13:00 -                 (still running)
+
+The "= 1h 15min" part is only a convenience; totals are always recomputed from
+the start/end times.
+
+    tl start            print "YYYY-MM-DD HH:MM - " (no newline)
+    tl close            stdin = region of text. Every entry line in it gets its end filled with
+                        now if missing and its duration refreshed; other lines are untouched.
+    tl out "$BASH_EXECUTION_STRING" # done: TEXT
+                        end, at now, the latest-started entry still running (started in the last
+                        12h) in the task files on disk. TEXT becomes the "# heading" right above it,
+                        or is added to the one there (" - TEXT"). Comment form, so TEXT needs no quoting.
+    tl stop [--skip F]  end, at now, every entry still running that started less than 12h ago, in
+                        the task files on disk except F; print where ("stopped ~/tasks/x.md:3").
+    tl stop -           the same for stdin, written to stdout byte for byte otherwise.
+    tl recent [N]       numbered list of the N (default 9) most recently modified task files
+    tl recent --nth K [ELSE]
+                        path of the Kth most recently modified task file (ELSE if none)
+    tl summary [--file F] [N|all]
+                        per-day totals for the last N days (default 14) over the task folder.
+                        With --file F, if F is not a .txt/.md directly in the task folder,
+                        summarize just F instead. Entries with no end time, of any date, are
+                        listed first. Locations print as ~/path:line, for gf. Under each day, a
+                        line per task (total and title: its file's first line), then the nearest
+                        markdown "# heading" above its entries, as bullets (but the title).
+    tl test [-v]        run the tests at the end of this file (temporary task folders, faked clock).
+
+Task files: $TL_DIR (default ~/tasks), *.txt and *.md. $TL_NOW="YYYY-MM-DD HH:MM" fakes the clock.
+"""
+import os
+import re
+import sys
+from collections import defaultdict, namedtuple
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+PREFIX = r"\s*(?:[-*]\s+(?:\[[ xX]\]\s+)?)?"  # indent + optional "- " / "* " / "- [ ] "
+ENTRY = re.compile(
+    rf"""^(?P<prefix>{PREFIX})
+        (?P<date>\d{{4}}-\d{{2}}-\d{{2}})\s+
+        (?P<start>\d{{1,2}}:\d{{2}})\s*[-–]
+        (?:\s*(?P<end>\d{{1,2}}:\d{{2}}))?
+        (?:\s*=\s*(?:\d+h)?\s*(?:\d+min)?)?
+        (?:\s+(?P<note>\S.*?))?\s*$""",
+    re.X,
+)
+# Looks like an attempt at an entry (date + time); used to flag lines ENTRY rejects.
+ATTEMPT = re.compile(rf"^{PREFIX}(\d{{4}}-\d{{2}}-\d{{2}})\s+\d{{1,2}}:")
+# Markdown heading; "#+BEGIN_SRC", "#tag" and an empty "# " are not one.
+HEADING = re.compile(r"^ {0,3}#{1,6}\s+(\S.*?)(?:\s+#+)?\s*$")
+# Code block fence (markdown or org); a "# " line inside a block is a comment, not a heading.
+FENCE = re.compile(r"^\s*(?:```|~~~|#\+(?:BEGIN|END)_)", re.I)
+
+Entry = namedtuple("Entry", "prefix date start end note")
+
+MAX_SANE = 12 * 60  # longer entries are reported as probable typos
+
+
+def now():
+    fake = os.environ.get("TL_NOW")
+    return datetime.strptime(fake, "%Y-%m-%d %H:%M") if fake else datetime.now()
+
+
+def to_min(hhmm):
+    h, m = map(int, hhmm.split(":"))
+    if h > 23 or m > 59:
+        raise ValueError(hhmm)
+    return h * 60 + m
+
+
+def hhmm(minutes):
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def dur_text(minutes):
+    return f"{minutes // 60}h {minutes % 60:02d}min"
+
+
+def duration(start, end):
+    return (end - start) % 1440  # end before start = crossed midnight
+
+
+def parse(line):
+    """-> (Entry, None) | (None, error) | (None, None) when not an entry line."""
+    if not ATTEMPT.match(line):
+        return None, None
+    m = ENTRY.match(line)
+    if not m:
+        return None, "can't parse"
+    note = m["note"] or ""
+    if re.match(r"\d{1,2}:", note):  # e.g. end typed as "10:4"
+        return None, "can't parse"
+    try:
+        date.fromisoformat(m["date"])
+        start = to_min(m["start"])
+        end = to_min(m["end"]) if m["end"] else None
+    except ValueError:
+        return None, "invalid date or time"
+    return Entry(m["prefix"], m["date"], start, end, note), None
+
+
+def started_at(e):
+    return datetime.strptime(f"{e.date} {hhmm(e.start)}", "%Y-%m-%d %H:%M")
+
+
+def render(e, end):
+    text = f"{e.prefix}{e.date} {hhmm(e.start)} - {hhmm(end)} = {dur_text(duration(e.start, end))}"
+    return f"{text}  {e.note}" if e.note else text
+
+
+def cmd_start():
+    sys.stdout.write(now().strftime("%Y-%m-%d %H:%M - "))
+
+
+def cmd_close():
+    t = now()
+    out = []
+    for raw in sys.stdin.read().splitlines(keepends=True):
+        body = raw.rstrip("\r\n")
+        e, _ = parse(body)  # unparseable and non-entry lines pass through untouched
+        if e is not None:
+            end = e.end if e.end is not None else t.hour * 60 + t.minute
+            raw = render(e, end) + raw[len(body):]
+        out.append(raw)
+    sys.stdout.write("".join(out))
+
+
+def stop_lines(lines, t):
+    """End, in place at t, the running entries in lines started less than MAX_SANE ago -> their line numbers."""
+    stopped = []
+    for i, raw in enumerate(lines):
+        body = raw.rstrip("\r\n")
+        e, _ = parse(body)
+        if e is None or e.end is not None:
+            continue
+        if not timedelta(0) <= t - started_at(e) < timedelta(minutes=MAX_SANE):
+            continue  # older ones are left for `summary` to flag
+        lines[i] = render(e, t.hour * 60 + t.minute) + raw[len(body):]
+        stopped.append(i + 1)
+    return stopped
+
+
+def cmd_stop(args):
+    t = now()
+    # bytes in and out, so line endings and odd bytes survive a whole-buffer :pipe
+    if args == ["-"]:
+        lines = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").splitlines(keepends=True)
+        stop_lines(lines, t)
+        sys.stdout.buffer.write("".join(lines).encode("utf-8", "surrogateescape"))
+        return 0
+    skip = Path(args[1]) if args[:1] == ["--skip"] and len(args) > 1 else None
+    _, files = recent_files(None)
+    stopped = []
+    for path in files or []:
+        if skip and skip.is_file() and path.samefile(skip):
+            continue
+        lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
+        closed = stop_lines(lines, t)
+        if closed:
+            path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
+            stopped += [f"{tilde(path)}:{n}" for n in closed]
+    print(f"stopped {', '.join(stopped)}" if stopped else "", end="")  # no newline: for :echo %sh{}
+    return 0
+
+
+# Ends the prompt `space . o` leaves open: what you type after it is a shell comment, so it needs no quoting.
+DONE_MARK = '"$BASH_EXECUTION_STRING" # done:'
+
+
+def cmd_out(invocation=""):
+    t = now()
+    comment = invocation.split(DONE_MARK, 1)[1].strip() if DONE_MARK in invocation else ""
+    _, files = recent_files(None)
+    running = []  # (start, path, index) of entries running, started in the last 12h
+    for path in files or []:
+        for i, raw in enumerate(path.read_bytes().decode("utf-8", "surrogateescape").splitlines()):
+            e, _ = parse(raw)
+            if e and e.end is None and timedelta(0) <= t - started_at(e) < timedelta(minutes=MAX_SANE):
+                running.append((started_at(e), str(path), i))
+    if not running:
+        print("nothing running (older open entries are left for the summary to flag)")
+        return 0
+    _, path, i = max(running)
+    path = Path(path)
+    lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
+    body = lines[i].rstrip("\r\n")
+    eol = lines[i][len(body):]
+    lines[i] = render(parse(body)[0], t.hour * 60 + t.minute) + eol
+    if comment:
+        above = lines[i - 1].rstrip("\r\n") if i else ""
+        if i and re.match(r" {0,3}#{1,6}(\s|$)", above):  # a heading already: add to it ("# " left empty counts)
+            lines[i - 1] = (f"{above} - {comment}" if HEADING.match(above) else f"# {comment}") + lines[i - 1][len(above):]
+        else:
+            lines.insert(i, f"# {comment}{eol or chr(10)}")
+            i += 1
+    path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
+    print(f"stopped {tilde(path)}:{i + 1}" + (f"  # {comment}" if comment else ""))
+    return 0
+
+
+def tilde(path):
+    home = str(Path.home())
+    return "~" + str(path)[len(home):] if str(path).startswith(home + os.sep) else str(path)
+
+
+def recent_files(limit):
+    folder = Path(os.environ.get("TL_DIR", "~/tasks")).expanduser()
+    if not folder.is_dir():
+        return folder, None
+    files = [*folder.glob("*.txt"), *folder.glob("*.md")]
+    return folder, sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)[:limit]
+
+
+def cmd_recent(args):
+    """tl recent [N]: numbered list of the N (default 9) most recently modified task files.
+    tl recent --nth K [ELSE]: print just the path of the Kth one (no newline), for use in %sh{};
+    if there is no Kth file print ELSE (the key bindings pass the current buffer, so :open is a no-op)."""
+    if args[:1] == ["--nth"]:
+        k = int(args[1])
+        _, files = recent_files(k)
+        found = files and len(files) >= k
+        print(files[-1] if found else args[2] if len(args) > 2 else "", end="")
+        return 0
+    folder, files = recent_files(int(args[0]) if args else 9)
+    if files is None:
+        print(f"Task folder not found: {folder}\n(create it or set TL_DIR)")
+        return 0
+    for i, f in enumerate(files, 1):
+        shown = tilde(f)
+        stamp = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        entries = [e for e, _ in map(parse, f.read_text(errors="replace").splitlines()) if e]
+        last = max(entries, key=lambda e: (e.date, e.start), default=None)
+        print(f"{i}  {shown}   {stamp}")
+        if last:
+            end = f" {hhmm(last.end)}" if last.end is not None else ""
+            print(f"     last: {last.date} {hhmm(last.start)} -{end}  {last.note}".rstrip())
+    return 0
+
+
+def cmd_summary(arg, current=None):
+    folder = Path(os.environ.get("TL_DIR", "~/tasks")).expanduser()
+    single = None  # current file when it lives outside the task folder
+    if current and Path(current).expanduser().is_file():
+        f = Path(current).expanduser().resolve()
+        if not (f.parent == folder.resolve() and f.suffix in (".txt", ".md")):
+            single = f
+    if single is None and not folder.is_dir():
+        # exit 0: Helix discards stdout of a failed command and only shows "status 1"
+        print(f"Task folder not found: {folder}\n(create it or set TL_DIR)")
+        return 0
+    today = now().date()
+    if arg not in (None, "all") and not arg.isdigit():
+        sys.exit(__doc__)
+    days = None if arg == "all" else int(arg or 14)
+    first = None if days is None else (today - timedelta(days=days - 1)).isoformat()
+
+    totals = defaultdict(lambda: defaultdict(int))  # date -> task -> minutes
+    done = defaultdict(lambda: defaultdict(dict))   # date -> task -> heading -> earliest start
+    spans = defaultdict(list)                       # date -> [(start, end, file, line)]
+    seen = {}                                       # (file, date, start, end) -> line
+    warns = []                                      # (file, line, message)
+    running = []                                    # (file, line, entry, heading), whatever the date
+    titles = {}                                     # task -> its first line, "# " dropped, unless an entry
+
+    files = [single] if single else sorted([*folder.glob("*.txt"), *folder.glob("*.md")])
+    for path in files:
+        where = tilde(path)
+        heading, fenced = "", False
+        lines = path.read_text(errors="replace").splitlines()
+        first_line = next((line.strip() for line in lines if line.strip()), "")
+        h = HEADING.match(first_line)
+        titles[path.stem] = h.group(1) if h else "" if first_line.startswith("#") or ATTEMPT.match(first_line) else first_line
+        for n, line in enumerate(lines, 1):
+            if FENCE.match(line):
+                fenced = not fenced
+            elif not fenced and HEADING.match(line):
+                heading = HEADING.match(line).group(1)
+            e, err = parse(line)
+            if e is None and err is None:
+                continue
+            if e and e.end is None:
+                running.append((where, n, e, heading))
+                continue
+            day = e.date if e else ATTEMPT.match(line).group(1)
+            if first and day < first:
+                continue
+            if err:
+                warns.append((where, n, f'{err}: "{line.strip()}"'))
+                continue
+            dur = duration(e.start, e.end)
+            totals[e.date][path.stem] += dur
+            if heading:
+                headings = done[e.date][path.stem]
+                headings[heading] = min(headings.get(heading, e.start), e.start)
+            if dur > MAX_SANE:
+                warns.append((where, n, f"duration {dur_text(dur)}, typo?"))
+            if e.date > today.isoformat():
+                warns.append((where, n, f"date {e.date} is in the future"))
+            key = (where, e.date, e.start, e.end)
+            if key in seen:
+                warns.append((where, n, f"duplicate of line {seen[key]}"))
+                continue
+            seen[key] = n
+            spans[e.date].append((e.start, e.start + dur, where, n))
+
+    for day, items in spans.items():
+        items.sort()
+        prev = items[0]
+        for cur in items[1:]:
+            if cur[0] < prev[1]:
+                warns.append((cur[2], cur[3], f"overlaps {prev[2]}:{prev[3]}"))
+            if cur[1] > prev[1]:
+                prev = cur
+
+    if running:
+        print("Still running:")
+        loc = max(len(f"{f}:{n}") for f, n, _, _ in running)
+        for f, n, e, heading in sorted(running, key=lambda r: (r[2].date, r[2].start), reverse=True):
+            so_far = max(int((now() - started_at(e)).total_seconds()) // 60, 0)
+            label = " - ".join(s for s in (heading, e.note) if s)
+            print(f"  {f + ':' + str(n):<{loc}}  {e.date} {hhmm(e.start)}  {dur_text(so_far):>9}  {label}".rstrip())
+        print()
+    scope = "all days" if days is None else f"last {days} day{'s' * (days != 1)}"
+    print(f"Time summary, {scope} ({single or folder})\n")
+    if not totals:
+        print("No complete entries found.")
+    width = max((len(t) for d in totals.values() for t in d), default=0)
+    grand = 0
+    for day in sorted(totals, reverse=True):
+        day_total = sum(totals[day].values())
+        grand += day_total
+        wd = date.fromisoformat(day).strftime("%a")
+        print(f"{day} {wd}  {dur_text(day_total):>9}")
+        for task, minutes in sorted(totals[day].items()):
+            if not single:
+                print(f"    {task:<{width}}  {dur_text(minutes):>9}  {titles[task]}".rstrip())
+            headings = done[day][task]  # what was done, in time order; the title is on the task line already
+            for heading in sorted(headings, key=headings.get):
+                if single or heading != titles[task]:
+                    print(f"{'    ' if single else '      '}- {heading}")
+    if totals:
+        print(f"{'-' * 5}\nTotal ({len(totals)} day{'s' * (len(totals) != 1)})  {dur_text(grand)}")
+    if warns:
+        loc = max(len(f"{f}:{n}") for f, n, _ in warns)
+        print("\nCheck by hand:")
+        for f, n, msg in sorted(set(warns)):
+            print(f"  {f + ':' + str(n):<{loc}}  {msg}")
+    return 0
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else ""
+    if cmd == "start":
+        cmd_start()
+    elif cmd == "close":
+        cmd_close()
+    elif cmd == "out":
+        return cmd_out(" ".join(argv[2:]))
+    elif cmd == "stop":
+        return cmd_stop(argv[2:])
+    elif cmd == "recent":
+        return cmd_recent(argv[2:])
+    elif cmd == "test":
+        return run_tests("-v" in argv[2:])
+    elif cmd == "summary":
+        args, current = argv[2:], None
+        if "--file" in args:
+            i = args.index("--file")
+            current = args[i + 1] if i + 1 < len(args) else None
+            del args[i:i + 2]
+        return cmd_summary(args[0] if args else None, current)
+    else:
+        sys.exit(__doc__)
+    return 0
+
+
+
+def run_tests(verbose=False):
+    """Each test runs this file as a subprocess, the way Helix does, with HOME a temporary folder holding the
+    task folder (so paths print as ~/tasks/...) and the clock at NOW. Imports are here to keep plain runs fast."""
+    import shlex
+    import shutil
+    import subprocess
+    import tempfile
+    import unittest
+
+    NOW = "2026-10-09 14:05"  # a Friday
+    TL = os.path.abspath(__file__)
+
+    class Case(unittest.TestCase):
+        maxDiff = None
+
+        def setUp(self):
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            self.home = Path(tmp.name)
+            self.tasks = self.home / "tasks"
+            self.tasks.mkdir()
+
+        def put(self, name, text, folder=None):
+            path = (folder or self.tasks) / name
+            path.write_bytes(text.encode("utf-8", "surrogateescape"))
+            return path
+
+        def get(self, name):
+            return (self.tasks / name).read_bytes().decode("utf-8", "surrogateescape")
+
+        def tl(self, *args, stdin="", argv=None, **env):
+            env = {**os.environ, "HOME": str(self.home), "TL_DIR": str(self.tasks), "TL_NOW": NOW, **env}
+            done = subprocess.run(argv or [sys.executable, TL, *args], env=env, capture_output=True, check=True,
+                                  input=stdin.encode("utf-8", "surrogateescape"))
+            return done.stdout.decode("utf-8", "surrogateescape")
+
+        def out(self, comment=""):
+            # what bash hands `tl out` as "$BASH_EXECUTION_STRING" for `space . o`
+            return self.tl("out", f'"$BASH_EXECUTION_STRING" # done: {comment}')
+
+    class Parse(unittest.TestCase):
+        def test_entry_forms(self):
+            self.assertEqual(parse("2026-10-09 09:30 - 10:45 = 1h 15min  a note"),
+                             (Entry("", "2026-10-09", 570, 645, "a note"), None))
+            self.assertEqual(parse("  - [ ] 2026-10-09 9:05 -"), (Entry("  - [ ] ", "2026-10-09", 545, None, ""), None))
+            e, _ = parse("2026-10-09 23:30 – 00:15")  # en dash, past midnight
+            self.assertEqual(duration(e.start, e.end), 45)
+
+        def test_rejects(self):
+            self.assertEqual(parse("notes 2026-10-09 10:00 -"), (None, None))
+            self.assertEqual(parse("2026-10-09 Fri   1h 00min"), (None, None))
+            self.assertEqual(parse("2026-10-09 10:00 - 10:4"), (None, "can't parse"))
+            self.assertEqual(parse("2026-10-09 25:00 - 26:00"), (None, "invalid date or time"))
+            self.assertEqual(parse("2026-02-30 10:00 -"), (None, "invalid date or time"))
+
+        def test_render(self):
+            e, _ = parse("- 2026-10-09 23:30 -  late")
+            self.assertEqual(render(e, 15), "- 2026-10-09 23:30 - 00:15 = 0h 45min  late")
+
+    class Commands(Case):
+        def test_start(self):
+            self.assertEqual(self.tl("start"), "2026-10-09 14:05 - ")
+
+        def test_close_stamps_and_refreshes_entries_only(self):
+            text = "# h\n2026-10-09 13:00 -  open\n2026-10-09 09:00 - 10:30 = 9h 99min\nnot 2026-10-09 10:00 -\n"
+            self.assertEqual(self.tl("close", stdin=text),
+                             "# h\n2026-10-09 13:00 - 14:05 = 1h 05min  open\n"
+                             "2026-10-09 09:00 - 10:30 = 1h 30min\nnot 2026-10-09 10:00 -\n")
+
+        def test_stop_files(self):
+            self.put("A.md", "# A\r\n2026-10-09 13:00 -  a\r\n")
+            self.put("B.txt", "2026-10-09 13:30 -")  # no final newline
+            self.put("C.md", "2026-09-01 10:00 -  forgotten\n")  # over 12h ago: left for the summary
+            self.put("E.log", "2026-10-09 13:00 -\n")  # not a task file
+            skip = self.put("D.md", "2026-10-09 13:45 -\n")
+            out = self.tl("stop", "--skip", str(skip))
+            self.assertTrue(out.startswith("stopped "))
+            self.assertEqual(sorted(out[len("stopped "):].split(", ")), ["~/tasks/A.md:2", "~/tasks/B.txt:1"])
+            self.assertEqual(self.get("A.md"), "# A\r\n2026-10-09 13:00 - 14:05 = 1h 05min  a\r\n")
+            self.assertEqual(self.get("B.txt"), "2026-10-09 13:30 - 14:05 = 0h 35min")
+            for name, text in [("C.md", "2026-09-01 10:00 -  forgotten\n"), ("E.log", "2026-10-09 13:00 -\n"),
+                               ("D.md", "2026-10-09 13:45 -\n")]:
+                self.assertEqual(self.get(name), text)
+            self.assertEqual(self.tl("stop", "--skip", str(skip)), "")
+
+        def test_stop_stdin_changes_only_running_lines(self):
+            text = "caf\udce9 \r\n2026-10-09 13:00 -\r\n2026-10-09 12:00 - 12:30 = 9h\nend"  # \udce9: a non-UTF-8 byte
+            self.assertEqual(self.tl("stop", "-", stdin=text),
+                             text.replace("13:00 -\r", "13:00 - 14:05 = 1h 05min\r"))
+
+        def test_recent(self):
+            a = self.put("A.md", "2026-10-08 09:00 - 10:00  first\n2026-10-09 13:00 -\n")
+            b = self.put("B.txt", "no entries\n")
+            self.put("C.log", "")
+            os.utime(a, (0, 2000))
+            os.utime(b, (0, 1000))
+            self.assertEqual(self.tl("recent", "--nth", "2"), str(b))
+            self.assertEqual(self.tl("recent", "--nth", "3", "ELSE"), "ELSE")
+            lines = self.tl("recent").splitlines()
+            self.assertEqual(len(lines), 3)
+            self.assertTrue(lines[0].startswith("1  ~/tasks/A.md   "))
+            self.assertEqual(lines[1], "     last: 2026-10-09 13:00 -")
+            self.assertTrue(lines[2].startswith("2  ~/tasks/B.txt   "))
+
+    class Out(Case):
+        def test_latest_running_entry_gets_a_new_heading(self):
+            self.put("A.md", "# A\nnotes\n2026-10-09 13:00 -\n")
+            self.put("B.md", "# B\nx\n2026-10-09 13:30 -  note\nmore\n")
+            self.assertEqual(self.out("did b"), "stopped ~/tasks/B.md:4  # did b\n")
+            self.assertEqual(self.get("B.md"), "# B\nx\n# did b\n2026-10-09 13:30 - 14:05 = 0h 35min  note\nmore\n")
+            self.assertEqual(self.get("A.md"), "# A\nnotes\n2026-10-09 13:00 -\n")
+
+        def test_adds_to_the_heading_above(self):
+            self.put("A.md", "# Title\n2026-10-09 13:00 -\n")
+            self.out("more")
+            self.assertEqual(self.get("A.md"), "# Title - more\n2026-10-09 13:00 - 14:05 = 1h 05min\n")
+
+        def test_fills_an_empty_heading(self):
+            self.put("A.md", "# \r\n2026-10-09 13:00 -\r\n")
+            self.out("fill")
+            self.assertEqual(self.get("A.md"), "# fill\r\n2026-10-09 13:00 - 14:05 = 1h 05min\r\n")
+
+        def test_no_comment_no_heading(self):
+            self.put("A.md", "notes\n2026-10-09 13:00 -\n")
+            self.assertEqual(self.out(), "stopped ~/tasks/A.md:2\n")
+            self.assertEqual(self.get("A.md"), "notes\n2026-10-09 13:00 - 14:05 = 1h 05min\n")
+
+        def test_entry_on_first_line_without_newline(self):
+            self.put("A.md", "2026-10-09 13:00 -")
+            self.assertEqual(self.out("top"), "stopped ~/tasks/A.md:2  # top\n")
+            self.assertEqual(self.get("A.md"), "# top\n2026-10-09 13:00 - 14:05 = 1h 05min")
+
+        def test_nothing_running(self):
+            text = "2026-09-01 10:00 -  forgotten\n2026-10-09 15:00 -  not started yet\n2026-10-09 09:00 - 10:00\n"
+            self.put("A.md", text)
+            self.assertEqual(self.out("x"), "nothing running (older open entries are left for the summary to flag)\n")
+            self.assertEqual(self.get("A.md"), text)
+
+        @unittest.skipUnless(shutil.which("bash"), "needs bash")
+        def test_comment_needs_no_quoting_through_bash(self):
+            self.put("A.md", "2026-10-09 13:00 -\n")
+            comment = "it's (part 2) \"q\" $HOME `id` & ; | 50%"
+            line = f'{shlex.quote(sys.executable)} {shlex.quote(TL)} out "$BASH_EXECUTION_STRING" # done: {comment}'
+            self.tl(argv=["bash", "-c", line])
+            self.assertEqual(self.get("A.md"), f"# {comment}\n2026-10-09 13:00 - 14:05 = 1h 05min\n")
+
+    class Summary(Case):
+        def test_one_line_per_task_and_day_with_heading_bullets(self):
+            self.put("A.md", "# Title A\n2026-10-09 11:00 - 12:00\n"
+                             "```py\n# not a heading\n```\n2026-10-09 09:00 - 09:30\n"
+                             " #+BEGIN_SRC\n# org comment\n#+END_SRC\n"
+                             "## Second ##\n2026-10-09 08:00 - 08:15  note\n2026-10-08 13:00 - 14:00\n"
+                             "#tag\n# \n2026-10-08 15:00 - 15:30\n")
+            self.put("B.md", "2026-10-09 12:00 - 12:45\n# Bee\n2026-10-09 13:00 - 13:10\n")  # no title: an entry
+            self.put("C.md", "\nPlain title\n2026-10-09 07:00 - 07:30\n")
+            self.assertEqual(self.tl("summary", "3"),
+                             f"Time summary, last 3 days ({self.tasks})\n\n"
+                             "2026-10-09 Fri   3h 10min\n"
+                             "    A   1h 45min  Title A\n      - Second\n"
+                             "    B   0h 55min\n      - Bee\n"
+                             "    C   0h 30min  Plain title\n"
+                             "2026-10-08 Thu   1h 30min\n"
+                             "    A   1h 30min  Title A\n      - Second\n"
+                             "-----\nTotal (2 days)  4h 40min\n")
+
+        def test_running_entries_first_whatever_their_date(self):
+            self.put("C.md", "# Cee\n2026-10-09 13:30 -  running note\n2026-09-01 10:00 -  forgotten\n")
+            self.assertEqual(self.tl("summary"),
+                             "Still running:\n"
+                             "  ~/tasks/C.md:2  2026-10-09 13:30   0h 35min  Cee - running note\n"
+                             "  ~/tasks/C.md:3  2026-09-01 10:00  916h 05min  Cee - forgotten\n\n"
+                             f"Time summary, last 14 days ({self.tasks})\n\nNo complete entries found.\n")
+
+        def test_check_by_hand(self):
+            self.put("W.md", "2026-10-09 09:00 - 10:00\n2026-10-09 09:30 - 10:30\n2026-10-09 09:00 - 10:00\n"
+                             "2026-10-10 09:00 - 10:00\n2026-10-08 06:00 - 23:00\n2026-10-08 25:00 - 26:00\n"
+                             "2026-10-08 10:00 - 10:4\n")
+            self.assertTrue(self.tl("summary").endswith(
+                "Check by hand:\n"
+                "  ~/tasks/W.md:2  overlaps ~/tasks/W.md:1\n"
+                "  ~/tasks/W.md:3  duplicate of line 1\n"
+                "  ~/tasks/W.md:4  date 2026-10-10 is in the future\n"
+                "  ~/tasks/W.md:5  duration 17h 00min, typo?\n"
+                '  ~/tasks/W.md:6  invalid date or time: "2026-10-08 25:00 - 26:00"\n'
+                '  ~/tasks/W.md:7  can\'t parse: "2026-10-08 10:00 - 10:4"\n'))
+
+        def test_days_window(self):
+            self.put("A.md", "2026-10-01 10:00 - 11:00\n2026-10-09 10:00 - 10:30\n")
+            self.assertNotIn("2026-10-01", self.tl("summary", "3"))
+            for arg in ("9", "all"):
+                out = self.tl("summary", arg)
+                self.assertIn("2026-10-01 Thu   1h 00min\n", out)
+                self.assertIn("Total (2 days)  1h 30min\n", out)
+
+        def test_single_file_outside_the_task_folder(self):
+            notes = self.put("notes.md", "# One\n2026-10-09 09:00 - 10:00\n# Two\n2026-10-09 10:00 - 10:30\n",
+                             folder=self.home)
+            self.put("A.md", "2026-10-09 11:00 - 12:00\n")  # not counted
+            self.assertEqual(self.tl("summary", "--file", str(notes), "1"),
+                             f"Time summary, last 1 day ({notes.resolve()})\n\n"
+                             "2026-10-09 Fri   1h 30min\n    - One\n    - Two\n"
+                             "-----\nTotal (1 day)  1h 30min\n")
+
+        def test_missing_task_folder(self):
+            missing = self.home / "nope"
+            self.assertEqual(self.tl("summary", TL_DIR=str(missing)),
+                             f"Task folder not found: {missing}\n(create it or set TL_DIR)\n")
+
+    loader = unittest.defaultTestLoader
+    suite = unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in (Parse, Commands, Out, Summary))
+    return 0 if unittest.TextTestRunner(verbosity=2 if verbose else 1).run(suite).wasSuccessful() else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+
