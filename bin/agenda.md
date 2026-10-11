@@ -66,8 +66,8 @@ namespace is reserved for `td`/`tl`; `space .` holds AI-tool launchers):
 | `space , L` | same agenda, sorted by file mtime |
 | `space , P` | **create + jump**: promote current bullet to `~/tasks/<slug>.md` (reuses if exists), save the inbox, then jump into the file. Bullet text in the inbox is left unchanged |
 | `space , p` | **jump**: open `~/tasks/<slug>.md` for the current bullet if it exists; otherwise no-op |
-| `space , y` | toggle `[ ]` ↔ `[y]` (today); on an agenda row, mutates the source bullet |
-| `space , a` | toggle `[ ]` ↔ `[a]` (active); on an agenda row, mutates the source bullet |
+| `space , y` | toggle `[ ]` ↔ `[y]` (today); on an agenda row, mutates the source bullet in the inbox |
+| `space , a` | toggle `[ ]` ↔ `[a]` (active); on an agenda row, mutates the source bullet in the inbox |
 | `space . x` | toggle `[ ]` ↔ `[X]` (lives in `space .` — predates `td`; works in any file) |
 
 `space , p` works both in the inbox (slugify current bullet) and in the
@@ -132,6 +132,14 @@ jobs are now covered differently:
 
 The trade-off: identical bullet text in `$TD_FILE` means only the first match
 gets toggled — a nearly-never scenario, and visible in the agenda itself.
+When this happens, `td toggle` emits a warning to stderr naming the duplicate.
+
+### Why `P`/`y`/`a` don't use `:pipe`
+
+The Helix bindings `:write` the current buffer and then invoke `td` with
+`--from PATH --line N`. `td` reads the line from disk, writes the toggled
+or promoted version back to disk, and refreshes `agenda.md`. `auto-reload`
+picks up the change — the editor buffer stays clean (no `:pipe`-dirty races).
 
 ## Firing mechanism
 
@@ -161,11 +169,11 @@ Title = first `# H1` in the file, or the filename stem.
 | `td install` | write the shim at `~/.config/helix/bin/td-tick`, register job-id 7421 |
 | `td uninstall` | cancel the job, remove the shim |
 | `td tick` | what the job calls — scan dedicated files, fire due SCHEDULEs |
-| `td list [--state S] [--sort added\|modified]` | write the agenda to `~/.cache/td/last-list.md` and stdout; marks `(*)` for bullets with a dedicated file; lists `# ORPHANS` |
-| `td promote` | stdin: a bullet. Creates/reuses `~/tasks/<slug>.md`; echoes bullet unchanged |
+| `td list [--state S] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout; marks `(*)` for bullets with a dedicated file; lists `# ORPHANS` |
+| `td promote [--from PATH --line N]` | create/reuse `~/tasks/<slug>.md` for a bullet. With `--from/--line` reads the file (no stdout); otherwise reads stdin and echoes |
 | `td jump --from PATH:LINE` | print `~/tasks/<slug>.md` if the bullet at `PATH:LINE` has a dedicated file; else print `PATH` (no-op fallback) |
 | `td set PATH LINE S` | rewrite the checkbox char at `PATH:LINE` to `S` |
-| `td toggle S` | stdin: a line. If it's an agenda row, update the source via `set`. Else toggle in place |
+| `td toggle S [--from PATH [--line N]]` | toggle the bullet's state. With `--from/--line` reads the file and writes back (no stdout); otherwise reads stdin and echoes. Propagates to `$TD_FILE` when source differs |
 | `td new [--state S]` | print `- [S] ` template for pipe/insert |
 | `td next` | print the next-due SCHEDULE (for a statusline) |
 | `td fire PATH` | fire a dedicated file's SCHEDULE now (testing) |
@@ -192,7 +200,7 @@ Under `~/.cache/td/`:
 - `added` — append-only first-seen log, `first_seen_iso \t hash \t short_text`.
   Used for "newest-added first" sort order. Hashes strip the ` → <path>`
   suffix so promoting doesn't bump the task to the top.
-- `last-list.md` — the reusable agenda buffer, overwritten by every `td list`.
+- `agenda.md` — the reusable agenda buffer, overwritten by every `td list`.
 
 ## env vars
 

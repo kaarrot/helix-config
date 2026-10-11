@@ -123,24 +123,25 @@ S = [":write", "align_view_top", ":sh ~/.config/helix/bin/tl summary --file %{bu
 t = ":open ~/tasks/todo.md"
 # Reusable agenda buffer, grouped ACTIVE / TODAY / TODO, newest-added at the top.
 # auto-reload = true refreshes the same buffer on re-run (no new window).
-l = [":sh ~/.config/helix/bin/td list >/dev/null", ":open /data/data/com.termux/files/home/.cache/td/last-list.md"]
+l = [":sh ~/.config/helix/bin/td list >/dev/null", ":open /data/data/com.termux/files/home/.cache/td/agenda.md"]
 # Same agenda, sorted by file mtime (recently modified at the top).
-L = [":sh ~/.config/helix/bin/td list --sort modified >/dev/null", ":open /data/data/com.termux/files/home/.cache/td/last-list.md"]
+L = [":sh ~/.config/helix/bin/td list --sort modified >/dev/null", ":open /data/data/com.termux/files/home/.cache/td/agenda.md"]
 # Promote the current bullet to a dedicated ~/tasks/<slug>.md file (reuses if exists).
-# The bullet itself is left unchanged — the agenda renders ' (*)' next to bullets
-# whose slug has a dedicated file. `extend_to_line_bounds` first so :pipe gets the
-# whole line, not just the cursor char.
-P = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td promote", ":write", ":open %sh{~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}}"]
+# `:write` first so td reads a fresh file; td creates/reuses the dedicated file
+# and refreshes agenda.md on disk (auto-reload picks up the new ' (*)'
+# marker). Finally :open jumps into the dedicated file.
+P = [":write", ":sh ~/.config/helix/bin/td promote --from %{buffer_name} --line %{cursor_line}", ":open %sh{~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}}"]
 # Jump: slugify the current bullet, open ~/tasks/<slug>.md if it exists. If not,
 # `td jump` prints the current buffer path, so :open becomes a no-op reopen.
-# Works from the inbox AND from an agenda row in last-list.md.
+# Works from the inbox AND from an agenda row in agenda.md.
 p = ":open %sh{~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}}"
-# Toggle state of the current line. If called from the agenda buffer
-# (--from != $TD_FILE), `td toggle` text-matches the bullet in the inbox
-# and flips it on disk; otherwise toggles the checkbox in place
-# (Helix saves normally).
-y = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle y --from %{buffer_name}"]
-a = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle a --from %{buffer_name}"]
+# Toggle state of the current line. `:write` first so td reads a fresh file;
+# td rewrites the checkbox on disk, and Helix picks the change up via
+# auto-reload (buffer stays clean, no :pipe-dirty races). When invoked from
+# the agenda, td text-matches the bullet in the inbox and flips it there too,
+# then refreshes agenda.md so the agenda reflects the new state.
+y = [":write", ":sh ~/.config/helix/bin/td toggle y --from %{buffer_name} --line %{cursor_line}"]
+a = [":write", ":sh ~/.config/helix/bin/td toggle a --from %{buffer_name} --line %{cursor_line}"]
 # NOTE: `a` is already bound to `agy -c …` above (line ~82). Pick a free key
 # for the active-state toggle, e.g. uncomment one of:
 # A = ":pipe ~/.config/helix/bin/td toggle a"   # also taken (agy no-perms)

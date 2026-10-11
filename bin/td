@@ -25,7 +25,7 @@ Commands:
   td tick              scan dedicated files, fire due SCHEDULEs
   td list [--state todo|today|active|all] [--sort added|modified]
                        build the agenda from $TD_FILE bullets; write to
-                       ~/.cache/td/last-list.md and stdout. Appends " (*)" to
+                       ~/.cache/td/agenda.md and stdout. Appends " (*)" to
                        bullets whose slug has a dedicated file. Lists orphan
                        dedicated files (no matching bullet) in # ORPHANS.
   td promote           stdin: a bullet line. Creates (or reuses) ~/tasks/<slug>.md
@@ -79,7 +79,7 @@ JOB_ID = 7421
 CACHE = Path("~/.cache/td").expanduser()
 FIRED_PATH = CACHE / "fired"
 ADDED_PATH = CACHE / "added"
-LIST_PATH = CACHE / "last-list.md"
+LIST_PATH = CACHE / "agenda.md"
 TICK_SHIM = Path("~/.config/helix/bin/td-tick").expanduser()
 
 LEGEND = "# td: [ ] todo  [y] today  [a] active"
@@ -185,7 +185,7 @@ def scan_dedicated():
             if hm and not title_found:
                 title = hm[1]
                 title_found = True
-            if SCHEDULE_MARK.search(raw):
+            if due is None and SCHEDULE_MARK.search(raw):
                 ts = SCHEDULE_TS.search(raw)
                 if ts:
                     try:
@@ -350,7 +350,7 @@ def _existing_slugs():
                 continue
         except OSError:
             continue
-        out.add(f.stem)
+        out.add(f.stem.lower())
     return out
 
 
@@ -413,7 +413,7 @@ def cmd_list(args):
 
 
 def refresh_list():
-    """Write last-list.md without touching stdout (used after a state mutation)."""
+    """Write agenda.md without touching stdout (used after a state mutation)."""
     try:
         text = build_list([])
         CACHE.mkdir(parents=True, exist_ok=True)
@@ -447,14 +447,57 @@ def cmd_new(args):
     return 0
 
 
-def cmd_promote():
-    """stdin: a bullet line. Creates/reuses ~/tasks/<slug>.md; echoes bullet unchanged."""
-    raw = sys.stdin.read().rstrip("\n")
+def cmd_promote(args=None):
+    """Create/reuse ~/tasks/<slug>.md for a bullet.
+
+    Two input modes:
+      • `--from PATH --line N` reads the bullet from PATH:N on disk. No
+        stdout output. Used by Helix bindings so the editor buffer never
+        gets :pipe-dirtied.
+      • Otherwise reads stdin, echoes bullet to stdout. Used by shells.
+
+    In both modes the dedicated file is written if missing; if it already
+    exists its H1 is retagged with the current state. The agenda is
+    refreshed so new ` (*)` markers appear."""
+    args = args or []
+    from_path = None
+    line_no = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--from" and i + 1 < len(args):
+            from_path = Path(args[i + 1]).expanduser()
+            i += 2
+        elif args[i] == "--line" and i + 1 < len(args):
+            try:
+                line_no = int(args[i + 1])
+            except ValueError:
+                sys.exit(f"bad --line: {args[i + 1]!r}")
+            i += 2
+        else:
+            i += 1
+
+    use_file = from_path is not None and line_no is not None
+    if use_file:
+        try:
+            data = from_path.read_bytes().decode("utf-8", "surrogateescape")
+        except OSError as e:
+            sys.exit(f"td: {from_path}: {e}")
+        lines = data.splitlines()
+        if not 1 <= line_no <= len(lines):
+            return 0
+        raw = lines[line_no - 1]
+    else:
+        raw = sys.stdin.read().rstrip("\n")
+
     m = TASK.match(raw)
     if not m:
+        if use_file:
+            return 0
         sys.exit("not a bullet line")
     core = LINK.sub("", MARKER.sub("", m["text"])).strip()
     if not core:
+        if use_file:
+            return 0
         sys.exit("empty bullet text")
     slug = slugify(core)
     folder = task_folder()
@@ -465,7 +508,9 @@ def cmd_promote():
                              encoding="utf-8", errors="surrogateescape")
     else:
         _retag_dedicated_h1(core, m["state"])
-    sys.stdout.write(f"{m['indent']}- [{m['state']}] {core}")
+    refresh_list()
+    if not use_file:
+        sys.stdout.write(f"{m['indent']}- [{m['state']}] {core}")
     return 0
 
 
@@ -552,57 +597,109 @@ def cmd_set(args):
 
 
 def cmd_toggle(args):
-    """Toggle state on stdin bullet; propagate to $TD_FILE when called from
-    outside it (e.g., the agenda buffer) via first-exact-text-match."""
+    """Toggle state on a bullet.
+
+    Two input modes:
+      • `--from PATH --line N` reads the line from PATH on disk and writes
+        the toggled version back to PATH:N. No stdout output. Used by Helix
+        bindings so the editor buffer never gets :pipe-dirtied.
+      • Otherwise reads stdin, writes toggled line to stdout. Used by shells.
+
+    In both modes, when the source isn't $TD_FILE the toggle also text-matches
+    the bullet in $TD_FILE and flips it there. The dedicated file's H1 is
+    retagged, and the agenda agenda.md is refreshed."""
     if not args:
-        sys.exit("usage: td toggle STATE [--from PATH]")
+        sys.exit("usage: td toggle STATE [--from PATH [--line N]]")
     state = args[0]
     if state not in STATE_NAMES:
         sys.exit(f"bad state: {state!r}")
     from_path = None
+    line_no = None
     i = 1
     while i < len(args):
         if args[i] == "--from" and i + 1 < len(args):
             from_path = Path(args[i + 1]).expanduser()
             i += 2
+        elif args[i] == "--line" and i + 1 < len(args):
+            try:
+                line_no = int(args[i + 1])
+            except ValueError:
+                sys.exit(f"bad --line: {args[i + 1]!r}")
+            i += 2
         else:
             i += 1
-    raw = sys.stdin.read().rstrip("\n")
+
+    inbox = td_file()
+    use_file = from_path is not None and line_no is not None
+    if use_file:
+        try:
+            data = from_path.read_bytes().decode("utf-8", "surrogateescape")
+        except OSError as e:
+            sys.exit(f"td: {from_path}: {e}")
+        lines = data.splitlines(keepends=True)
+        if not 1 <= line_no <= len(lines):
+            return 0
+        raw = lines[line_no - 1].rstrip("\n")
+    else:
+        raw = sys.stdin.read().rstrip("\n")
+
     bm = TASK.match(raw)
     if not bm:
-        sys.stdout.write(raw)
+        if not use_file:
+            sys.stdout.write(raw)
         return 0
     new_state = " " if bm["state"] == state else state
     new_raw = CHECKBOX.sub(f"- [{new_state}]", raw, count=1)
-    # Propagate to inbox when the caller isn't editing $TD_FILE itself.
-    inbox = td_file()
+
     try:
         same = from_path and from_path.resolve() == inbox.resolve()
     except OSError:
         same = False
+
+    if use_file:
+        # Rewrite the source line on disk; Helix picks it up via auto-reload.
+        keep_nl = lines[line_no - 1].endswith("\n")
+        lines[line_no - 1] = new_raw + ("\n" if keep_nl else "")
+        from_path.write_bytes(
+            "".join(lines).encode("utf-8", "surrogateescape")
+        )
+
     if from_path and not same and inbox.is_file():
         _retag_in_file(inbox, bm["text"], bm["state"], new_state)
-        refresh_list()
     _retag_dedicated_h1(bm["text"], new_state)
-    sys.stdout.write(new_raw)
+    refresh_list()
+    if not use_file:
+        sys.stdout.write(new_raw)
     return 0
 
 
 def _retag_in_file(path, text, old_state, new_state):
-    """Find the first `- [old_state] <same core text>` line and flip its checkbox."""
+    """Find the first `- [old_state] <same core text>` line and flip its checkbox.
+
+    Warns to stderr when more than one line matches — only the first flips.
+    """
     needle = MARKER.sub("", LINK.sub("", text)).strip()
     data = path.read_bytes().decode("utf-8", "surrogateescape")
     lines = data.splitlines(keepends=True)
+    hits = []
     for i, raw in enumerate(lines):
         m = TASK.match(raw.rstrip("\n"))
         if not m or m["state"] != old_state:
             continue
         core = MARKER.sub("", LINK.sub("", m["text"])).strip()
         if core == needle:
-            lines[i] = CHECKBOX.sub(f"- [{new_state}]", raw, count=1)
-            path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
-            return True
-    return False
+            hits.append(i)
+    if not hits:
+        return False
+    if len(hits) > 1:
+        sys.stderr.write(
+            f"td: {len(hits)} duplicate bullets match {needle!r} in {path}; "
+            f"flipped line {hits[0] + 1} only\n"
+        )
+    i = hits[0]
+    lines[i] = CHECKBOX.sub(f"- [{new_state}]", lines[i], count=1)
+    path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
+    return True
 
 
 H1_WITH_STATE = re.compile(r"^(#\s+)(?:\[[ xXya!]\]\s+)?(.+?)(\s*)$")
@@ -650,7 +747,7 @@ def cmd_fire(args):
         hm = H1.match(raw)
         if hm and not title_found:
             title = hm[1]; title_found = True
-        if SCHEDULE_MARK.search(raw):
+        if due is None and SCHEDULE_MARK.search(raw):
             ts = SCHEDULE_TS.search(raw)
             if ts:
                 try:
@@ -711,7 +808,7 @@ def main(argv):
     if cmd == "new":
         return cmd_new(rest)
     if cmd == "promote":
-        return cmd_promote()
+        return cmd_promote(rest)
     if cmd == "jump":
         return cmd_jump(rest)
     if cmd == "set":
@@ -833,7 +930,7 @@ def run_tests(verbose=False):
         def test_writes_cache_file(self):
             self.put_inbox("- [ ] call jon\n")
             self.td("list")
-            self.assertIn("call jon", self.read_cache("last-list.md"))
+            self.assertIn("call jon", self.read_cache("agenda.md"))
 
         def test_only_inbox_scanned(self):
             self.put_inbox("- [ ] from inbox\n")
@@ -1030,9 +1127,9 @@ def run_tests(verbose=False):
             target = self.put_dedicated("refactor-td-parser.md",
                                         "# refactor td parser\n")
             # Simulate the user running `space . l` then pressing `space . p`
-            # from an agenda row in last-list.md.
+            # from an agenda row in agenda.md.
             self.td("list")
-            cache_list = self.home / ".cache" / "td" / "last-list.md"
+            cache_list = self.home / ".cache" / "td" / "agenda.md"
             lines = cache_list.read_text().splitlines()
             lineno = next(i for i, line in enumerate(lines, 1)
                           if "refactor td parser" in line and "- [a]" in line)
@@ -1043,7 +1140,7 @@ def run_tests(verbose=False):
             self.put_inbox("- [ ] alpha\n")
             orphan = self.put_dedicated("costco-run.md", "# Costco run!\n")
             self.td("list")
-            cache_list = self.home / ".cache" / "td" / "last-list.md"
+            cache_list = self.home / ".cache" / "td" / "agenda.md"
             lines = cache_list.read_text().splitlines()
             lineno = next(i for i, line in enumerate(lines, 1)
                           if "costco-run" in line)
@@ -1071,7 +1168,7 @@ def run_tests(verbose=False):
 
         def test_toggle_from_agenda_mutates_source(self):
             p = self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
-            agenda = self.home / ".cache" / "td" / "last-list.md"
+            agenda = self.home / ".cache" / "td" / "agenda.md"
             out = self.td("toggle", "a", "--from", str(agenda),
                           stdin="- [ ] bravo\n")
             self.assertEqual(out.strip(), "- [a] bravo")
@@ -1079,7 +1176,7 @@ def run_tests(verbose=False):
 
         def test_toggle_from_agenda_toggle_off(self):
             p = self.put_inbox("- [a] alpha\n")
-            agenda = self.home / ".cache" / "td" / "last-list.md"
+            agenda = self.home / ".cache" / "td" / "agenda.md"
             out = self.td("toggle", "a", "--from", str(agenda),
                           stdin="- [a] alpha\n")
             self.assertEqual(out.strip(), "- [ ] alpha")
@@ -1088,7 +1185,7 @@ def run_tests(verbose=False):
         def test_toggle_from_agenda_with_marker(self):
             p = self.put_inbox("- [a] refactor td parser\n")
             self.put_dedicated("refactor-td-parser.md", "# refactor td parser\n")
-            agenda = self.home / ".cache" / "td" / "last-list.md"
+            agenda = self.home / ".cache" / "td" / "agenda.md"
             out = self.td("toggle", "a", "--from", str(agenda),
                           stdin="- [a] refactor td parser (*)\n")
             self.assertEqual(out.strip(), "- [ ] refactor td parser (*)")
@@ -1107,7 +1204,7 @@ def run_tests(verbose=False):
             self.put_inbox("- [ ] foo bar\n")
             dedicated = self.put_dedicated("foo-bar.md",
                                            "# [ ] foo bar\n\nnotes\n")
-            agenda = self.home / ".cache" / "td" / "last-list.md"
+            agenda = self.home / ".cache" / "td" / "agenda.md"
             self.td("toggle", "a", "--from", str(agenda),
                     stdin="- [ ] foo bar (*)\n")
             self.assertIn("# [a] foo bar", dedicated.read_text())
