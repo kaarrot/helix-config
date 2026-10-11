@@ -64,7 +64,7 @@ LINK = re.compile(r"\s*→\s*\S+\s*$")
 MARKER = re.compile(r"\s*\(\*\)\s*$")
 AGENDA_ROW = re.compile(
     r"^(?P<rest>- \[[ xXya!]\].*?)\s{2,}(?P<path>\S+?):(?P<line>\d+):\d+\s*$")
-H1 = re.compile(r"^#\s+(.+?)\s*$")
+H1 = re.compile(r"^#\s+(?:\[[ xXya!]\]\s+)?(.+?)\s*$")
 SLUG_SPLIT = re.compile(r"[^a-z0-9]+")
 CHECKBOX = re.compile(r"- \[[ xXya!]\]")
 
@@ -73,7 +73,7 @@ STATE_NAMES = {" ": "todo", "y": "today", "a": "active",
 STATE_FROM_NAME = {"todo": " ", "today": "y", "active": "a",
                    "done": "x", "ignore": "!"}
 VISIBLE = {" ", "y", "a"}
-GROUPS = ("active", "today", "todo")
+GROUPS = ("today", "active", "todo")
 
 JOB_ID = 7421
 CACHE = Path("~/.cache/td").expanduser()
@@ -461,8 +461,10 @@ def cmd_promote():
     folder.mkdir(parents=True, exist_ok=True)
     dedicated = folder / f"{slug}.md"
     if not dedicated.exists():
-        dedicated.write_text(f"# {core}\n\n",
+        dedicated.write_text(f"# [{m['state']}] {core}\n\n",
                              encoding="utf-8", errors="surrogateescape")
+    else:
+        _retag_dedicated_h1(core, m["state"])
     sys.stdout.write(f"{m['indent']}- [{m['state']}] {core}")
     return 0
 
@@ -581,6 +583,7 @@ def cmd_toggle(args):
     if from_path and not same and inbox.is_file():
         _retag_in_file(inbox, bm["text"], bm["state"], new_state)
         refresh_list()
+    _retag_dedicated_h1(bm["text"], new_state)
     sys.stdout.write(new_raw)
     return 0
 
@@ -599,6 +602,36 @@ def _retag_in_file(path, text, old_state, new_state):
             lines[i] = CHECKBOX.sub(f"- [{new_state}]", raw, count=1)
             path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
             return True
+    return False
+
+
+H1_WITH_STATE = re.compile(r"^(#\s+)(?:\[[ xXya!]\]\s+)?(.+?)(\s*)$")
+
+
+def _retag_dedicated_h1(text, new_state):
+    """Rewrite the first H1 of ~/tasks/<slug>.md so it carries `[state] ` prefix.
+
+    No-op when the dedicated file is absent. State " " strips the prefix.
+    """
+    core = MARKER.sub("", LINK.sub("", text)).strip()
+    if not core:
+        return False
+    path = task_folder() / f"{slugify(core)}.md"
+    if not path.is_file():
+        return False
+    data = path.read_bytes().decode("utf-8", "surrogateescape")
+    lines = data.splitlines(keepends=True)
+    for i, raw in enumerate(lines):
+        m = H1_WITH_STATE.match(raw.rstrip("\n"))
+        if not m:
+            continue
+        tail = "\n" if raw.endswith("\n") else ""
+        new = f"{m[1]}[{new_state}] {m[2]}{tail}"
+        if new == raw:
+            return False
+        lines[i] = new
+        path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
+        return True
     return False
 
 
@@ -764,8 +797,8 @@ def run_tests(verbose=False):
             self.put_inbox("- [ ] call jon\n- [a] refactor\n- [y] pay rent\n")
             out = self.td("list")
             self.assertIn(LEGEND, out)
-            self.assertLess(out.index("# ACTIVE"), out.index("# TODAY"))
-            self.assertLess(out.index("# TODAY"), out.index("# TODO"))
+            self.assertLess(out.index("# TODAY"), out.index("# ACTIVE"))
+            self.assertLess(out.index("# ACTIVE"), out.index("# TODO"))
             for word in ("refactor", "call jon", "pay rent"):
                 self.assertIn(word, out)
 
@@ -922,7 +955,18 @@ def run_tests(verbose=False):
             p = self.tasks / "costco-run.md"
             self.assertTrue(p.is_file())
             txt = p.read_text()
-            self.assertIn("# Costco run!", txt)
+            self.assertIn("# [ ] Costco run!", txt)
+
+        def test_promote_active_bullet_h1_has_state(self):
+            out = self.td("promote", stdin="- [a] foo bar\n")
+            self.assertEqual(out.strip(), "- [a] foo bar")
+            self.assertIn("# [a] foo bar", (self.tasks / "foo-bar.md").read_text())
+
+        def test_promote_existing_file_h1_gets_retagged(self):
+            p = self.put_dedicated("foo-bar.md", "# foo bar\n\nnotes\n")
+            self.td("promote", stdin="- [a] foo bar\n")
+            self.assertIn("# [a] foo bar", p.read_text())
+            self.assertIn("notes", p.read_text())  # body preserved
 
         def test_reuses_existing(self):
             existing = self.put_dedicated(
@@ -1058,6 +1102,23 @@ def run_tests(verbose=False):
             self.assertEqual(out.strip(), "- [y] alpha")
             # Disk still has old state — Helix will :write it with the new state.
             self.assertEqual(p.read_text(), "- [ ] alpha\n")
+
+        def test_toggle_retags_dedicated_h1(self):
+            self.put_inbox("- [ ] foo bar\n")
+            dedicated = self.put_dedicated("foo-bar.md",
+                                           "# [ ] foo bar\n\nnotes\n")
+            agenda = self.home / ".cache" / "td" / "last-list.md"
+            self.td("toggle", "a", "--from", str(agenda),
+                    stdin="- [ ] foo bar (*)\n")
+            self.assertIn("# [a] foo bar", dedicated.read_text())
+            self.assertIn("notes", dedicated.read_text())
+
+        def test_toggle_retags_h1_from_inbox_too(self):
+            inbox = self.put_inbox("- [ ] foo bar\n")
+            dedicated = self.put_dedicated("foo-bar.md", "# [ ] foo bar\n")
+            self.td("toggle", "a", "--from", str(inbox),
+                    stdin="- [ ] foo bar\n")
+            self.assertIn("# [a] foo bar", dedicated.read_text())
 
     class Fire(Case):
         def test_fire_by_file(self):

@@ -56,22 +56,24 @@ running-entry shape.
 
 ## Keybindings
 
-Under `[keys.normal.space."."]` in `~/.config/helix/config.toml`:
+Under `[keys.normal.space.","]` in `~/.config/helix/config.toml` (the `space ,`
+namespace is reserved for `td`/`tl`; `space .` holds AI-tool launchers):
 
 | key | action |
 |-----|--------|
-| `space . t` | open the inbox (`~/tasks/todo.md`) |
-| `space . l` | agenda in a reusable buffer — grouped ACTIVE / TODAY / TODO, newest-added first |
-| `space . L` | same agenda, sorted by file mtime |
-| `space . P` | **create + jump**: promote current bullet to `~/tasks/<slug>.md` (reuses if exists), save the inbox, then jump into the file. Bullet text in the inbox is left unchanged |
-| `space . p` | **jump**: open `~/tasks/<slug>.md` for the current bullet if it exists; otherwise no-op |
-| `space . y` | toggle `[ ]` ↔ `[y]`; on an agenda row, mutates the source bullet |
-| `space . x` | toggle `[ ]` ↔ `[X]` (predates `td`; works in any file) |
+| `space , t` | open the inbox (`~/tasks/todo.md`) |
+| `space , l` | agenda in a reusable buffer — grouped TODAY / ACTIVE / TODO, newest-added first |
+| `space , L` | same agenda, sorted by file mtime |
+| `space , P` | **create + jump**: promote current bullet to `~/tasks/<slug>.md` (reuses if exists), save the inbox, then jump into the file. Bullet text in the inbox is left unchanged |
+| `space , p` | **jump**: open `~/tasks/<slug>.md` for the current bullet if it exists; otherwise no-op |
+| `space , y` | toggle `[ ]` ↔ `[y]` (today); on an agenda row, mutates the source bullet |
+| `space , a` | toggle `[ ]` ↔ `[a]` (active); on an agenda row, mutates the source bullet |
+| `space . x` | toggle `[ ]` ↔ `[X]` (lives in `space .` — predates `td`; works in any file) |
 
-`space . p` works both in the inbox (slugify current bullet) and in the
-agenda buffer (slugify the bullet text to the left of the trailing
-`path:line:col`). In the agenda, pressing `goto_line_end` (`gl`) then `gf`
-still works as a path-based alternative.
+`space , p` works both in the inbox (slugify current bullet) and in the
+agenda buffer (slugify the bullet text, trailing ` (*)` marker stripped).
+Orphan rows carry a `path:line:col`, so `space , p` on an orphan jumps
+straight to that file.
 
 ### Why `P` and `p` are separate
 
@@ -97,13 +99,13 @@ dedicated file exists for that slug. Orphan rows carry a `path:line:col` so
 ```
 # td: [ ] todo  [y] today  [a] active
 
-# ACTIVE
-
-- [a] refactor td parser (*)
-
 # TODAY
 
 - [y] pay rent
+
+# ACTIVE
+
+- [a] refactor td parser (*)
 
 # TODO
 

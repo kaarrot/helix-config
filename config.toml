@@ -89,6 +89,11 @@ A = "@:: agy --dangerously-skip-permissions -p 2<gt>/dev/null<ret>"
 # rewinds that speech if Helix can take the key.
 d = "@:: /data/data/com.termux/files/home/PRJ/kukuryku/target/release/ryk --send<ret>"
 
+# tl/td bindings live under `space ,` to avoid clashing with the AI-tool
+# bindings on `space .` (c/C/g/G/a/A/v/V/d).
+
+[keys.normal.space.","]
+
 ### Time logging ###
 
 # Time log helper for ~/.config/helix/bin/tl, task files in $TL_DIR, default ~/tasks
@@ -130,11 +135,12 @@ P = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td promote", ":write", 
 # `td jump` prints the current buffer path, so :open becomes a no-op reopen.
 # Works from the inbox AND from an agenda row in last-list.md.
 p = ":open %sh{~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}}"
-# Toggle state of the current line between [ ] and [y]. If called from the
-# agenda buffer (--from != $TD_FILE), `td toggle` text-matches the bullet in
-# the inbox and flips it on disk; otherwise toggles the checkbox in place
+# Toggle state of the current line. If called from the agenda buffer
+# (--from != $TD_FILE), `td toggle` text-matches the bullet in the inbox
+# and flips it on disk; otherwise toggles the checkbox in place
 # (Helix saves normally).
 y = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle y --from %{buffer_name}"]
+a = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle a --from %{buffer_name}"]
 # NOTE: `a` is already bound to `agy -c …` above (line ~82). Pick a free key
 # for the active-state toggle, e.g. uncomment one of:
 # A = ":pipe ~/.config/helix/bin/td toggle a"   # also taken (agy no-perms)
