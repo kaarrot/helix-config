@@ -82,6 +82,10 @@ REPEATER = re.compile(r"(\+\+|\.\+)(\d+)([dwmy])")
 TAG = re.compile(r"#(\w+)")
 LINK = re.compile(r"\s*→\s*\S+\s*$")
 MARKER = re.compile(r"\s*\(\*\)\s*$")
+# Trailing #tags sit outside the stamp (`… 09:00 ++1m #errand`). Peeled
+# and reattached so the stamp can be removed without eating the tags.
+_TAG_TAIL = re.compile(r"((?:\s+#\w+)+)\s*$")
+_REPEATER_TAIL = re.compile(r"\s+(?:\+\+|\.\+)\d+[dwmy]\s*$")
 AGENDA_ROW = re.compile(
     r"^(?P<rest>- \[[ xXya!]\].*?)\s{2,}(?P<path>\S+?):(?P<line>\d+):\d+\s*$")
 H1 = re.compile(r"^#\s+(?:\[[ xXya!]\]\s+)?(.+?)\s*$")
@@ -131,10 +135,38 @@ def td_file():
     return task_folder() / "todo.md"
 
 
+def _identity_text(text):
+    """Task text with link, (*), and a trailing stamp/repeater removed.
+
+    The stamp is an annotation. Leaving it in the slug or the added-hash
+    orphans the dedicated file and jumps the row to the top of the agenda
+    every time `td stamp` or a repeater bump moves the date.
+    """
+    s = MARKER.sub("", text).strip()
+    s = LINK.sub("", s).strip()
+    tags = ""
+    tag_m = _TAG_TAIL.search(s)
+    if tag_m:
+        tags = tag_m.group(1)
+        s = s[:tag_m.start()].rstrip()
+    # Repeater belongs to the stamp. Drop it only when a stamp is actually
+    # trailing — a bare `++1d` in the title is not one.
+    rep = _REPEATER_TAIL.search(s)
+    head = s[:rep.start()] if rep else s
+    stamp = None
+    for m in SCHEDULE_TS.finditer(head):
+        if head[m.end():].strip() == "":
+            stamp = m
+    if stamp and (stamp.start() == 0 or head[stamp.start() - 1].isspace()):
+        s = head[:stamp.start()].rstrip()
+    if tags:
+        s = f"{s}{tags}" if s else tags.strip()
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def bullet_hash(path, text):
-    """Stable hash: invariant under state char changes; strips → link suffix."""
-    core = LINK.sub("", text).strip()
-    core = re.sub(r"\s+", " ", core)
+    """Stable hash: ignores checkbox, link, marker, and a trailing stamp."""
+    core = _identity_text(text)
     h = hashlib.sha1(f"{path}\t{core}".encode("utf-8", "surrogateescape"))
     return h.hexdigest()[:16]
 
@@ -195,7 +227,7 @@ def _bump_recurring(raw, today):
 
 
 def slugify(text):
-    s = MARKER.sub("", LINK.sub("", text)).lower().strip()
+    s = _identity_text(text).lower()
     s = SLUG_SPLIT.sub("-", s).strip("-")
     return s or "untitled"
 
@@ -1037,11 +1069,44 @@ def run_tests(verbose=False):
             c = bullet_hash(p, "refactor td parser V2")
             self.assertNotEqual(a, c)
 
+        def test_hash_ignores_trailing_stamp(self):
+            p = "/x.md"
+            plain = bullet_hash(p, "pay rent")
+            stamped = bullet_hash(p, "pay rent 2026-11-01 Sat 09:00")
+            bumped = bullet_hash(p, "pay rent 2026-12-01 Tue 09:00 ++1m")
+            tagged = bullet_hash(p, "pay rent 2026-11-01 Sat 09:00 ++1m #errand")
+            self.assertEqual(plain, stamped)
+            self.assertEqual(plain, bumped)
+            self.assertEqual(bullet_hash(p, "pay rent #errand"), tagged)
+            self.assertNotEqual(plain, bullet_hash(p, "pay rent later"))
+
         def test_slugify(self):
             self.assertEqual(slugify("Costco run!"), "costco-run")
             self.assertEqual(slugify("costCo RUN"), "costco-run")
             self.assertEqual(slugify("hello / world"), "hello-world")
             self.assertEqual(slugify("___"), "untitled")
+            self.assertEqual(
+                slugify("refactor td parser 2026-10-12 Sun 09:00"),
+                "refactor-td-parser")
+            self.assertEqual(
+                slugify("pay rent 2026-11-01 Sat 09:00 ++1m"), "pay-rent")
+            self.assertEqual(
+                slugify("pay rent 2026-11-01 Sat 09:00 .+2w"), "pay-rent")
+            self.assertEqual(slugify("pay rent 2026-11-01 09:00"), "pay-rent")
+            self.assertEqual(
+                slugify("pay rent 2026-10-01 Thu 09:00 ++1m"),
+                slugify("pay rent 2026-11-01 Sun 09:00 ++1m"))
+            self.assertEqual(
+                slugify("pay rent 2026-11-01 Sat 09:00 ++1m #errand"),
+                "pay-rent-errand")
+            self.assertEqual(
+                slugify("refactor td parser 2026-10-12 Sun 09:00 (*)"),
+                "refactor-td-parser")
+            self.assertEqual(
+                slugify("Pay rent 2026-11-01 Sat 09:00 → ~/tasks/pay-rent.md"),
+                "pay-rent")
+            # A date inside the title, with no time, is not a stamp.
+            self.assertEqual(slugify("party 2026-11-01"), "party-2026-11-01")
 
     class List(Case):
         def test_groups_and_sort(self):
@@ -1100,6 +1165,19 @@ def run_tests(verbose=False):
             # single file, order comes from file order
             self.assertIn("alpha", out)
             self.assertIn("bravo", out)
+
+        def test_stamp_does_not_reshuffle_added_order(self):
+            # Bravo is first-seen later, so added-sort puts it above alpha.
+            # Stamping alpha must not mint a new hash and jump it back to the top.
+            self.put_inbox("- [ ] alpha\n")
+            self.td("list", now_="2026-10-10 11:00")
+            self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
+            out = self.td("list", now_="2026-10-10 11:05")
+            self.assertLess(out.index("bravo"), out.index("alpha"))
+            self.put_inbox(
+                "- [ ] alpha 2026-10-12 Sun 09:00 ++1w\n- [ ] bravo\n")
+            out = self.td("list", now_="2026-10-10 12:00")
+            self.assertLess(out.index("bravo"), out.index("alpha"))
 
     class Tick(Case):
         def test_future_timestamp_fires_when_due(self):
@@ -1316,6 +1394,16 @@ def run_tests(verbose=False):
                           stdin="- [y] Pay rent → ~/tasks/pay-rent.md\n")
             self.assertEqual(out.strip(), "- [y] Pay rent")
 
+        def test_promote_stamped_bullet_uses_unstamped_slug(self):
+            self.td("promote",
+                    stdin="- [a] refactor td parser 2026-10-12 Sun 09:00\n")
+            self.assertTrue((self.tasks / "refactor-td-parser.md").is_file())
+            dated = "refactor-td-parser-2026-10-12-sun-09-00.md"
+            self.assertFalse((self.tasks / dated).exists())
+            self.td("promote",
+                    stdin="- [ ] pay rent 2026-11-01 Sat 09:00 ++1m\n")
+            self.assertTrue((self.tasks / "pay-rent.md").is_file())
+
     class Marker(Case):
         def test_bullet_with_dedicated_file_gets_marker(self):
             self.put_inbox("- [a] refactor td parser\n- [ ] call jon\n")
@@ -1339,6 +1427,15 @@ def run_tests(verbose=False):
             out = self.td("list")
             self.assertNotIn("# ORPHANS", out)
 
+        def test_stamped_bullet_still_marks_dedicated_file(self):
+            self.put_inbox(
+                "- [a] refactor td parser 2026-10-12 Sun 09:00 ++1w\n")
+            self.put_dedicated("refactor-td-parser.md", "# refactor td parser\n")
+            out = self.td("list")
+            self.assertIn(
+                "- [a] refactor td parser 2026-10-12 Sun 09:00 ++1w (*)", out)
+            self.assertNotIn("# ORPHANS", out)
+
     class Jump(Case):
         def test_jumps_to_dedicated_when_exists(self):
             inbox = self.put_inbox("- [a] refactor td parser\n")
@@ -1351,6 +1448,14 @@ def run_tests(verbose=False):
             inbox = self.put_inbox("- [ ] call jon\n")
             out = self.td("jump", "--from", f"{inbox}:1").strip()
             self.assertEqual(out, str(inbox))
+
+        def test_jump_ignores_stamp(self):
+            inbox = self.put_inbox(
+                "- [a] refactor td parser 2026-10-12 Sun 09:00 ++1w\n")
+            target = self.put_dedicated("refactor-td-parser.md",
+                                        "# refactor td parser\n")
+            out = self.td("jump", "--from", f"{inbox}:1").strip()
+            self.assertEqual(out, str(target))
 
         def test_fallback_on_non_bullet(self):
             inbox = self.put_inbox("just a note\n")
