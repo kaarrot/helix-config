@@ -40,6 +40,11 @@ Commands:
                        the checkbox between " " and S in-place.
   td new [--state todo|today|active]
                        print "- [S] " for pipe/insert
+  td stamp [--restamp] stdin: a line. If it contains a date, replace (default)
+                       with today's date (preserving the time) or recompute
+                       the weekday only (--restamp). If no date, append a
+                       fresh "YYYY-MM-DD Xxx HH:MM" to the end of the line.
+                       The weekday is always kept in sync with the date.
   td fire PATH         fire a dedicated file's timestamp now (testing)
   td test [-v]         run tests
 
@@ -58,10 +63,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 TASK = re.compile(r"^(?P<indent>\s*)- \[(?P<state>[ xXya!])\]\s+(?P<text>.*?)\s*$")
-# A scheduled timestamp is any YYYY-MM-DD HH:MM NOT followed by " - "
+# A scheduled timestamp is any YYYY-MM-DD [Xxx ]HH:MM NOT followed by " - "
 # (the ` - ` suffix is tl's running-entry convention — those are logs,
 # never schedules). The lookahead keeps tl entries out of the candidate list.
-SCHEDULE_TS = re.compile(r"(\d{4}-\d{2}-\d{2}) (\d{1,2}:\d{2})(?! - )")
+# The optional 3-letter weekday between date and time is purely decorative
+# and ignored by parsing — `td stamp` keeps it in sync with the date.
+SCHEDULE_TS = re.compile(
+    r"(\d{4}-\d{2}-\d{2})(?: [A-Z][a-z]{2})? (\d{1,2}:\d{2})(?! - )")
 TAG = re.compile(r"#(\w+)")
 LINK = re.compile(r"\s*→\s*\S+\s*$")
 MARKER = re.compile(r"\s*\(\*\)\s*$")
@@ -490,6 +498,37 @@ def cmd_new(args):
     return 0
 
 
+def cmd_stamp(args):
+    restamp = "--restamp" in args
+    data = sys.stdin.read()
+    trailing_nl = data.endswith("\n")
+    body = data[:-1] if trailing_nl else data
+    t = now()
+
+    m = SCHEDULE_TS.search(body)
+    if m:
+        date_str = m.group(1)
+        time_str = m.group(2)
+        if restamp:
+            try:
+                wd = datetime.strptime(date_str, "%Y-%m-%d").strftime("%a")
+                new = f"{date_str} {wd} {time_str}"
+            except ValueError:
+                new = body[m.start():m.end()]
+        else:
+            new = f"{t.strftime('%Y-%m-%d %a')} {time_str}"
+        rewritten = body[:m.start()] + new + body[m.end():]
+    else:
+        if restamp:
+            rewritten = body
+        else:
+            stamp = t.strftime("%Y-%m-%d %a %H:%M")
+            rewritten = f"{body} {stamp}" if body else stamp
+
+    sys.stdout.write(rewritten + ("\n" if trailing_nl else ""))
+    return 0
+
+
 def cmd_promote(args=None):
     """Create/reuse ~/tasks/<slug>.md for a bullet.
 
@@ -850,6 +889,8 @@ def main(argv):
         return cmd_next()
     if cmd == "new":
         return cmd_new(rest)
+    if cmd == "stamp":
+        return cmd_stamp(rest)
     if cmd == "promote":
         return cmd_promote(rest)
     if cmd == "jump":
@@ -1104,6 +1145,58 @@ def run_tests(verbose=False):
             self.assertEqual(self.td("new", "--state", "today"), "- [y] ")
             self.assertEqual(self.td("new", "--state", "active"), "- [a] ")
 
+    class Stamp(Case):
+        # NOW = "2026-10-10 11:00"  → %a = "Sat"
+        def test_append_when_no_date(self):
+            out = self.td("stamp", stdin="- [y] call jon")
+            self.assertEqual(out, "- [y] call jon 2026-10-10 Sat 11:00")
+
+        def test_append_when_empty_line(self):
+            self.assertEqual(self.td("stamp", stdin=""), "2026-10-10 Sat 11:00")
+
+        def test_replace_existing_date_with_today(self):
+            out = self.td("stamp",
+                          stdin="- [y] pay rent 2025-12-25 Thu 09:00")
+            self.assertEqual(out, "- [y] pay rent 2026-10-10 Sat 09:00")
+
+        def test_replace_without_weekday_fills_it_in(self):
+            # existing timestamp has no weekday — replace keeps the time
+            out = self.td("stamp", stdin="meeting 2025-12-25 09:00")
+            self.assertEqual(out, "meeting 2026-10-10 Sat 09:00")
+
+        def test_date_only_line_falls_through_to_append(self):
+            # SCHEDULE_TS requires a time, so a bare date is not recognised
+            # as a stamp → treated as "no date", fresh stamp appended.
+            out = self.td("stamp", stdin="meeting 2025-12-25")
+            self.assertTrue(out.endswith("2026-10-10 Sat 11:00"))
+            self.assertIn("2025-12-25", out)
+
+        def test_restamp_fixes_weekday_only(self):
+            # 2026-10-15 is a Thu — restamp fixes a wrong weekday
+            out = self.td("stamp", "--restamp",
+                          stdin="- [y] pay rent 2026-10-15 Sun 09:00")
+            self.assertEqual(out, "- [y] pay rent 2026-10-15 Thu 09:00")
+
+        def test_restamp_adds_missing_weekday(self):
+            out = self.td("stamp", "--restamp",
+                          stdin="pay rent 2026-10-15 09:00")
+            self.assertEqual(out, "pay rent 2026-10-15 Thu 09:00")
+
+        def test_restamp_no_date_passthrough(self):
+            self.assertEqual(self.td("stamp", "--restamp", stdin="- [ ] todo"),
+                             "- [ ] todo")
+
+        def test_preserves_trailing_newline(self):
+            self.assertEqual(self.td("stamp", stdin="x\n"),
+                             "x 2026-10-10 Sat 11:00\n")
+
+        def test_tl_log_entry_not_touched(self):
+            # ` - ` suffix → not a schedule → `stamp` leaves it alone and
+            # appends a fresh stamp at end
+            out = self.td("stamp",
+                          stdin="2026-10-08 19:16 - 19:17 = 0h 01min")
+            self.assertTrue(out.endswith("2026-10-10 Sat 11:00"))
+
     class Next(Case):
         def test_soonest_future(self):
             self.put_dedicated("a.md", "# a\n2026-10-10 15:00\n")
@@ -1298,7 +1391,7 @@ def run_tests(verbose=False):
 
     loader = unittest.defaultTestLoader
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
-                               for c in (Parse, List, Tick, New, Next,
+                               for c in (Parse, List, Tick, New, Stamp, Next,
                                          Promote, Marker, Jump, SetToggle, Fire))
     ok = unittest.TextTestRunner(verbosity=2 if verbose else 1).run(suite).wasSuccessful()
     return 0 if ok else 1

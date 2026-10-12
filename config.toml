@@ -121,11 +121,17 @@ S = [":write", "align_view_top", ":sh ~/.config/helix/bin/tl summary --file %{bu
 
 # Open the inbox file.
 t = ":open ~/tasks/todo.md"
-# Insert a SCHEDULE-compatible timestamp (`YYYY-MM-DD HH:MM`) at the cursor,
-# on the same line (no `-` suffix, unlike tl's `space , i`). An inbox bullet
-# that carries such a timestamp fires a Termux notification at that time —
-# same catchup window and dedup as the dedicated-file SCHEDULE lines.
-s = ":insert-output date +\" %%Y-%%m-%%d %%H:%%M\""
+# Stamp the current line via `td stamp` (whole-line :pipe). Behaviour:
+#   • No date on the line  → appends "YYYY-MM-DD Xxx HH:MM" at the end.
+#   • Existing date+time   → replaces the date with today's (keeps the
+#                            time, keeps/fixes the weekday).
+#   • tl log entries (`YYYY-MM-DD HH:MM - ...`) are left alone and a fresh
+#     stamp is appended, since those lines are history, not schedules.
+s = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td stamp"]
+# Restamp — recompute only the weekday of the date on the current line so
+# it matches the date (useful after manually editing the date). Picked `R`
+# because `S` is already `tl summary` above.
+R = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td stamp --restamp"]
 # Reusable agenda buffer, grouped ACTIVE / TODAY / TODO, newest-added at the top.
 # auto-reload = true refreshes the same buffer on re-run (no new window).
 l = [":sh ~/.config/helix/bin/td list >/dev/null", ":open /data/data/com.termux/files/home/.cache/td/agenda.md"]
