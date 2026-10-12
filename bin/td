@@ -39,7 +39,8 @@ Commands:
                        and print the row with the new state char. Else, toggle
                        the checkbox between " " and S in-place. If S is "x"
                        and the line carries an org-style ++Nu/.+Nu repeater
-                       (u = d|w|m|y), the date is bumped instead and state
+                       as its own token (u = d|w|m|y; `C++1d` does not
+                       count), the date is bumped instead and state
                        stays [ ]: ++ advances the stamped date by N units
                        until it is in the future (anchored, e.g. rent on the
                        1st); .+ sets it to today + N units (floating).
@@ -76,9 +77,11 @@ TASK = re.compile(r"^(?P<indent>\s*)- \[(?P<state>[ xXya!])\]\s+(?P<text>.*?)\s*
 # and ignored by parsing — `td stamp` keeps it in sync with the date.
 SCHEDULE_TS = re.compile(
     r"(\d{4}-\d{2}-\d{2})(?: [A-Z][a-z]{2})? (\d{1,2}:\d{2})(?! - )")
-# org-mode-style repeater: ++2w = bump old date by N units until >today;
-# .+2w = bump to today + N units. Units: d/w/m/y. See _bump_recurring.
-REPEATER = re.compile(r"(\+\+|\.\+)(\d+)([dwmy])")
+# org-mode-style repeater, as its own token: ++2w bumps the old date by
+# N units until >today; .+2w bumps to today + N units. Units: d/w/m/y.
+# Whitespace (or start) before the sigil, and a non-word after the unit,
+# so `C++1d` and `++1days` are not repeaters. See _bump_recurring.
+REPEATER = re.compile(r"(?<!\S)(\+\+|\.\+)(\d+)([dwmy])(?!\w)")
 TAG = re.compile(r"#(\w+)")
 LINK = re.compile(r"\s*→\s*\S+\s*$")
 MARKER = re.compile(r"\s*\(\*\)\s*$")
@@ -194,8 +197,8 @@ def _add_period(d, n, unit):
 
 
 def _bump_recurring(raw, today):
-    """If raw has both a SCHEDULE_TS and a ++/.+ repeater, return raw with
-    the date advanced. Otherwise return None.
+    """If raw has both a SCHEDULE_TS and a ++/.+ repeater token, return
+    raw with the date advanced. Otherwise return None.
 
     ++Nu: new = old + N*unit, repeated until >today (anchored).
     .+Nu: new = today + N*unit (floating).
@@ -1612,6 +1615,24 @@ def run_tests(verbose=False):
             self.assertIsNone(_bump_recurring(
                 "- [ ] rent 2026-09-15 Tue 09:00", datetime(2026, 10, 10)))
 
+        def test_bump_ignores_repeater_inside_word(self):
+            # `C++1d` contains `++1d` but is not a repeater token.
+            today = datetime(2026, 10, 10, 11, 0)
+            for raw in (
+                "- [ ] upgrade C++1d parser 2026-11-01 Sun 09:00",
+                "- [ ] upgrade C++1y parser 2026-11-01 Sun 09:00",
+                "- [ ] port foo.+2w later 2026-11-01 Sun 09:00",
+                "- [ ] rent 2026-10-01 Thu 09:00 ++1days",
+            ):
+                self.assertIsNone(_bump_recurring(raw, today), raw)
+
+        def test_bump_real_repeater_after_plusplus_word(self):
+            today = datetime(2026, 10, 10, 11, 0)
+            out = _bump_recurring(
+                "- [ ] upgrade C++1d parser 2026-10-01 Thu 09:00 ++1m", today)
+            self.assertEqual(
+                out, "- [ ] upgrade C++1d parser 2026-11-01 Sun 09:00 ++1m")
+
         def test_bump_no_date(self):
             self.assertIsNone(_bump_recurring(
                 "- [ ] rent ++2w", datetime(2026, 10, 10)))
@@ -1643,6 +1664,13 @@ def run_tests(verbose=False):
                           stdin="- [ ] plain 2026-10-01 Thu 09:00\n")
             self.assertEqual(out.strip(),
                              "- [x] plain 2026-10-01 Thu 09:00")
+
+        def test_toggle_x_plusplus_inside_word_marks_done(self):
+            out = self.td("toggle", "x", stdin=(
+                "- [ ] upgrade C++1d parser 2026-11-01 Sun 09:00\n"))
+            self.assertEqual(
+                out.strip(),
+                "- [x] upgrade C++1d parser 2026-11-01 Sun 09:00")
 
         def test_toggle_x_from_file_bumps_on_disk(self):
             p = self.put_inbox("- [ ] rent 2026-10-01 Thu 09:00 ++1m\n")
