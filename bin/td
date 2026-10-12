@@ -10,19 +10,20 @@ Two tiers of tasks:
       - [x] took bins out                       # [x] done
       - [!] call mom                            # [!] ignore
 
-  Dedicated files in $TL_DIR/*.md, one per follow-up task. Notes + optional
-  "SCHEDULE: YYYY-MM-DD HH:MM" line to fire a termux notification. The agenda
-  marks a bullet with " (*)" when a dedicated file with the same slug exists.
+  Dedicated files in $TL_DIR/*.md, one per follow-up task. Any
+  `YYYY-MM-DD HH:MM` timestamp (not followed by ` - `, which marks a tl
+  log entry) fires a termux notification at that time. The agenda marks
+  a bullet with " (*)" when a dedicated file with the same slug exists.
 
       # refactor td parser
-      SCHEDULE: 2026-11-01 10:00
+      2026-11-01 10:00
 
       notes/subtasks...
 
 Commands:
   td install           register a 15-min termux-job-scheduler job that runs `td tick`
   td uninstall         cancel it
-  td tick              scan dedicated files, fire due SCHEDULEs
+  td tick              scan files, record future timestamps, fire due ones
   td list [--state todo|today|active|all] [--sort added|modified]
                        build the agenda from $TD_FILE bullets; write to
                        ~/.cache/td/agenda.md and stdout. Appends " (*)" to
@@ -39,12 +40,12 @@ Commands:
                        the checkbox between " " and S in-place.
   td new [--state todo|today|active]
                        print "- [S] " for pipe/insert
-  td fire PATH         fire a dedicated file's SCHEDULE now (testing)
+  td fire PATH         fire a dedicated file's timestamp now (testing)
   td test [-v]         run tests
 
 Env: $TL_DIR (default ~/tasks), $TD_FILE (default $TL_DIR/todo.md),
      $TL_NOW="YYYY-MM-DD HH:MM" fakes the clock,
-     $TD_CATCHUP_H (default 6), $TD_LEAD_MIN (default 0),
+     $TD_LEAD_MIN (default 0),
      $TD_DRY_RUN=1 skips notifications and prints "would fire: ..." instead.
 """
 import hashlib
@@ -57,8 +58,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 TASK = re.compile(r"^(?P<indent>\s*)- \[(?P<state>[ xXya!])\]\s+(?P<text>.*?)\s*$")
-SCHEDULE_MARK = re.compile(r"\bSCHEDULE\b")
-SCHEDULE_TS = re.compile(r"(\d{4}-\d{2}-\d{2}) (\d{1,2}:\d{2})")
+# A scheduled timestamp is any YYYY-MM-DD HH:MM NOT followed by " - "
+# (the ` - ` suffix is tl's running-entry convention — those are logs,
+# never schedules). The lookahead keeps tl entries out of the candidate list.
+SCHEDULE_TS = re.compile(r"(\d{4}-\d{2}-\d{2}) (\d{1,2}:\d{2})(?! - )")
 TAG = re.compile(r"#(\w+)")
 LINK = re.compile(r"\s*→\s*\S+\s*$")
 MARKER = re.compile(r"\s*\(\*\)\s*$")
@@ -79,6 +82,7 @@ JOB_ID = 7421
 CACHE = Path("~/.cache/td").expanduser()
 FIRED_PATH = CACHE / "fired"
 ADDED_PATH = CACHE / "added"
+SCHEDULED_PATH = CACHE / "scheduled"
 LIST_PATH = CACHE / "agenda.md"
 TICK_SHIM = Path("~/.config/helix/bin/td-tick").expanduser()
 
@@ -156,46 +160,55 @@ def scan_inbox():
     return p, out
 
 
-def scan_dedicated():
-    """Dedicated-task files in $TL_DIR with a SCHEDULE: line (inbox excluded)."""
+def scan_schedules():
+    """All schedule candidates across $TL_DIR files + inbox bullets.
+
+    Any `YYYY-MM-DD HH:MM` timestamp counts — no `SCHEDULE:` marker needed.
+    Timestamps followed by ` - ` are excluded (tl log entries). On inbox
+    bullets, only visible states ([ ], [y], [a]) are eligible — [x]/[!]
+    skip. On dedicated files every matching timestamp is a candidate.
+    """
     folder = task_folder()
     if not folder.is_dir():
         return []
     try:
-        inbox = td_file().resolve()
+        inbox_resolved = td_file().resolve()
     except OSError:
-        inbox = None
+        inbox_resolved = None
     out = []
     for f in sorted(folder.glob("*.md")):
         try:
-            if inbox and f.resolve() == inbox:
-                continue
+            is_inbox = inbox_resolved is not None and f.resolve() == inbox_resolved
         except OSError:
             continue
         try:
             lines = f.read_bytes().decode("utf-8", "surrogateescape").splitlines()
         except OSError:
             continue
-        title = f.stem
+        file_title = f.stem
         title_found = False
-        due = None
-        schedule_line = None
         for i, raw in enumerate(lines, 1):
             hm = H1.match(raw)
             if hm and not title_found:
-                title = hm[1]
+                file_title = hm[1]
                 title_found = True
-            if due is None and SCHEDULE_MARK.search(raw):
-                ts = SCHEDULE_TS.search(raw)
-                if ts:
-                    try:
-                        due = datetime.strptime(f"{ts[1]} {ts[2]}", "%Y-%m-%d %H:%M")
-                        schedule_line = i
-                    except ValueError:
-                        pass
-        if due:
+            if is_inbox:
+                b = parse_bullet(f, i, raw)
+                if not b or b.state not in VISIBLE:
+                    continue
+                line_title = (MARKER.sub("", LINK.sub("", b.text)).strip()
+                              or f.stem)
+            else:
+                line_title = file_title
+            ts = SCHEDULE_TS.search(raw)
+            if not ts:
+                continue
+            try:
+                due = datetime.strptime(f"{ts[1]} {ts[2]}", "%Y-%m-%d %H:%M")
+            except ValueError:
+                continue
             iso = due.isoformat(timespec="minutes")
-            out.append(Scheduled(f, schedule_line, due, title,
+            out.append(Scheduled(f, i, due, line_title,
                                  schedule_hash(str(f), iso)))
     return out
 
@@ -222,6 +235,16 @@ def load_fired():
         parts = line.split("\t")
         if len(parts) >= 2:
             out.add((parts[1], parts[0]))
+    return out
+
+
+def load_scheduled():
+    """-> set of (hash, due_iso). Items we've seen as future on some tick."""
+    out = set()
+    for line in _read_sidecar(SCHEDULED_PATH):
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            out.add((parts[1], parts[2]))
     return out
 
 
@@ -289,25 +312,45 @@ def fire_notification(title, body, open_path):
 # ---------------------------------------------------------------- commands
 
 def cmd_tick():
+    """Fire scheduled items.
+
+    An item fires iff it was once observed as future (recorded in the
+    `scheduled` sidecar on a prior tick) and is now due or past-due.
+    Rule:
+      • new timestamp with due > now  →  add (hash, iso) to `scheduled`
+      • timestamp with due ≤ now AND (hash, iso) ∈ scheduled AND ∉ fired  →  fire
+
+    `tl` log entries are excluded by the SCHEDULE_TS regex itself (they
+    carry a ` - ` after the timestamp). Random past-date mentions never
+    enter `scheduled` because at first observation they're already past.
+    No catchup window — the sidecar handles missed fires across Doze /
+    reboots as long as the entry was captured as future at least once."""
     t = now()
-    catchup = timedelta(hours=int(os.environ.get("TD_CATCHUP_H", "6")))
     lead = timedelta(minutes=int(os.environ.get("TD_LEAD_MIN", "0")))
-    items = scan_dedicated()
+    items = scan_schedules()
     update_added([(s.hash, s.title) for s in items], t.isoformat(timespec="minutes"))
+    scheduled = load_scheduled()
     fired = load_fired()
+    new_scheduled = []
     for s in items:
-        fire_at = s.due - lead
-        if fire_at > t:
-            continue
-        if (t - fire_at) > catchup:
-            continue
         due_iso = s.due.isoformat(timespec="minutes")
-        if (s.hash, due_iso) in fired:
+        fire_at = s.due - lead
+        key = (s.hash, due_iso)
+        if fire_at > t:
+            if key not in scheduled:
+                new_scheduled.append((t.isoformat(timespec="minutes"),
+                                      s.hash, due_iso, s.title[:80]))
+                scheduled.add(key)
+            continue
+        if key not in scheduled:
+            continue
+        if key in fired:
             continue
         fire_notification("TODO", s.title, s.path)
         _append_sidecar(FIRED_PATH, [(due_iso, s.hash, s.title[:80])])
-        fired.add((s.hash, due_iso))
-    prune_fired(t, catchup * 2)
+        fired.add(key)
+    if new_scheduled:
+        _append_sidecar(SCHEDULED_PATH, new_scheduled)
     return 0
 
 
@@ -424,7 +467,7 @@ def refresh_list():
 
 def cmd_next():
     t = now()
-    future = [s for s in scan_dedicated() if s.due >= t]
+    future = [s for s in scan_schedules() if s.due >= t]
     if not future:
         print("")
         return 0
@@ -747,7 +790,7 @@ def cmd_fire(args):
         hm = H1.match(raw)
         if hm and not title_found:
             title = hm[1]; title_found = True
-        if due is None and SCHEDULE_MARK.search(raw):
+        if due is None:
             ts = SCHEDULE_TS.search(raw)
             if ts:
                 try:
@@ -948,80 +991,109 @@ def run_tests(verbose=False):
             self.assertIn("bravo", out)
 
     class Tick(Case):
-        def test_schedule_fires(self):
-            self.put_dedicated("rent.md",
-                               "# rent\nSCHEDULE: 2026-10-10 10:55\n")
-            out = self.td("tick")
+        def test_future_timestamp_fires_when_due(self):
+            # First tick (NOW = 11:00) sees future; records in scheduled.
+            self.put_dedicated("rent.md", "# rent\n2026-10-10 12:00\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 12:00")
             self.assertIn("would fire", out)
             self.assertIn("rent", out)
 
-        def test_schedule_flexible_tl_style(self):
-            # tl-style "space . i" line: `YYYY-MM-DD HH:MM - SCHEDULE: body`
-            self.put_dedicated("rent.md",
-                               "# rent\n2026-10-10 10:55 - SCHEDULE: pay it\n")
-            out = self.td("tick")
-            self.assertIn("would fire", out)
-            self.assertIn("rent", out)
-
-        def test_schedule_requires_both_marker_and_date(self):
-            self.put_dedicated("nope1.md", "# nope\n2026-10-10 10:55 - just a log\n")
-            self.put_dedicated("nope2.md", "# nope\nSCHEDULE: see you later\n")
+        def test_past_only_never_fires(self):
+            # Entry is already past at first observation — never scheduled,
+            # never fires. This is what blocks random date mentions / tl
+            # entries that pre-date td's awareness.
+            self.put_dedicated("stale.md", "# stale\n2026-10-10 04:00\n")
             out = self.td("tick")
             self.assertNotIn("would fire", out)
+            later = self.td("tick", now_="2026-10-10 15:00")
+            self.assertNotIn("would fire", later)
 
-        def test_future_not_fired(self):
-            self.put_dedicated("later.md",
-                               "# later\nSCHEDULE: 2026-10-11 09:00\n")
+        def test_tl_entries_dont_fire(self):
+            # `YYYY-MM-DD HH:MM - ...` is a tl log entry — the trailing
+            # ` - ` keeps it out of the SCHEDULE_TS match entirely.
+            self.put_dedicated("rent.md",
+                               "# rent\n2026-10-10 12:00 - started work\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 13:00")
+            self.assertNotIn("would fire", out)
+
+        def test_future_alone_doesnt_fire(self):
+            self.put_dedicated("later.md", "# later\n2026-10-11 09:00\n")
             out = self.td("tick")
             self.assertNotIn("would fire", out)
 
         def test_dedup(self):
-            self.put_dedicated("rent.md",
-                               "# rent\nSCHEDULE: 2026-10-10 10:55\n")
+            self.put_dedicated("rent.md", "# rent\n2026-10-10 12:00\n")
             self.td("tick")
-            second = self.td("tick")
+            self.td("tick", now_="2026-10-10 12:00")
+            second = self.td("tick", now_="2026-10-10 12:00")
             self.assertNotIn("would fire", second)
 
         def test_reschedule_rearms(self):
-            p = self.put_dedicated("rent.md",
-                                   "# rent\nSCHEDULE: 2026-10-10 10:55\n")
+            p = self.put_dedicated("rent.md", "# rent\n2026-10-10 12:00\n")
             self.td("tick")
-            p.write_text("# rent\nSCHEDULE: 2026-10-10 10:57\n")
-            out = self.td("tick")
+            self.td("tick", now_="2026-10-10 12:00")
+            p.write_text("# rent\n2026-10-10 13:00\n")
+            self.td("tick", now_="2026-10-10 12:00")
+            out = self.td("tick", now_="2026-10-10 13:00")
             self.assertIn("would fire", out)
 
-        def test_catchup_window(self):
-            self.put_dedicated("stale.md",
-                               "# stale\nSCHEDULE: 2026-10-10 04:00\n")
-            out = self.td("tick")
-            self.assertNotIn("would fire", out)
-
         def test_lead_minutes(self):
-            self.put_dedicated("rent.md",
-                               "# rent\nSCHEDULE: 2026-10-10 11:10\n")
+            # Due at 11:10; lead 15m means fire_at = 10:55 ≤ NOW(11:00).
+            # First observation at an earlier NOW is required to seed
+            # scheduled. Then a tick at NOW=11:00 fires.
+            self.put_dedicated("rent.md", "# rent\n2026-10-10 11:10\n")
+            self.td("tick", now_="2026-10-10 10:00", TD_LEAD_MIN="15")
             out = self.td("tick", TD_LEAD_MIN="15")
             self.assertIn("would fire", out)
 
-        def test_no_schedule_no_fire(self):
+        def test_no_timestamp_no_fire(self):
             self.put_dedicated("note.md", "# just a note\n\nsome content\n")
             out = self.td("tick")
             self.assertNotIn("would fire", out)
 
-        def test_inbox_bullets_dont_fire(self):
+        def test_inbox_bullet_without_date_doesnt_fire(self):
             self.put_inbox("- [ ] no fire please\n")
             out = self.td("tick")
             self.assertNotIn("would fire", out)
 
+        def test_inbox_bullet_with_future_date_fires_when_due(self):
+            self.put_inbox("- [ ] pay rent 2026-10-10 12:00\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 12:00")
+            self.assertIn("would fire", out)
+            self.assertIn("pay rent", out)
+
+        def test_inbox_done_bullet_doesnt_fire(self):
+            self.put_inbox("- [x] already done 2026-10-10 12:00\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 12:00")
+            self.assertNotIn("would fire", out)
+
+        def test_inbox_today_bullet_with_future_date_fires(self):
+            self.put_inbox("- [y] call jon 2026-10-10 12:00\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 12:00")
+            self.assertIn("would fire", out)
+
+        def test_inbox_dedup(self):
+            self.put_inbox("- [ ] pay rent 2026-10-10 12:00\n")
+            self.td("tick")
+            self.td("tick", now_="2026-10-10 12:00")
+            second = self.td("tick", now_="2026-10-10 12:00")
+            self.assertNotIn("would fire", second)
+
         def test_title_from_h1(self):
-            self.put_dedicated("x.md",
-                               "# nice title\nSCHEDULE: 2026-10-10 10:55\n")
-            out = self.td("tick")
+            self.put_dedicated("x.md", "# nice title\n2026-10-10 12:00\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 12:00")
             self.assertIn("nice title", out)
 
         def test_title_fallback_to_stem(self):
-            self.put_dedicated("stemmed.md",
-                               "SCHEDULE: 2026-10-10 10:55\n")
-            out = self.td("tick")
+            self.put_dedicated("stemmed.md", "2026-10-10 12:00\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 12:00")
             self.assertIn("stemmed", out)
 
     class New(Case):
@@ -1034,9 +1106,9 @@ def run_tests(verbose=False):
 
     class Next(Case):
         def test_soonest_future(self):
-            self.put_dedicated("a.md", "# a\nSCHEDULE: 2026-10-10 15:00\n")
-            self.put_dedicated("b.md", "# b\nSCHEDULE: 2026-10-10 12:00\n")
-            self.put_dedicated("c.md", "# c\nSCHEDULE: 2026-10-09 09:00\n")
+            self.put_dedicated("a.md", "# a\n2026-10-10 15:00\n")
+            self.put_dedicated("b.md", "# b\n2026-10-10 12:00\n")
+            self.put_dedicated("c.md", "# c\n2026-10-09 09:00\n")
             out = self.td("next").strip()
             self.assertTrue(out.startswith("2026-10-10 12:00"))
             self.assertIn("b", out)
@@ -1067,7 +1139,7 @@ def run_tests(verbose=False):
 
         def test_reuses_existing(self):
             existing = self.put_dedicated(
-                "costco-run.md", "# Costco run!\nSCHEDULE: 2026-10-10 09:00\n\nnotes\n")
+                "costco-run.md", "# Costco run!\n2026-10-10 09:00\n\nnotes\n")
             self.td("promote", stdin="- [ ] costCo RUN\n")
             self.assertIn("notes", existing.read_text())
 
@@ -1219,8 +1291,7 @@ def run_tests(verbose=False):
 
     class Fire(Case):
         def test_fire_by_file(self):
-            p = self.put_dedicated("ping.md",
-                                   "# ping\nSCHEDULE: 2026-10-10 09:00\n")
+            p = self.put_dedicated("ping.md", "# ping\n2026-10-10 09:00\n")
             out = self.td("fire", str(p))
             self.assertIn("would fire", out)
             self.assertIn("ping", out)

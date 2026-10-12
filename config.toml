@@ -121,6 +121,11 @@ S = [":write", "align_view_top", ":sh ~/.config/helix/bin/tl summary --file %{bu
 
 # Open the inbox file.
 t = ":open ~/tasks/todo.md"
+# Insert a SCHEDULE-compatible timestamp (`YYYY-MM-DD HH:MM`) at the cursor,
+# on the same line (no `-` suffix, unlike tl's `space , i`). An inbox bullet
+# that carries such a timestamp fires a Termux notification at that time —
+# same catchup window and dedup as the dedicated-file SCHEDULE lines.
+s = ":insert-output date +\" %%Y-%%m-%%d %%H:%%M\""
 # Reusable agenda buffer, grouped ACTIVE / TODAY / TODO, newest-added at the top.
 # auto-reload = true refreshes the same buffer on re-run (no new window).
 l = [":sh ~/.config/helix/bin/td list >/dev/null", ":open /data/data/com.termux/files/home/.cache/td/agenda.md"]
@@ -142,6 +147,9 @@ p = ":open %sh{~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}}
 # then refreshes agenda.md so the agenda reflects the new state.
 y = [":write", ":sh ~/.config/helix/bin/td toggle y --from %{buffer_name} --line %{cursor_line}"]
 a = [":write", ":sh ~/.config/helix/bin/td toggle a --from %{buffer_name} --line %{cursor_line}"]
+# Fire a tick manually — useful while testing schedules without waiting for the
+# 15-min job. Runs the same code the scheduler would.
+ret = [":write", ":sh ~/.config/helix/bin/td-tick"]
 # NOTE: `a` is already bound to `agy -c …` above (line ~82). Pick a free key
 # for the active-state toggle, e.g. uncomment one of:
 # A = ":pipe ~/.config/helix/bin/td toggle a"   # also taken (agy no-perms)
