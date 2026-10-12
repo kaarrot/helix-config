@@ -782,8 +782,10 @@ def cmd_toggle(args):
       • Otherwise reads stdin, writes toggled line to stdout. Used by shells.
 
     In both modes, when the source isn't $TD_FILE the toggle also text-matches
-    the bullet in $TD_FILE and flips it there. The dedicated file's H1 is
-    retagged, and the agenda agenda.md is refreshed."""
+    the bullet in $TD_FILE and updates it there. A repeater bump rewrites that
+    inbox line (its own indent, tags, and link) rather than pasting the
+    caller's row, so an agenda ` (*)` is not copied back. The dedicated
+    file's H1 is retagged, and agenda.md is refreshed from the inbox."""
     if not args:
         sys.exit("usage: td toggle STATE [--from PATH [--line N]]")
     state = args[0]
@@ -829,9 +831,10 @@ def cmd_toggle(args):
     # Recurring: when marking done, bump the date and keep state as todo
     # if the line carries a ++/.+ repeater. Preserves org-style anchored
     # (++) or floating (.+) rescheduling. New state in {x,X} is the trigger.
+    today = now()
     bumped = None
     if new_state in ("x", "X"):
-        bumped = _bump_recurring(raw, now())
+        bumped = _bump_recurring(raw, today)
     if bumped is not None:
         new_state = " "
         new_raw = CHECKBOX.sub(f"- [{new_state}]", bumped, count=1)
@@ -842,9 +845,15 @@ def cmd_toggle(args):
         same = from_path and from_path.resolve() == inbox.resolve()
     except OSError:
         same = False
+    try:
+        agenda = from_path and from_path.resolve() == LIST_PATH.resolve()
+    except OSError:
+        agenda = False
 
-    if use_file:
-        # Rewrite the source line on disk; Helix picks it up via auto-reload.
+    # A bumped agenda row is not written back. refresh_list rebuilds the
+    # agenda from the inbox, and the row we would write carries a
+    # display-only ` (*)`.
+    if use_file and not (agenda and bumped is not None):
         keep_nl = lines[line_no - 1].endswith("\n")
         lines[line_no - 1] = new_raw + ("\n" if keep_nl else "")
         from_path.write_bytes(
@@ -852,7 +861,13 @@ def cmd_toggle(args):
         )
 
     if from_path and not same and inbox.is_file():
-        _retag_in_file(inbox, bm["text"], bm["state"], new_state)
+        if bumped is not None:
+            # Re-bump the inbox line. Pasting `new_raw` would copy the
+            # agenda's ` (*)` and drop the inbox indent.
+            if not _bump_in_file(inbox, bm["text"], bm["state"], today):
+                _retag_in_file(inbox, bm["text"], bm["state"], new_state)
+        else:
+            _retag_in_file(inbox, bm["text"], bm["state"], new_state)
     _retag_dedicated_h1(bm["text"], new_state)
     refresh_list()
     if not use_file:
@@ -860,12 +875,15 @@ def cmd_toggle(args):
     return 0
 
 
-def _retag_in_file(path, text, old_state, new_state):
-    """Find the first `- [old_state] <same core text>` line and flip its checkbox.
+def _find_bullet_lines(path, text, old_state):
+    """Lines whose checkbox state and core text match.
 
-    Warns to stderr when more than one line matches — only the first flips.
+    Core text drops a trailing ` (*)` and `→ link`. The agenda appends
+    ` (*)` for display; it is not part of the inbox bullet.
     """
-    needle = MARKER.sub("", LINK.sub("", text)).strip()
+    # Marker before link: the agenda writes `→ link (*)` and LINK is anchored
+    # at end of line, so the marker has to come off first.
+    needle = LINK.sub("", MARKER.sub("", text)).strip()
     data = path.read_bytes().decode("utf-8", "surrogateescape")
     lines = data.splitlines(keepends=True)
     hits = []
@@ -873,9 +891,18 @@ def _retag_in_file(path, text, old_state, new_state):
         m = TASK.match(raw.rstrip("\n"))
         if not m or m["state"] != old_state:
             continue
-        core = MARKER.sub("", LINK.sub("", m["text"])).strip()
+        core = LINK.sub("", MARKER.sub("", m["text"])).strip()
         if core == needle:
             hits.append(i)
+    return lines, hits, needle
+
+
+def _retag_in_file(path, text, old_state, new_state):
+    """Find the first `- [old_state] <same core text>` line and flip its checkbox.
+
+    Warns to stderr when more than one line matches — only the first flips.
+    """
+    lines, hits, needle = _find_bullet_lines(path, text, old_state)
     if not hits:
         return False
     if len(hits) > 1:
@@ -889,6 +916,31 @@ def _retag_in_file(path, text, old_state, new_state):
     return True
 
 
+def _bump_in_file(path, text, old_state, today):
+    """Bump the matching inbox bullet in place. The caller's line is only a key.
+
+    Re-running the bump on the stored line keeps its indent, tags, and
+    `→ link`, and does not copy an agenda ` (*)` back into the inbox.
+    """
+    lines, hits, needle = _find_bullet_lines(path, text, old_state)
+    if not hits:
+        return False
+    if len(hits) > 1:
+        sys.stderr.write(
+            f"td: {len(hits)} duplicate bullets match {needle!r} in {path}; "
+            f"bumped line {hits[0] + 1} only\n"
+        )
+    i = hits[0]
+    bumped = _bump_recurring(lines[i].rstrip("\n"), today)
+    if bumped is None:
+        return False
+    new_raw = CHECKBOX.sub("- [ ]", bumped, count=1)
+    keep_nl = lines[i].endswith("\n")
+    lines[i] = new_raw + ("\n" if keep_nl else "")
+    path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
+    return True
+
+
 H1_WITH_STATE = re.compile(r"^(#\s+)(?:\[[ xXya!]\]\s+)?(.+?)(\s*)$")
 
 
@@ -897,7 +949,7 @@ def _retag_dedicated_h1(text, new_state):
 
     No-op when the dedicated file is absent. State " " strips the prefix.
     """
-    core = MARKER.sub("", LINK.sub("", text)).strip()
+    core = LINK.sub("", MARKER.sub("", text)).strip()
     if not core:
         return False
     path = task_folder() / f"{slugify(core)}.md"
@@ -1677,6 +1729,62 @@ def run_tests(verbose=False):
             self.td("toggle", "x", "--from", str(p), "--line", "1")
             self.assertEqual(p.read_text(),
                              "- [ ] rent 2026-11-01 Sun 09:00 ++1m\n")
+
+        def agenda_row(self, needle):
+            self.td("list")
+            agenda = self.cache / "agenda.md"
+            lines = agenda.read_text().splitlines()
+            lineno = next(i for i, line in enumerate(lines, 1) if needle in line)
+            return agenda, lineno
+
+        def test_toggle_x_from_agenda_bumps_inbox(self):
+            # space , x on an agenda row must move the inbox date. Refreshing
+            # the agenda from an unbumped inbox used to wipe the bump.
+            p = self.put_inbox("- [ ] rent 2026-10-01 Thu 09:00 ++1m\n")
+            agenda, lineno = self.agenda_row("++1m")
+            self.td("toggle", "x", "--from", str(agenda), "--line", str(lineno))
+            self.assertEqual(p.read_text(),
+                             "- [ ] rent 2026-11-01 Sun 09:00 ++1m\n")
+            refreshed = agenda.read_text()
+            self.assertIn("- [ ] rent 2026-11-01 Sun 09:00 ++1m", refreshed)
+            self.assertNotIn("2026-10-01", refreshed)
+
+        def test_toggle_x_from_agenda_marker_not_copied(self):
+            # Agenda appends ` (*)`, drops indent, and is not the stored line.
+            p = self.put_inbox(
+                "  - [a] pay rent 2026-10-01 Thu 09:00 ++1m #errand → note\n")
+            dedicated = self.put_dedicated(
+                "pay-rent-errand.md", "# [a] pay rent\n")
+            agenda, lineno = self.agenda_row("(*)")
+            self.assertIn("(*)", agenda.read_text().splitlines()[lineno - 1])
+            self.td("toggle", "x", "--from", str(agenda), "--line", str(lineno))
+            self.assertEqual(
+                p.read_text(),
+                "  - [ ] pay rent 2026-11-01 Sun 09:00 ++1m #errand → note\n")
+            refreshed = agenda.read_text()
+            self.assertIn(
+                "- [ ] pay rent 2026-11-01 Sun 09:00 ++1m #errand → note (*)",
+                refreshed)
+            self.assertNotIn("(*) (*)", refreshed)
+            self.assertIn("# [ ] pay rent", dedicated.read_text())
+
+        def test_toggle_x_from_agenda_floating_from_today(self):
+            p = self.put_inbox("- [y] water 2026-09-01 Tue 09:00 .+2w\n")
+            agenda, lineno = self.agenda_row(".+2w")
+            self.td("toggle", "x", "--from", str(agenda), "--line", str(lineno))
+            self.assertEqual(p.read_text(),
+                             "- [ ] water 2026-10-24 Sat 09:00 .+2w\n")
+            refreshed = agenda.read_text()
+            self.assertIn("- [ ] water 2026-10-24 Sat 09:00 .+2w", refreshed)
+            self.assertNotIn("# TODAY", refreshed)
+
+        def test_toggle_x_from_agenda_plain_marks_done(self):
+            p = self.put_inbox("- [ ] plain 2026-10-01 Thu 09:00\n")
+            agenda, lineno = self.agenda_row("plain")
+            self.td("toggle", "x", "--from", str(agenda), "--line", str(lineno))
+            self.assertEqual(p.read_text(),
+                             "- [x] plain 2026-10-01 Thu 09:00\n")
+            self.assertNotIn("plain", agenda.read_text())
 
         def test_toggle_x_bumps_from_today_state(self):
             # Marking a [y] (today) line done also bumps if recurring.
