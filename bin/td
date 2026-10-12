@@ -37,7 +37,12 @@ Commands:
   td set PATH LINE S   rewrite checkbox char at PATH:LINE to S (" "/y/a/x/!)
   td toggle S          stdin: a line. If agenda row, update source via `set`
                        and print the row with the new state char. Else, toggle
-                       the checkbox between " " and S in-place.
+                       the checkbox between " " and S in-place. If S is "x"
+                       and the line carries an org-style ++Nu/.+Nu repeater
+                       (u = d|w|m|y), the date is bumped instead and state
+                       stays [ ]: ++ advances the stamped date by N units
+                       until it is in the future (anchored, e.g. rent on the
+                       1st); .+ sets it to today + N units (floating).
   td new [--state todo|today|active]
                        print "- [S] " for pipe/insert
   td stamp [--restamp] stdin: a line. If it contains a date, replace (default)
@@ -53,6 +58,7 @@ Env: $TL_DIR (default ~/tasks), $TD_FILE (default $TL_DIR/todo.md),
      $TD_LEAD_MIN (default 0),
      $TD_DRY_RUN=1 skips notifications and prints "would fire: ..." instead.
 """
+import calendar
 import hashlib
 import os
 import re
@@ -70,6 +76,9 @@ TASK = re.compile(r"^(?P<indent>\s*)- \[(?P<state>[ xXya!])\]\s+(?P<text>.*?)\s*
 # and ignored by parsing — `td stamp` keeps it in sync with the date.
 SCHEDULE_TS = re.compile(
     r"(\d{4}-\d{2}-\d{2})(?: [A-Z][a-z]{2})? (\d{1,2}:\d{2})(?! - )")
+# org-mode-style repeater: ++2w = bump old date by N units until >today;
+# .+2w = bump to today + N units. Units: d/w/m/y. See _bump_recurring.
+REPEATER = re.compile(r"(\+\+|\.\+)(\d+)([dwmy])")
 TAG = re.compile(r"#(\w+)")
 LINK = re.compile(r"\s*→\s*\S+\s*$")
 MARKER = re.compile(r"\s*\(\*\)\s*$")
@@ -133,6 +142,56 @@ def bullet_hash(path, text):
 def schedule_hash(path, due_iso):
     h = hashlib.sha1(f"{path}\t{due_iso}".encode("utf-8", "surrogateescape"))
     return h.hexdigest()[:16]
+
+
+def _add_period(d, n, unit):
+    if unit == "d":
+        return d + timedelta(days=n)
+    if unit == "w":
+        return d + timedelta(weeks=n)
+    if unit == "m":
+        m = d.month - 1 + n
+        y = d.year + m // 12
+        m = m % 12 + 1
+        last = calendar.monthrange(y, m)[1]
+        return d.replace(year=y, month=m, day=min(d.day, last))
+    if unit == "y":
+        last = calendar.monthrange(d.year + n, d.month)[1]
+        return d.replace(year=d.year + n, day=min(d.day, last))
+    raise ValueError(f"bad unit: {unit}")
+
+
+def _bump_recurring(raw, today):
+    """If raw has both a SCHEDULE_TS and a ++/.+ repeater, return raw with
+    the date advanced. Otherwise return None.
+
+    ++Nu: new = old + N*unit, repeated until >today (anchored).
+    .+Nu: new = today + N*unit (floating).
+    """
+    m_ts = SCHEDULE_TS.search(raw)
+    if not m_ts:
+        return None
+    m_rep = REPEATER.search(raw)
+    if not m_rep:
+        return None
+    try:
+        old = datetime.strptime(f"{m_ts.group(1)} {m_ts.group(2)}",
+                                "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+    prefix, n_s, unit = m_rep.group(1), m_rep.group(2), m_rep.group(3)
+    n = int(n_s)
+    if prefix == ".+":
+        # Floating: new = today + N units, time-of-day preserved from stamp.
+        base = today.replace(hour=old.hour, minute=old.minute,
+                             second=0, microsecond=0)
+        new = _add_period(base, n, unit)
+    else:
+        new = _add_period(old, n, unit)
+        while new <= today:
+            new = _add_period(new, n, unit)
+    new_ts = f"{new.strftime('%Y-%m-%d %a %H:%M')}"
+    return raw[:m_ts.start()] + new_ts + raw[m_ts.end():]
 
 
 def slugify(text):
@@ -731,7 +790,18 @@ def cmd_toggle(args):
             sys.stdout.write(raw)
         return 0
     new_state = " " if bm["state"] == state else state
-    new_raw = CHECKBOX.sub(f"- [{new_state}]", raw, count=1)
+
+    # Recurring: when marking done, bump the date and keep state as todo
+    # if the line carries a ++/.+ repeater. Preserves org-style anchored
+    # (++) or floating (.+) rescheduling. New state in {x,X} is the trigger.
+    bumped = None
+    if new_state in ("x", "X"):
+        bumped = _bump_recurring(raw, now())
+    if bumped is not None:
+        new_state = " "
+        new_raw = CHECKBOX.sub(f"- [{new_state}]", bumped, count=1)
+    else:
+        new_raw = CHECKBOX.sub(f"- [{new_state}]", raw, count=1)
 
     try:
         same = from_path and from_path.resolve() == inbox.resolve()
@@ -1389,10 +1459,104 @@ def run_tests(verbose=False):
             self.assertIn("would fire", out)
             self.assertIn("ping", out)
 
+    class Recurring(Case):
+        # NOW = "2026-10-10 11:00" (Sat)
+
+        def test_add_period_units(self):
+            d = datetime(2026, 10, 10, 9, 0)
+            self.assertEqual(_add_period(d, 3, "d"), datetime(2026, 10, 13, 9, 0))
+            self.assertEqual(_add_period(d, 2, "w"), datetime(2026, 10, 24, 9, 0))
+            self.assertEqual(_add_period(d, 1, "m"), datetime(2026, 11, 10, 9, 0))
+            self.assertEqual(_add_period(d, 1, "y"), datetime(2027, 10, 10, 9, 0))
+
+        def test_add_period_month_wraps_year(self):
+            self.assertEqual(_add_period(datetime(2026, 11, 10, 9, 0), 3, "m"),
+                             datetime(2027, 2, 10, 9, 0))
+
+        def test_add_period_month_clamps_day(self):
+            # Jan 31 + 1m → Feb 28 (2027 is non-leap).
+            self.assertEqual(_add_period(datetime(2027, 1, 31, 9, 0), 1, "m"),
+                             datetime(2027, 2, 28, 9, 0))
+
+        def test_add_period_year_leap_clamps(self):
+            # Feb 29 + 1y → Feb 28.
+            self.assertEqual(_add_period(datetime(2024, 2, 29, 9, 0), 1, "y"),
+                             datetime(2025, 2, 28, 9, 0))
+
+        def test_bump_cumulative_past_due(self):
+            # today 2026-10-10, due 2026-09-15, ++2w → one step past today.
+            today = datetime(2026, 10, 10, 11, 0)
+            out = _bump_recurring(
+                "- [ ] rent 2026-09-15 Tue 09:00 ++2w", today)
+            self.assertIn("2026-10-13 Tue 09:00", out)
+
+        def test_bump_cumulative_already_future(self):
+            # Even when due is already future, ++ still advances by one step.
+            today = datetime(2026, 10, 10, 11, 0)
+            out = _bump_recurring(
+                "- [ ] rent 2026-10-15 Thu 09:00 ++1m", today)
+            self.assertIn("2026-11-15 Sun 09:00", out)
+
+        def test_bump_floating_from_today(self):
+            today = datetime(2026, 10, 10, 11, 0)
+            out = _bump_recurring(
+                "- [ ] water 2026-09-15 Tue 09:00 .+2w", today)
+            self.assertIn("2026-10-24 Sat 09:00", out)
+
+        def test_bump_no_repeater(self):
+            self.assertIsNone(_bump_recurring(
+                "- [ ] rent 2026-09-15 Tue 09:00", datetime(2026, 10, 10)))
+
+        def test_bump_no_date(self):
+            self.assertIsNone(_bump_recurring(
+                "- [ ] rent ++2w", datetime(2026, 10, 10)))
+
+        def test_bump_preserves_rest(self):
+            # Prefix and repeater suffix stay intact around the rewritten date.
+            today = datetime(2026, 10, 10, 11, 0)
+            out = _bump_recurring(
+                "- [ ] pay rent 2026-10-01 Thu 09:00 ++1m #active", today)
+            self.assertEqual(
+                out, "- [ ] pay rent 2026-11-01 Sun 09:00 ++1m #active")
+
+        def test_toggle_x_bumps_cumulative(self):
+            # `td toggle x` on a recurring bullet: state stays [ ], date bumps.
+            out = self.td("toggle", "x",
+                          stdin="- [ ] rent 2026-10-01 Thu 09:00 ++1m\n")
+            self.assertEqual(out.strip(),
+                             "- [ ] rent 2026-11-01 Sun 09:00 ++1m")
+
+        def test_toggle_x_bumps_floating(self):
+            # today = Sat 2026-10-10 11:00
+            out = self.td("toggle", "x",
+                          stdin="- [ ] water 2026-09-01 Tue 09:00 .+2w\n")
+            self.assertEqual(out.strip(),
+                             "- [ ] water 2026-10-24 Sat 09:00 .+2w")
+
+        def test_toggle_x_no_repeater_marks_done(self):
+            out = self.td("toggle", "x",
+                          stdin="- [ ] plain 2026-10-01 Thu 09:00\n")
+            self.assertEqual(out.strip(),
+                             "- [x] plain 2026-10-01 Thu 09:00")
+
+        def test_toggle_x_from_file_bumps_on_disk(self):
+            p = self.put_inbox("- [ ] rent 2026-10-01 Thu 09:00 ++1m\n")
+            self.td("toggle", "x", "--from", str(p), "--line", "1")
+            self.assertEqual(p.read_text(),
+                             "- [ ] rent 2026-11-01 Sun 09:00 ++1m\n")
+
+        def test_toggle_x_bumps_from_today_state(self):
+            # Marking a [y] (today) line done also bumps if recurring.
+            out = self.td("toggle", "x",
+                          stdin="- [y] rent 2026-10-01 Thu 09:00 ++1m\n")
+            self.assertEqual(out.strip(),
+                             "- [ ] rent 2026-11-01 Sun 09:00 ++1m")
+
     loader = unittest.defaultTestLoader
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
                                for c in (Parse, List, Tick, New, Stamp, Next,
-                                         Promote, Marker, Jump, SetToggle, Fire))
+                                         Promote, Marker, Jump, SetToggle,
+                                         Fire, Recurring))
     ok = unittest.TextTestRunner(verbosity=2 if verbose else 1).run(suite).wasSuccessful()
     return 0 if ok else 1
 

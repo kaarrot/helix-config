@@ -153,6 +153,12 @@ p = ":open %sh{~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}}
 # then refreshes agenda.md so the agenda reflects the new state.
 y = [":write", ":sh ~/.config/helix/bin/td toggle y --from %{buffer_name} --line %{cursor_line}"]
 a = [":write", ":sh ~/.config/helix/bin/td toggle a --from %{buffer_name} --line %{cursor_line}"]
+# Mark done. If the line has an org-style ++Nu or .+Nu repeater
+# (u = d|w|m|y), the stamped date is bumped instead and state stays [ ]:
+#   ++1m   anchored: new = old_date + 1m (repeat until future). "rent on the 1st"
+#   .+2w   floating: new = today + 2w, time-of-day preserved. "water plants"
+# Note: this is a td-aware alternative to `space . x` (plain sed toggle).
+x = [":write", ":sh ~/.config/helix/bin/td toggle x --from %{buffer_name} --line %{cursor_line}"]
 # Fire a tick manually — useful while testing schedules without waiting for the
 # 15-min job. Runs the same code the scheduler would.
 ret = [":write", ":sh ~/.config/helix/bin/td-tick"]

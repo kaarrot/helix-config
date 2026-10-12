@@ -21,8 +21,8 @@ holds lightweight, fire-and-forget bullets:
 
 Bullets stay clean — no inline link to the dedicated file. The agenda
 renders `(*)` next to bullets whose slug has a dedicated file on disk, so
-you can see at a glance which ones have notes. Press `space . p` on a
-bullet to jump into that file; `space . P` creates it if it's missing.
+you can see at a glance which ones have notes. Press `space , p` on a
+bullet to jump into that file; `space , P` creates it if it's missing.
 
 The character inside the checkbox is the state:
 
@@ -84,8 +84,11 @@ namespace is reserved for `td`/`tl`; `space .` holds AI-tool launchers):
 | `space , p` | **jump**: open `~/tasks/<slug>.md` for the current bullet if it exists; otherwise no-op |
 | `space , y` | toggle `[ ]` ↔ `[y]` (today); on an agenda row, mutates the source bullet in the inbox |
 | `space , a` | toggle `[ ]` ↔ `[a]` (active); on an agenda row, mutates the source bullet in the inbox |
-| `space , s` | stamp the current line with `YYYY-MM-DD HH:MM` (now). Same-line, no trailing dash — inbox bullets with such a stamp fire a notification |
-| `space . x` | toggle `[ ]` ↔ `[X]` (lives in `space .` — predates `td`; works in any file) |
+| `space , x` | toggle `[ ]` ↔ `[x]` (done). If the line carries a `++Nu`/`.+Nu` repeater (u = d\|w\|m\|y), **bumps the stamped date instead** and keeps `[ ]` — see [Recurring tasks](#recurring-tasks) |
+| `space , s` | stamp the current line with `YYYY-MM-DD Xxx HH:MM` (now, weekday included). If a stamp already exists, replace its date with today's and keep the time. Inbox bullets with such a stamp fire a notification |
+| `space , R` | restamp — recompute **only the weekday** on the current line to match its date (useful after manually editing the date part) |
+| `space , <ret>` | fire a tick manually (`:write` + `td-tick`); same code the 15-min scheduler runs. Useful for testing without waiting |
+| `space . x` | plain `[ ]` ↔ `[X]` sed toggle (predates `td`, no repeater handling; works in any file) |
 
 `space , p` works both in the inbox (slugify current bullet) and in the
 agenda buffer (slugify the bullet text, trailing ` (*)` marker stripped).
@@ -111,7 +114,7 @@ them makes:
 
 Bullet rows have no path — just the checkbox, text, and a trailing ` (*)` if a
 dedicated file exists for that slug. Orphan rows carry a `path:line:col` so
-`gf` (or `space . p`) jumps straight to the file:
+`gf` (or `space , p`) jumps straight to the file:
 
 ```
 # td: [ ] todo  [y] today  [a] active
@@ -142,7 +145,7 @@ Paths used to trail every bullet (`~/tasks/todo.md:N:1`) so `gf` could jump to
 the inbox line and `td toggle` could propagate state changes to disk. Both
 jobs are now covered differently:
 
-- Jumping to the dedicated file goes through `space . p`, which slugifies the
+- Jumping to the dedicated file goes through `space , p`, which slugifies the
   current line — no path needed.
 - `td toggle` takes `--from PATH`: when PATH isn't `$TD_FILE`, it text-matches
   the bullet in the inbox and flips the first exact match on disk.
@@ -157,6 +160,104 @@ The Helix bindings `:write` the current buffer and then invoke `td` with
 `--from PATH --line N`. `td` reads the line from disk, writes the toggled
 or promoted version back to disk, and refreshes `agenda.md`. `auto-reload`
 picks up the change — the editor buffer stays clean (no `:pipe`-dirty races).
+
+## Recurring tasks
+
+An org-style repeater token `++Nu` or `.+Nu` (u = `d`|`w`|`m`|`y`) after
+the stamp turns a bullet into a recurring one. Pressing `space , x` on
+such a line bumps the stamped date instead of marking done; state stays
+`[ ]`. The repeater and surrounding text are preserved.
+
+```
+- [ ] pay rent 2026-10-01 Thu 09:00 ++1m        # → 2026-11-01 Sun 09:00 after `space , x`
+- [ ] water plants 2026-09-15 Tue 07:30 .+2w    # → today+2w, time preserved
+- [ ] standup 2026-10-10 Sat 09:00 ++1w         # weekly on the same hour
+```
+
+| prefix | semantics |
+|--------|-----------|
+| `++Nu` | **anchored**: new = old_date + N units, repeated until `>today`. Missed cycles don't pile up; "rent on the 1st" stays on the 1st even if you tick late. |
+| `.+Nu` | **floating**: new = today + N units (time-of-day preserved from the stamp). "Water plants ~2w from when I remembered." |
+
+Month arithmetic clamps the day: Jan 31 + 1m → Feb 28/29. Feb 29 + 1y →
+Feb 28. Comparison uses the full `datetime` (date + time), so `++1m` on
+a stamp that already lies in the future still advances by one step.
+
+Plain `space . x` (the sed-based toggle) ignores repeaters and just
+flips `[ ]` ↔ `[X]` — useful for one-off `[X]` in any file.
+
+## Architecture — how a reminder actually fires
+
+End-to-end there are four moving parts: the OS clock, a shim, the
+scanner, and the two sidecars. Each is tiny; the design keeps state in
+the files you edit.
+
+```
+  file edit (helix)         Android JobScheduler (every 15m)
+         │                           │
+         ▼                           ▼
+  ~/tasks/*.md ◀──────────── td-tick ──▶ td tick
+                                           │
+                     ┌─ scan + regex ──────┤
+                     │                     │
+                     ▼                     ▼
+                scheduled           fired (dedup)
+              (future gate)              │
+                     │                   ▼
+                     └────────▶ termux-notification + Nudge.wav
+```
+
+### 1. The clock — Android's JobScheduler
+
+`td install` registers one periodic job:
+`termux-job-scheduler --job-id 7421 --period-ms 900000 --persisted true`.
+Android (not Termux) owns the timer, so the tick fires even when Termux
+is backgrounded; `--persisted` keeps it across reboot. 15 min is the OS
+minimum. Doze mode can delay a tick but doesn't drop it — the next tick
+after wake fires anything that came due in between.
+
+### 2. The shim — `~/.config/helix/bin/td-tick`
+
+Three lines of sh that the JobScheduler invokes. Its only job: set
+`TD_LEAD_MIN` and `exec python3 td tick`. Kept separate from `td` so you
+can edit the exported env without touching the Python. The same shim is
+wired to `space , <ret>` in Helix, so manual and scheduled ticks share
+the same code path and env.
+
+### 3. The tick — `td tick`
+
+Each run does three things:
+
+1. **Scan.** Walk `$TL_DIR/*.md` + `*.txt`. For each line, find
+   `YYYY-MM-DD [Xxx] HH:MM` **not** followed by ` - ` (the lookahead
+   excludes `tl` running-entry logs).
+2. **Gate.** For each match, compute `(path, due_iso)` hash. If
+   `due_iso > now` and the hash isn't in `scheduled`, record it. If
+   `due_iso ≤ now` and the hash isn't in `scheduled`, **drop it** — the
+   stamp was first observed in the past, so it's a note, not a reminder.
+   This is the "first seen as future" rule.
+3. **Fire.** For each hash in `scheduled` where
+   `due − TD_LEAD_MIN ≤ now` and the hash isn't in `fired`, invoke
+   `termux-notification` + `termux-media-player`, then append to `fired`.
+
+The gate is why random past dates in notes never fire. The dedup is why
+Doze catch-up or DST fall-back can't double-fire a reminder.
+
+### 4. Authoring from Helix
+
+Stamps live in the files you edit; there is no separate schedule store.
+
+- `space , s` → `td stamp` inserts/replaces a `YYYY-MM-DD Xxx HH:MM`.
+- `space , R` → `td stamp --restamp` fixes only the weekday after you
+  hand-edit the date.
+- `space , x` → `td toggle x`: on a line with a `++Nu`/`.+Nu` repeater,
+  bump the stamp (new hash → new row in `scheduled` → re-arms as a new
+  reminder); otherwise mark `[x]`.
+- `space , <ret>` → fire a tick now (same shim the OS runs).
+
+Delete the line, no more reminder. Edit the time, old hash falls out and
+a new one arms. The sidecars are fast caches of what the files already
+say — the files are source of truth.
 
 ## Firing mechanism
 
@@ -199,6 +300,7 @@ Title = first `# H1` in the file, or the filename stem.
 | `td set PATH LINE S` | rewrite the checkbox char at `PATH:LINE` to `S` |
 | `td toggle S [--from PATH [--line N]]` | toggle the bullet's state. With `--from/--line` reads the file and writes back (no stdout); otherwise reads stdin and echoes. Propagates to `$TD_FILE` when source differs |
 | `td new [--state S]` | print `- [S] ` template for pipe/insert |
+| `td stamp [--restamp]` | stdin: a line. Insert/replace a `YYYY-MM-DD Xxx HH:MM` stamp (today's date, keeps the time if one exists). `--restamp` only fixes the weekday to match the date. `tl` log entries are left alone and a fresh stamp is appended |
 | `td next` | print the next-due timestamp (for a statusline) |
 | `td fire PATH` | fire a file's timestamp now (testing) |
 | `td test [-v]` | run the embedded unittest suite |
