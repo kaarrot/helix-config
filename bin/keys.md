@@ -1,10 +1,13 @@
-# `space ,` keys
+# `td` / `tl` keys
 
-Every key under `space ,` in `../config.toml` (`[keys.normal.space.","]`).
-`td test` checks that this table and the config list the same keys, so
-add a row here whenever you add or remove a key there.
+Every key under `space ,` (`[keys.normal.space.","]` in `../config.toml`)
+and the `+`/`-` stamp keys in `[keys.normal]`. `td test` checks that this
+file and the config list the same keys, so add a row here whenever you add
+or remove a key there.
 
 Design notes and the agenda format: [agenda.md](agenda.md).
+
+All keys below except `+`/`-` are pressed after `space ,`.
 
 ## Time log (`tl`)
 
@@ -32,3 +35,18 @@ Design notes and the agenda format: [agenda.md](agenda.md).
 
 `Y`, `L` and `x` also work on agenda rows and in dedicated files, and they
 update the matching bullet in todo.md.
+
+## Moving a stamp (normal mode, no `space ,`)
+
+`+` moves the stamp (`YYYY-MM-DD Xxx HH:MM`) on the cursor's line later and
+`-` moves it earlier, by the part under the cursor. The cursor stays on that
+part, so pressing again keeps moving it. The weekday follows the date, and
+one undo reverts one press. A line with no stamp is left alone.
+
+| Key | What it does |
+|---|---|
+| `+` | Later by one year, month, day, hour, or 5 minutes, whichever the cursor is on. On the weekday or anywhere else on the line: one day |
+| `-` | The same, earlier |
+
+Minutes land on multiples of 5 (`09:32` → `09:35` / `09:30`). Hours past
+midnight change the day; a month from the 31st lands on the month's last day.

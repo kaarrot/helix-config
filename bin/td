@@ -63,6 +63,14 @@ Commands:
                        1-based, on the stamp). If no date, append a
                        fresh "YYYY-MM-DD Xxx HH:MM" to the end of the line.
                        The weekday is always kept in sync with the date.
+  td shift +N|-N [--col COL]
+                       stdin: a line. Move its stamp by N of the part under
+                       column COL (1-based): year, month, day (or weekday),
+                       hour, or 5 minutes; the day when COL is off the stamp
+                       or not given. The weekday follows the date; month ends
+                       clamp (01-31 +1 month → 02-28). With --col, the
+                       part's new column goes to ~/.cache/td/stamp-col.
+                       No stamp: the line comes back unchanged.
   td fire PATH         fire a dedicated file's timestamp now (testing)
   td test [-v]         run tests
 
@@ -135,6 +143,8 @@ CHANGED_PATH = CACHE / "changed"
 LAST_TICK_PATH = CACHE / "last-tick"
 STAMPED_NOW_PATH = CACHE / "stamped-now"
 LIST_PATH = CACHE / "agenda.md"
+# Cursor column `space , s` and `+`/`-` hand from Helix to td (and back).
+COL_PATH = CACHE / "stamp-col"
 TICK_SHIM = Path("~/.config/helix/bin/td-tick").expanduser()
 
 LEGEND = "# td: [ ] todo  [Y] today  [A] active"
@@ -227,6 +237,8 @@ def schedule_hash(path, due_iso):
 
 
 def _add_period(d, n, unit):
+    if unit == "h":
+        return d + timedelta(hours=n)
     if unit == "d":
         return d + timedelta(days=n)
     if unit == "w":
@@ -723,6 +735,81 @@ def cmd_new(args):
     if state_name not in STATE_FROM_NAME:
         sys.exit(f"bad --state: {state_name}")
     sys.stdout.write(f"- [{STATE_FROM_NAME[state_name]}] ")
+    return 0
+
+
+SHIFT_ARG = re.compile(r"^[+-]\d+$")
+
+
+def _shift_part(m, i):
+    """Which part of stamp match m holds 0-based index i: "y" year, "m"
+    month, "d" day (the weekday counts as the day), "h" hour, "M" minute.
+    None when i is off the stamp."""
+    if not m.start() <= i < m.end():
+        return None
+    date, time = m.start(1), m.start(2)
+    if i < date + 5:
+        return "y"
+    if i < date + 8:
+        return "m"
+    if i < time:
+        return "d"
+    return "h" if i <= time + m.group(2).index(":") else "M"
+
+
+def _shift(old, n, part):
+    """old moved by n steps of part; minutes go in 5-minute steps, landing
+    on a multiple of 5 (09:32 +1 → 09:35, -1 → 09:30)."""
+    if part == "M":
+        q = old.minute
+        base = q - q % 5 if n > 0 else q + (-q) % 5
+        return old + timedelta(minutes=base - q + 5 * n)
+    return _add_period(old, n, {"M": "h"}.get(part, part))
+
+
+def cmd_shift(args):
+    """stdin: a line. Move its stamp by +N/-N of the part under column
+    --col (1-based): year, month, day (or weekday), hour, or 5 minutes; the
+    day when the column is off the stamp or not given. The weekday follows
+    the date. With --col, the column of the same part afterwards goes to
+    ~/.cache/td/stamp-col, so the key can put the cursor back. A line
+    without a stamp (or with an impossible date) comes back unchanged."""
+    if not args or not SHIFT_ARG.match(args[0]):
+        sys.stderr.write("usage: td shift +N|-N [--col COL]  (e.g. +1)\n")
+        return 2
+    n = int(args[0])
+    col = _col_arg(args)
+    data = sys.stdin.read()
+    trailing_nl = data.endswith("\n")
+    body = data[:-1] if trailing_nl else data
+    i = col - 1 if col is not None else None
+    m = find_stamp(body)
+    if m:
+        try:
+            old = datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            old = None
+        if old is not None:
+            part = _shift_part(m, i) if i is not None else None
+            new = _shift(old, n, part or "d").strftime("%Y-%m-%d %a %H:%M")
+            if i is None:
+                pass
+            elif part is None:
+                if i >= m.end():
+                    i += len(new) - (m.end() - m.start())
+            elif part in ("h", "M"):
+                # New time starts 15 chars into the stamp; a 1-digit hour
+                # ("9:00") becomes 2 digits.
+                old_hour = m.group(2).index(":")
+                i = m.start() + 15 + (i - m.start(2)) + (2 - old_hour)
+            body = body[:m.start()] + new + body[m.end():]
+    sys.stdout.write(body + ("\n" if trailing_nl else ""))
+    if i is not None:
+        try:
+            CACHE.mkdir(parents=True, exist_ok=True)
+            COL_PATH.write_text(f"{i + 1}\n")
+        except OSError:
+            pass
     return 0
 
 
@@ -1246,6 +1333,8 @@ def main(argv):
         return cmd_new(rest)
     if cmd == "stamp":
         return cmd_stamp(rest)
+    if cmd == "shift":
+        return cmd_shift(rest)
     if cmd == "promote":
         return cmd_promote(rest)
     if cmd == "jump":
@@ -1765,6 +1854,59 @@ def run_tests(verbose=False):
         def test_col_bad_value_ignored(self):
             out = self.td("stamp", "--col", stdin="meeting 2025-12-25 09:00")
             self.assertEqual(out, "meeting 2026-10-10 Sat 09:00")
+
+        def shift(self, n, line, col=None):
+            args = ["shift", n] + (["--col", str(col)] if col else [])
+            return self.td(*args, stdin=line)
+
+        def test_shift_by_cursor_part(self):
+            line = "- [ ] pay rent 2026-10-20 Tue 09:30 #home\n"
+            # stamp starts at col 16: year 16-20, month 21-23, day 24-26,
+            # weekday 27-30, hour 31-33, minute 34-35
+            cases = {(16, "+1"): "2027-10-20 Wed 09:30", (20, "-1"): "2025-10-20 Mon 09:30",
+                     (21, "+1"): "2026-11-20 Fri 09:30", (23, "-1"): "2026-09-20 Sun 09:30",
+                     (25, "+1"): "2026-10-21 Wed 09:30", (28, "-1"): "2026-10-19 Mon 09:30",
+                     (31, "+1"): "2026-10-20 Tue 10:30", (33, "-1"): "2026-10-20 Tue 08:30",
+                     (34, "+1"): "2026-10-20 Tue 09:35", (35, "-1"): "2026-10-20 Tue 09:25"}
+            for (col, n), stamp in cases.items():
+                self.assertEqual(self.shift(n, line, col),
+                                 f"- [ ] pay rent {stamp} #home\n", (col, n))
+                self.assertEqual(self.read_cache("stamp-col"), f"{col}\n", (col, n))
+
+        def test_shift_off_stamp_moves_day(self):
+            line = "- [ ] pay rent 2026-10-20 Tue 09:30"
+            for col in (None, 3, 36):
+                self.assertEqual(self.shift("+1", line, col),
+                                 "- [ ] pay rent 2026-10-21 Wed 09:30", col)
+
+        def test_shift_minutes_land_on_five(self):
+            line = "call 2026-10-20 Tue 09:32"
+            self.assertEqual(self.shift("+1", line, 24), "call 2026-10-20 Tue 09:35")
+            self.assertEqual(self.shift("-1", line, 24), "call 2026-10-20 Tue 09:30")
+
+        def test_shift_hour_rolls_over_day(self):
+            out = self.shift("+1", "call 2026-10-20 Tue 23:30", 21)
+            self.assertEqual(out, "call 2026-10-21 Wed 00:30")
+
+        def test_shift_month_clamps_end(self):
+            out = self.shift("+1", "pay 2026-01-31 Sat 09:00", 10)
+            self.assertEqual(out, "pay 2026-02-28 Sat 09:00")
+
+        def test_shift_fills_weekday_and_keeps_cursor_on_part(self):
+            # No weekday, 1-digit hour: the stamp grows, the cursor follows
+            out = self.shift("+1", "call 2026-10-20 9:30 now", 17)  # on the "9"
+            self.assertEqual(out, "call 2026-10-20 Tue 10:30 now")
+            self.assertEqual(self.read_cache("stamp-col"), "22\n")
+            out = self.shift("+1", "call 2026-10-20 9:30 now", 23)  # on "now"
+            self.assertEqual(self.read_cache("stamp-col"), "28\n")
+
+        def test_shift_keeps_repeater_and_tl_time(self):
+            out = self.shift("+1", "2026-10-08 19:16 - did it 2026-10-20 09:00 ++1w", 3)
+            self.assertEqual(out, "2026-10-08 19:16 - did it 2026-10-21 Wed 09:00 ++1w")
+
+        def test_shift_no_stamp_or_bad_date_unchanged(self):
+            for line in ("- [ ] plain\n", "x 2026-02-30 09:00"):
+                self.assertEqual(self.shift("+1", line, 3), line)
 
         def test_note_after_time_is_restamped(self):
             out = self.td("stamp",
@@ -2311,7 +2453,8 @@ def run_tests(verbose=False):
             self.assertEqual(p.read_text(), "- [Y] alpha\n")
 
     class KeysDoc(unittest.TestCase):
-        # keys.md lists every `space ,` key in config.toml, and nothing else.
+        # keys.md lists every `space ,` key in config.toml and the `+`/`-`
+        # stamp keys, and nothing else.
         def test_keys_md_matches_config(self):
             import tomllib
             here = Path(TD).parent
@@ -2319,9 +2462,10 @@ def run_tests(verbose=False):
             if not config.exists():
                 self.skipTest("no config.toml next to bin/")
             with open(config, "rb") as f:
-                keys = tomllib.load(f)["keys"]["normal"]["space"][","]
+                normal = tomllib.load(f)["keys"]["normal"]
             names = {"ret": "Enter"}
-            in_config = {names.get(k, k) for k in keys}
+            in_config = {names.get(k, k) for k in normal["space"][","]}
+            in_config |= {k for k in ("+", "-") if k in normal}
             doc = (here / "keys.md").read_text(encoding="utf-8")
             in_doc = set(re.findall(r"^\| `([^`]+)` \|", doc, re.M))
             self.assertEqual(in_doc, in_config,

@@ -49,10 +49,17 @@ C-4 = ":run-shell-command echo -n \"%(buffer_name)\" | xclip -selection clipboar
 # free because speak uses --send, not one-shot ryk. See kukuryku docs/rewind-plan.md.
 A-r = ":sh ryk-rewind"
 
+# + / - move the td stamp (`YYYY-MM-DD Xxx HH:MM`) on the cursor's line without
+# insert mode, by the part under the cursor: year, month, day (or weekday),
+# hour, or 5 minutes; anywhere else on the line, the day. The weekday follows
+# the date. td saves where the cursor was and where that part ends up, and
+# :open puts the cursor back there, so pressing again keeps moving the same part.
+"+" = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td shift +1 --col $(cat ~/.cache/td/stamp-col)", "collapse_selection", ":open %sh{echo %{buffer_name}:%{cursor_line}:$(cat ~/.cache/td/stamp-col)}"]
+"-" = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td shift -1 --col $(cat ~/.cache/td/stamp-col)", "collapse_selection", ":open %sh{echo %{buffer_name}:%{cursor_line}:$(cat ~/.cache/td/stamp-col)}"]
+
 [keys.normal.g]
     "\\" = ":sh echo 'https://...myaddress.../-/blob/master/%{buffer_name}#L%{cursor_line}' | xclip -selection clipboard"
     "|" = ":sh echo 'https://...myaddress.../-/blob/'$(git branch --show-current)'/%{buffer_name}#L%{cursor_line}' | xclip -selection clipboard"
-
 
 [keys.normal.space."."]
 "." = ":insert-output date +\"<%%Y-%%m-%%d %%a>\""

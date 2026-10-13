@@ -92,7 +92,8 @@ the previous tick is kept in `~/.cache/td/last-tick`). Consequences:
 
 Under `[keys.normal.space.","]` in `~/.config/helix/config.toml` (the `space ,`
 namespace is reserved for `td`/`tl`; `space .` holds AI-tool launchers).
-Every `space ,` key, `tl` ones included, is listed in [keys.md](keys.md):
+Every `space ,` key, `tl` ones included, and the `+`/`-` stamp keys are listed in
+[keys.md](keys.md):
 
 | key | action |
 |-----|--------|
@@ -296,6 +297,8 @@ Stamps live in the files you edit; there is no separate schedule store.
 - `space , s` → `td stamp` inserts/replaces a `YYYY-MM-DD Xxx HH:MM`;
   with the cursor on the stamp, it fixes only the weekday after you
   hand-edit the date.
+- `+`/`-` → `td shift ±1 --col N` moves the line's stamp by the part under
+  the cursor (year, month, day, hour, 5 minutes) and fixes the weekday.
 - `space , x` → `td toggle x`: on a line with a `++Nu`/`.+Nu` repeater,
   bump the stamp (new hash → new row in `scheduled` → re-arms as a new
   reminder); otherwise mark `[x]`.
