@@ -100,8 +100,8 @@ namespace is reserved for `td`/`tl`; `space .` holds AI-tool launchers):
 | `space , A` | same agenda, most recently changed first: a bullet's line (state, text, stamp) or its dedicated file. Hand edits count from the next `td` run (`space , a`/`A` or a toggle) |
 | `space , P` | **create + jump**: promote current bullet to `~/tasks/<slug>.md` (reuses if exists), save the inbox, then jump into the file. Bullet text in the inbox is left unchanged |
 | `space , p` | **jump**: open `~/tasks/<slug>.md` for the current bullet if it exists. On an agenda row without one, open the inbox at that bullet's line; otherwise no-op |
-| `space , Y` | toggle `[ ]` ↔ `[Y]` (today); on an agenda row, toggles the inbox line that row shows |
-| `space , L` | toggle `[ ]` ↔ `[A]` (active); on an agenda row, toggles the inbox line that row shows |
+| `space , Y` | toggle `[ ]` ↔ `[Y]` (today); on an agenda row, toggles the inbox line that row shows (the row stays in place until `space , a`) |
+| `space , L` | toggle `[ ]` ↔ `[A]` (active); on an agenda row, the same |
 | `space , x` | toggle `[ ]` ↔ `[x]` (done). If the line carries a `++Nu`/`.+Nu` repeater (u = d\|w\|m\|y), **bumps the stamped date instead** and keeps `[ ]` — see [Recurring tasks](#recurring-tasks) |
 | `space , s` | stamp the current line with `YYYY-MM-DD Xxx HH:MM` (now, weekday included). If a stamp already exists, replace its date with today's and keep the time. Inbox bullets with such a stamp fire a notification once a future time comes; a stamp of "now" (or of a time already past) doesn't |
 | `space , R` | restamp — recompute **only the weekday** on the current line to match its date (useful after manually editing the date part) |
@@ -168,23 +168,41 @@ jobs are now covered differently:
   current line — no path needed.
 - `td toggle` takes `--from PATH`. From the agenda, it finds the inbox line
   the row shows (same state and text, link included, minus the display-only
-  ` (*)`), toggles that line, and rebuilds the agenda; the row itself is
-  never written back. If nothing matches — the inbox was edited since the
-  agenda was built — it says so on stderr, exits 1, and changes nothing;
-  reopen the agenda with `space , a`. From any other file that isn't
+  ` (*)`) and toggles that line. Piped from Helix, it prints the row with
+  its new state; the row stays where it is until `space , a` regroups the
+  agenda. If nothing matches — the inbox was edited since the agenda was
+  built — nothing changes and the row gets `← agenda out of date: space , a`
+  (with `--line`: a message on stderr and exit 1). From any other file that isn't
   `$TD_FILE`, it toggles the line there and applies the same toggle to the
   inbox bullet with the same text (link ignored).
 
 The trade-off: identical bullet text in `$TD_FILE` means only the first match
 gets toggled — a nearly-never scenario, and visible in the agenda itself.
-When this happens, `td toggle` emits a warning to stderr naming the duplicate.
+When this happens, `td toggle --line` emits a warning to stderr naming the
+duplicate (piped, it stays silent; see below).
 
-### Why `P`/`y`/`a` don't use `:pipe`
+### Why `x`/`Y`/`L` use `:pipe`
 
-The Helix bindings `:write` the current buffer and then invoke `td` with
-`--from PATH --line N`. `td` reads the line from disk, writes the toggled
-or promoted version back to disk, and refreshes `agenda.md`. `auto-reload`
-picks up the change — the editor buffer stays clean (no `:pipe`-dirty races).
+They pipe the current line through `td toggle S --from PATH`, then `:write`.
+The buffer changes at once, and the save includes any unsaved edits.
+
+Two other ways don't work in this Helix:
+
+- `:write` then `:sh td … --line N`: `:sh` runs in the background, so the
+  buffer only reloads on the next keypress. The line looks unchanged, and
+  pressing the key again toggles it back.
+- `:write` then `%sh{td … --line N}` and `:reload`: `%sh{}` runs at once, but
+  the save runs in the background after it. Helix then refuses to save over
+  td's change ("file modified by an external process"), and `:reload`
+  throws away the unsaved edits.
+
+`:pipe` puts anything on stderr in place of the line, even on success, so a
+piped `td toggle` writes nothing to stderr, keeps the line's newline, and
+exits 0. Piped from the agenda it doesn't rebuild `agenda.md`, since Helix
+saves that buffer right after.
+
+`P` still runs `:write` then `:sh td promote --from PATH --line N`: promote
+doesn't change the current file, so there is no reload to wait for.
 
 ## Recurring tasks
 
@@ -326,7 +344,7 @@ Title = first `# H1` in the file, or the filename stem.
 | `td promote [--from PATH --line N]` | create/reuse `~/tasks/<slug>.md` for a bullet. With `--from/--line` reads the file (no stdout); otherwise reads stdin and echoes |
 | `td jump --from PATH:LINE` | print `~/tasks/<slug>.md` if the bullet at `PATH:LINE` has a dedicated file; from an agenda row without one, print `INBOX:N` (its inbox line); else print `PATH` (no-op fallback) |
 | `td set PATH LINE S` | rewrite the checkbox char at `PATH:LINE` to `S` |
-| `td toggle S [--from PATH [--line N]]` | toggle the bullet's state. With `--from/--line` reads the file and writes back (no stdout); otherwise reads stdin and echoes. From the agenda, toggles the inbox line the row shows (exits 1 if the agenda is out of date); from another file, also applies the toggle to the matching `$TD_FILE` bullet |
+| `td toggle S [--from PATH [--line N]]` | toggle the bullet's state. With `--from/--line` reads the file and writes back (no stdout); otherwise reads stdin and echoes (keeping the newline; with `--from`, nothing on stderr). From the agenda, toggles the inbox line the row shows (out of date: exits 1 with `--line`, or echoes the row with a hint when piped); from another file, also applies the toggle to the matching `$TD_FILE` bullet |
 | `td new [--state S]` | print `- [S] ` template for pipe/insert |
 | `td stamp [--restamp]` | stdin: a line. Insert/replace a `YYYY-MM-DD Xxx HH:MM` stamp (today's date, keeps the time if one exists). `--restamp` only fixes the weekday to match the date. `tl` log entries are left alone and a fresh stamp is appended |
 | `td next` | print the next-due timestamp (for a statusline) |

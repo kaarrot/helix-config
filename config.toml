@@ -153,21 +153,22 @@ P = [":write", ":sh ~/.config/helix/bin/td promote --from %{buffer_name} --line 
 # agenda row without one, open the inbox at that bullet's line. Otherwise `td jump`
 # prints the current buffer path, so :open becomes a no-op reopen.
 p = ":open %sh{~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}}"
-# Toggle state of the current line. `:write` first so td reads a fresh file;
-# td rewrites the checkbox on disk, and Helix picks the change up via
-# auto-reload (buffer stays clean, no :pipe-dirty races). When invoked from
-# the agenda, td toggles the inbox line that row shows (exact text match), then
-# rebuilds agenda.md. If the agenda is out of date and nothing matches, td says
-# so and changes nothing: reopen the agenda with `space , a`.
+# Toggle state of the current line. The line goes through td with :pipe, so the
+# change shows at once and unsaved edits are kept, then :write saves. (Running td
+# on the file instead races Helix's background save: the edits are lost.) From
+# another file, td also toggles the matching inbox bullet. From the agenda, td
+# toggles the inbox line that row shows (exact text match); the row changes in
+# place and `space , a` regroups. If the agenda is out of date and nothing
+# matches, the row gets "← agenda out of date: space , a" and nothing changes.
 # Y toggles [Y] today; L toggles [A] active (`A` is the modified-sort agenda).
-Y = [":write", ":sh ~/.config/helix/bin/td toggle Y --from %{buffer_name} --line %{cursor_line}"]
-L = [":write", ":sh ~/.config/helix/bin/td toggle A --from %{buffer_name} --line %{cursor_line}"]
+Y = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle Y --from %{buffer_name}", ":write"]
+L = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle A --from %{buffer_name}", ":write"]
 # Mark done. If the line has an org-style ++Nu or .+Nu repeater
 # (u = d|w|m|y), the stamped date is bumped instead and state stays [ ]:
 #   ++1m   anchored: new = old_date + 1m (repeat until future). "rent on the 1st"
 #   .+2w   floating: new = today + 2w, time-of-day preserved. "water plants"
 # Note: this is a td-aware alternative to `space . x` (plain sed toggle, [X]).
-x = [":write", ":sh ~/.config/helix/bin/td toggle x --from %{buffer_name} --line %{cursor_line}"]
+x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{buffer_name}", ":write"]
 # Fire a tick manually — useful while testing schedules without waiting for the
 # 15-min job. Runs the same code the scheduler would.
 ret = [":write", ":sh ~/.config/helix/bin/td-tick"]

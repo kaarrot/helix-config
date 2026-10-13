@@ -136,6 +136,7 @@ LIST_PATH = CACHE / "agenda.md"
 TICK_SHIM = Path("~/.config/helix/bin/td-tick").expanduser()
 
 LEGEND = "# td: [ ] todo  [Y] today  [A] active"
+STALE_HINT = "  ← agenda out of date: space , a"
 
 Bullet = namedtuple("Bullet", "path line raw indent state text tags hash")
 Scheduled = namedtuple("Scheduled", "path line due title hash")
@@ -945,13 +946,16 @@ def cmd_toggle(args):
 
     Two input modes:
       • `--from PATH --line N` reads the line from PATH on disk and writes
-        the toggled version back to PATH:N. No stdout output. Used by Helix
-        bindings so the editor buffer never gets :pipe-dirtied.
-      • Otherwise reads stdin, writes toggled line to stdout. Used by shells.
+        the toggled version back to PATH:N. No stdout output.
+      • Otherwise reads stdin, writes the toggled line to stdout, keeping
+        its newline. The Helix bindings :pipe the line this way with
+        --from; Helix puts stderr in place of the line, so that mode is
+        silent on stderr and always exits 0.
 
     From the agenda, the toggle is applied to the inbox line the row shows
-    (exact match) and the agenda is rebuilt; a row that matches nothing
-    exits 1. From another file that isn't $TD_FILE, the same toggle is also
+    (exact match) and the agenda is rebuilt, except when piped (Helix saves
+    that buffer next). A row that matches nothing exits 1 with --line, or
+    is echoed with STALE_HINT when piped. From another file that isn't $TD_FILE, the same toggle is also
     applied to the matching inbox bullet (core text, link ignored). Either
     way the inbox line is rewritten from itself, so it keeps its indent,
     tags, and link, and an agenda ` (*)` is never copied back. The dedicated
@@ -989,12 +993,19 @@ def cmd_toggle(args):
             return 0
         raw = lines[line_no - 1].rstrip("\n")
     else:
-        raw = sys.stdin.read().rstrip("\n")
+        piped = sys.stdin.read()
+        nl = "\n" if piped.endswith("\n") else ""
+        raw = piped.rstrip("\n")
+        if raw.endswith(STALE_HINT):
+            raw = raw[:-len(STALE_HINT)]
+        if from_path is not None:
+            # Helix's :pipe puts any stderr output in place of the line.
+            sys.stderr = open(os.devnull, "w")
 
     bm = TASK.match(raw)
     if not bm:
         if not use_file:
-            sys.stdout.write(raw)
+            sys.stdout.write(raw + nl)
         return 0
 
     def toggle(line):
@@ -1010,6 +1021,11 @@ def cmd_toggle(args):
                                          toggle, exact=True)
                     if inbox.is_file() else None)
         if new_line is None:
+            if not use_file:
+                # Piped (space , x/Y/L): stderr can't be shown, so say it on
+                # the row; the agenda is rebuilt on the next `space , a`.
+                sys.stdout.write(raw + STALE_HINT + nl)
+                return 0
             sys.stderr.write(
                 "td: no inbox bullet matches this agenda row; the agenda is "
                 "out of date, reopen it (space , a)\n")
@@ -1029,9 +1045,13 @@ def cmd_toggle(args):
             # bumps if (and only if) the inbox line itself repeats.
             _rewrite_first_match(inbox, bm["text"], bm["state"], toggle)
     _retag_dedicated_h1(bm["text"], new_state)
-    refresh_list()
+    if use_file or not _same_file(from_path, LIST_PATH):
+        # Piped from the agenda, Helix writes the agenda buffer itself;
+        # rebuilding it here would make that save fail as "modified by an
+        # external process". `space , a` regroups it.
+        refresh_list()
     if not use_file:
-        sys.stdout.write(new_raw)
+        sys.stdout.write(new_raw + nl)
     return 0
 
 
@@ -1895,6 +1915,49 @@ def run_tests(verbose=False):
         def test_toggle_in_place_unset(self):
             out = self.td("toggle", "Y", stdin="- [Y] alpha\n")
             self.assertEqual(out.strip(), "- [ ] alpha")
+
+        def piped(self, state, from_path, line):
+            """Run td the way the Helix :pipe bindings do -> CompletedProcess."""
+            e = {**os.environ, "HOME": str(self.home), "TL_DIR": str(self.tasks),
+                 "TL_NOW": NOW, "TD_DRY_RUN": "1"}
+            return sp.run([sys.executable, TD, "toggle", state, "--from",
+                           str(from_path)], env=e, capture_output=True,
+                          input=line.encode("utf-8"))
+
+        def test_piped_keeps_newline(self):
+            p = self.put_inbox("- [ ] alpha\n")
+            r = self.piped("x", p, "- [ ] alpha\n")
+            self.assertEqual(r.stdout, b"- [x] alpha\n")
+            r = self.piped("x", p, "just a note\n")
+            self.assertEqual(r.stdout, b"just a note\n")
+
+        def test_piped_from_agenda_leaves_agenda_file(self):
+            p = self.put_inbox("- [ ] alpha\n")
+            self.td("list")
+            agenda = self.home / ".cache" / "td" / "agenda.md"
+            before = agenda.read_text()
+            r = self.piped("Y", agenda, "- [ ] alpha\n")
+            self.assertEqual(r.stdout, b"- [Y] alpha\n")
+            self.assertEqual(p.read_text(), "- [Y] alpha\n")
+            self.assertEqual(agenda.read_text(), before)
+
+        def test_piped_stale_agenda_row_gets_hint(self):
+            p = self.put_inbox("- [ ] alpha renamed\n")
+            agenda = self.home / ".cache" / "td" / "agenda.md"
+            r = self.piped("x", agenda, "- [ ] alpha\n")
+            self.assertEqual((r.returncode, r.stderr), (0, b""))
+            row = f"- [ ] alpha{STALE_HINT}\n"
+            self.assertEqual(r.stdout.decode(), row)
+            # Pressed again: the hint is not stacked.
+            r = self.piped("x", agenda, row)
+            self.assertEqual(r.stdout.decode(), row)
+            self.assertEqual(p.read_text(), "- [ ] alpha renamed\n")
+
+        def test_piped_duplicate_is_silent(self):
+            self.put_inbox("- [ ] alpha\n- [ ] alpha\n")
+            agenda = self.home / ".cache" / "td" / "agenda.md"
+            r = self.piped("x", agenda, "- [ ] alpha\n")
+            self.assertEqual((r.stdout, r.stderr), (b"- [x] alpha\n", b""))
 
         def test_lowercase_states_still_read(self):
             p = self.put_inbox("- [y] alpha\n- [a] bravo\n")
