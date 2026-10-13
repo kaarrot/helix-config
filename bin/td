@@ -76,7 +76,7 @@ Commands:
                        until it is in the future (anchored, e.g. rent on the
                        1st); .+ sets it to today + N units (floating).
   td new [--state todo|today|active|waiting]
-                       print "- [S] " for pipe/insert
+                       print "- [S] " for pipe/insert (space , q)
   td stamp [--restamp] [--col N]
                        stdin: a line. If it contains a date, replace (default)
                        with today's date (preserving the time) or recompute

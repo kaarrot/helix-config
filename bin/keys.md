@@ -54,7 +54,8 @@ left out). Renaming the bullet unlinks it from its file.
 | Key | What it does |
 |---|---|
 | `t` | Open the inbox, `~/tasks/todo.md` |
-| `a` | **Agenda.** Opens a snapshot of todo.md grouped TODAY, ACTIVE, TODO, WAITING, newest-added first; done and ignored bullets are hidden. A bullet with its own file shows ` (*)`. Files without a bullet are listed by the status on their first line (`# [W] renew passport`), or under ORPHANS if they have none. View only: Helix shows `[readonly]`, and anything typed there is thrown away by the next `a`. But `x` and the status keys work on its rows: they change the task itself (see below), and the agenda reloads. For anything else, `p` takes you to the task |
+| `q` | **New todo.** Opens todo.md and adds `- [ ] ` on a new line at its end, in insert mode: type the task, then save. Works from anywhere, the agenda too; the agenda shows the task after the next `a` |
+| `a` | **Agenda.** Opens a snapshot of todo.md grouped TODAY, ACTIVE, TODO, WAITING, newest-added first; done and ignored bullets are hidden. A bullet with its own file shows ` (*)`. Files without a bullet are listed by the status on their first line (`# [W] renew passport`), or under ORPHANS if they have none. View only: Helix shows `[readonly]`, and anything typed there is thrown away by the next `a`. But `x` and the status keys work on its rows: they change the task itself (see below), and the agenda reloads. `q` adds a new task. For anything else, `p` takes you to the task |
 | `A` | The same agenda, most recently changed first: a bullet's line (state, text, stamp) or its own file. Edits by hand count from the next `a`, `A` or status key |
 | `p` | **Go to the task.** On a bullet: open its own file, if it has one; otherwise stay. On an agenda row: go to that bullet's line in todo.md; a row for a file goes to the file. Never creates anything. Uses the line as it is in the buffer, saved or not |
 | `P` | **Give the task a file.** Saves, then creates `~/tasks/<slug>.md` for the bullet, with a heading `# [S] title` that carries the bullet's state, and opens it. An existing file is reused and its heading's state updated. On an agenda row it only opens the row's file, if any. Works on a bullet you have just typed, saved or not |
@@ -175,6 +176,8 @@ next to starting Python, so they see the saved file in practice.
   buffer's entry still shows as running, as the save lands later, so `tl`
   knows which task was current), ends the entries running in the other
   files, and prints the file to open; the rest is `i`'s new line.
+- **`q`** opens todo.md and builds its new line the way `i` does, with
+  `td new` printing `- [ ] ` in place of `tl start`'s time.
 - **`o`** is a macro, so the command prompt stays open for you to type.
   The prompt holds `:sh tl out "$BASH_EXECUTION_STRING" # done: `, so what
   you type is a shell comment, which bash ignores. `tl` reads it back from

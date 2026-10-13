@@ -239,8 +239,8 @@ file's heading follows), a file-task row sets that file's `# [S] title`
 heading. Then `td` rebuilds the agenda with the options it was opened
 with (`~/.cache/td/agenda-args`, so `space , A`'s order stays), and Helix
 reloads it; the row itself is never written. `+`, `-`, `space , s` and
-`space , P` leave rows and tasks alone. For anything else, `space , p` to
-the task. How the keys manage this is in
+`space , P` leave rows and tasks alone. `space , q` adds a new task at
+the end of todo.md. For anything else, `space , p` to the task. How the keys manage this is in
 [keys.md](keys.md#how-the-keys-are-built).
 
 ## Recurring tasks
@@ -279,7 +279,7 @@ is `++0d` (it would never move), so those lines are just marked done.
 | `td set PATH LINE S` | set the checkbox at `PATH:LINE` to `S` |
 | `td stamp [--restamp] [--col N]` | stdin: a line. Add a stamp, or move its date to today keeping the time; `--restamp`, or `--col N` on the stamp, only fixes the weekday |
 | `td shift +N\|-N [--col N]` | stdin: a line. Move its stamp by the part under column N (the day without `--col`); with `--col`, save the part's new column to `~/.cache/td/stamp-col` |
-| `td new [--state S]` | print `- [S] ` |
+| `td new [--state S]` | print `- [S] ` (`space , q` inserts it) |
 | `td next` | print the next time due (for a status line) |
 | `td fire PATH` | fire a file's notification now (testing) |
 | `td test [-v]` | run the tests |

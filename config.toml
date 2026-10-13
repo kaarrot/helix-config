@@ -115,6 +115,8 @@ S = [":write", "align_view_top", ":sh ~/.config/helix/bin/tl summary --file %{bu
 
 # Open the inbox, ~/tasks/todo.md
 t = ":open ~/tasks/todo.md"
+# New todo: a "- [ ] " line at the end of todo.md, in insert mode (from anywhere, the agenda too)
+q = [":open ~/tasks/todo.md", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/td new", "insert_at_line_end"]
 # Stamp the line: add today's date and time, or move its date to today; on the date: fix the weekday
 s = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td stamp --col $(cat ~/.cache/td/stamp-col) --from %{buffer_name}"]
 # Agenda of todo.md, newest added first (view only; the status keys work on its rows)
