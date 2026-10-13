@@ -49,12 +49,7 @@ C-4 = ":run-shell-command echo -n \"%(buffer_name)\" | xclip -selection clipboar
 # free because speak uses --send, not one-shot ryk. See kukuryku docs/rewind-plan.md.
 A-r = ":sh ryk-rewind"
 
-# + / - move the td stamp (`YYYY-MM-DD Xxx HH:MM`) on the cursor's line without
-# insert mode, by the part under the cursor: year, month, day (or weekday),
-# hour, or 5 minutes; anywhere else on the line, the day. The weekday follows
-# the date. td saves where the cursor was and where that part ends up, and
-# :open puts the cursor back there, so pressing again keeps moving the same part.
-# Nothing happens on the view-only agenda.
+# td stamp keys (bin/keys.md): move the line's stamp later / earlier by the part under the cursor
 "+" = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td shift +1 --col $(cat ~/.cache/td/stamp-col) --from %{buffer_name}", "collapse_selection", ":open %sh{echo %{buffer_name}:%{cursor_line}:$(cat ~/.cache/td/stamp-col)}"]
 "-" = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td shift -1 --col $(cat ~/.cache/td/stamp-col) --from %{buffer_name}", "collapse_selection", ":open %sh{echo %{buffer_name}:%{cursor_line}:$(cat ~/.cache/td/stamp-col)}"]
 
@@ -66,8 +61,7 @@ A-r = ":sh ryk-rewind"
 "." = ":insert-output date +\"<%%Y-%%m-%%d %%a>\""
 m = ":sh echo 'https://ADDRESS/-/blob/master/%{buffer_name}#L%{cursor_line}' | xclip -selection clipboard"
 b = ":sh echo 'https://ADDRESS/-/blob/'$(git branch --show-current)'/%{buffer_name}#L%{cursor_line}' | xclip -selection clipboard"
-# Toggle the line's checkbox [ ] ↔ [X] ([x] unticks too). Works with no selection: the
-# whole line is piped. Only the first bracket on the line counts, and only if it is a checkbox.
+# Plain checkbox toggle [ ] ↔ [X] for any file; td's own is space , x (bin/keys.md)
 x = ["extend_to_line_bounds", ":pipe sed 's/^\\([^[]*\\)\\[ \\]/\\1[X]/; t; s/^\\([^[]*\\)\\[[xX]\\]/\\1[ ]/'", ":write"]
 
 
@@ -99,93 +93,50 @@ A = "@:: agy --dangerously-skip-permissions -p 2<gt>/dev/null<ret>"
 # rewinds that speech if Helix can take the key.
 d = "@:: /data/data/com.termux/files/home/PRJ/kukuryku/target/release/ryk --send<ret>"
 
-# tl/td bindings live under `space ,` to avoid clashing with the AI-tool
-# bindings on `space .` (c/C/g/G/a/A/v/V/d).
+# tl/td keys live under `space ,` (`space .` holds the AI tools). One line each
+# here; bin/keys.md explains every key in detail, and why each is built as it is.
 
 [keys.normal.space.","]
 
-### Time logging ###
+### Time log (tl) ###
 
-# Time log helper for ~/.config/helix/bin/tl, task files in $TL_DIR, default ~/tasks
-# Start a new entry at the end of the buffer, so the latest is always last: "YYYY-MM-DD HH:MM - " then type the note.
-# First stops entries still running (started <12h ago): other task files on disk, this buffer via :pipe
-# (not :write + disk: a write in a key sequence lands only after the sequence). td's inbox is left alone,
-# on disk and as this buffer: a `- [ ] 2026-10-12 09:00 - …` bullet there is a todo, not a running entry.
+# Clock in: stop the running entry, start a new one at the end of the buffer
 i = [":echo %sh{~/.config/helix/bin/tl stop --skip %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/tl start", "insert_at_line_end"]
-# Clock out: saves all, then waits in the command prompt for what you did ("# done: "); Enter ends the running
-# entry, whichever task file it is in, on disk (auto-reload shows it), with that text as its "# heading" bullet.
-# Empty: no heading. Esc: nothing happens. The text is a shell comment read back from $BASH_EXECUTION_STRING, so it
-# needs no quoting; only "%" is special (Helix expansions), "%%" types one. A macro so the prompt stays open.
+# Clock out: type what you did at the "# done:" prompt, Enter ends the running entry
 o = "@:write-all<ret>:sh ~/.config/helix/bin/tl out \"$BASH_EXECUTION_STRING\" # done: "
-# Recently modified task files, newest first, in a popup (no new buffer): open one with :o <path>
+# Recently changed task files, newest first, in a popup
 r = ":sh ~/.config/helix/bin/tl recent"
-# Per-day summary of all task files, or just this file if it is not in the task folder (saves first so unsaved entries count)
-# align_view_top (zt) first: a popup opens below the cursor's screen row when 6 rows fit there, so it gets the full height.
+# Time per day for all task files (just this file if it is outside ~/tasks)
 S = [":write", "align_view_top", ":sh ~/.config/helix/bin/tl summary --file %{buffer_name}"]
 
-### TODO scheduler ###
+### Todos (td) ###
 
-# td — ~/.config/helix/bin/td. Inbox bullets live in $TD_FILE (default ~/tasks/todo.md).
-# States live in the checkbox: [ ] todo  [Y] today  [A] active  [W] waiting  [x] done  [!] ignore.
-# Any `YYYY-MM-DD HH:MM` on an open inbox bullet or in a dedicated file (not tagged
-# [x]/[!]) fires a Termux notification; a tl entry's leading time does not.
-# Install the 15-min job once from the shell: `td install`.
-
-# Open the inbox file.
+# Open the inbox, ~/tasks/todo.md
 t = ":open ~/tasks/todo.md"
-# Stamp the current line via `td stamp` (whole-line :pipe). Behaviour:
-#   • No date on the line  → appends "YYYY-MM-DD Xxx HH:MM" at the end.
-#   • Existing date+time   → replaces the date with today's (keeps the
-#                            time, keeps/fixes the weekday).
-#   • Cursor on that date  → you edited it by hand: keeps the date and only
-#                            fixes the weekday.
-#   • tl log entries (a line starting `YYYY-MM-DD HH:MM - ...`) are left alone
-#     and a fresh stamp is appended, since those lines are history, not schedules.
-# extend_to_line_bounds moves the cursor to the line end, so the column is saved first.
+# Stamp the line: add today's date and time, or move its date to today; on the date: fix the weekday
 s = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td stamp --col $(cat ~/.cache/td/stamp-col) --from %{buffer_name}"]
-# Agenda: a view-only snapshot of todo.md, grouped ACTIVE / TODAY / TODO,
-# newest-added at the top. td writes it read-only, so Helix shows [readonly] and
-# won't save it; nothing done there reaches todo.md (change tasks on their line,
-# `space , p`). td runs inside %sh{} so it finishes before :open (`:sh` is async:
-# the buffer showed the previous run). :reload drops anything typed in the buffer.
+# Agenda of todo.md, newest added first (view only)
 a = [":open %sh{~/.config/helix/bin/td list >/dev/null; echo ~/.cache/td/agenda.md}", ":reload"]
-# Same agenda, most recently changed at the top: a bullet's line (state, text, stamp)
-# or its dedicated file. Edits by hand count from the next td run (a, A, or a toggle).
+# Agenda, most recently changed first
 A = [":open %sh{~/.config/helix/bin/td list --sort modified >/dev/null; echo ~/.cache/td/agenda.md}", ":reload"]
-# Promote the current bullet to a dedicated ~/tasks/<slug>.md file (reuses if exists)
-# and open it. `:update` first so td reads a fresh file (and the read-only agenda is
-# never written). On an agenda row, P only opens the row's dedicated file, if any.
-P = [":update", ":sh ~/.config/helix/bin/td promote --from %{buffer_name} --line %{cursor_line}", ":open %sh{~/.config/helix/bin/td jump --file --from %{buffer_name}:%{cursor_line}}"]
-# Jump: on a bullet, open its ~/tasks/<slug>.md if it exists. On an agenda row,
-# open todo.md at that bullet's line (P opens the dedicated file); on an orphan
-# row, the file. Otherwise `td jump` prints the current buffer path, so :open
-# becomes a no-op reopen.
-p = ":open %sh{~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}}"
-# Toggle state of the current line. The line goes through td with :pipe, so the
-# change shows at once and unsaved edits are kept, then :write saves. (Running td
-# on the file instead races Helix's background save: the edits are lost.) From
-# another file, td also sets the inbox bullet with the same name. In a dedicated
-# file, the `# [ ] title` heading toggles too and sets the inbox bullet the file
-# belongs to. On the view-only agenda nothing changes (:write says "Path is read only").
-# Status keys for today / active / waiting / done / todo: see `space , ,` at the end.
-# Mark done. If the line has an org-style ++Nu or .+Nu repeater
-# (u = d|w|m|y), the stamped date is bumped instead and state stays [ ]:
-#   ++1m   anchored: new = old_date + 1m (repeat until future). "rent on the 1st"
-#   .+2w   floating: new = today + 2w, time-of-day preserved. "water plants"
-# Note: this is a td-aware alternative to `space . x` (plain sed toggle, [X]).
+# Give the bullet its own file ~/tasks/<slug>.md, and open it
+P = [":update", "extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td promote --from %{buffer_name}:%{cursor_line}", "collapse_selection", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
+# Open the bullet's own file; on the agenda, its line in todo.md
+p = ["extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}", "collapse_selection", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
+# Mark done (a ++/.+ repeater moves the date instead)
 x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{buffer_name}", ":write"]
-# Fire a tick manually — useful while testing schedules without waiting for the
-# 15-min job. Runs the same code the scheduler would.
+# Check for due reminders now, as the 15-minute job does
 ret = [":write", ":sh ~/.config/helix/bin/td-tick"]
 
-# `space , ,` status keys, the same mechanism as `space , x` above (works in
-# todo.md and on a dedicated file's `# [ ] title` heading; not on the agenda).
-# Toggle [ ] ↔ state: y today [Y], a active [A], w waiting [W], d done [x] (same
-# as `space , x`, repeaters bump). space sets todo [ ] (a heading keeps `# [ ]`).
-# td takes the state's name for space so the binding needs no quoted " ".
+# Status keys, `space , ,` then a letter: toggle the line's state
 [keys.normal.space.",".","]
+# Today [Y]
 y = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle Y --from %{buffer_name}", ":write"]
+# Active [A]
 a = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle A --from %{buffer_name}", ":write"]
+# Waiting [W]
 w = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle W --from %{buffer_name}", ":write"]
+# Done [x], the same as space , x
 d = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{buffer_name}", ":write"]
+# Back to todo [ ]
 space = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle todo --from %{buffer_name}", ":write"]

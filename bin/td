@@ -6,16 +6,19 @@ Two tiers of tasks:
   Inbox bullets in $TD_FILE (default $TL_DIR/todo.md). Lightweight, fire-and-forget.
       - [ ] call jon                            # [ ] todo
       - [Y] pay rent                            # [Y] today
-      - [A] refactor td parser                  # [A] active (promoted — see $TL_DIR/)
+      - [A] refactor td parser                  # [A] active
+      - [W] reply from bank                     # [W] waiting
       - [x] took bins out                       # [x] done
       - [!] call mom                            # [!] ignore
 
-  Dedicated files in $TL_DIR/*.md, one per follow-up task. Any
-  `YYYY-MM-DD HH:MM` timestamp fires a termux notification at that time,
-  except the leading time of a tl log entry line (`YYYY-MM-DD HH:MM - …`),
-  and except in a file whose H1 is tagged [x]/[X]/[!]. Inbox bullets fire
-  the same way while they are [ ]/[Y]/[A]. The agenda marks a bullet
-  with " (*)" when a dedicated file with the same slug exists.
+  Dedicated files in $TL_DIR/*.md, one per follow-up task, named by the
+  bullet's slug. Any `YYYY-MM-DD HH:MM` timestamp fires a termux
+  notification at that time (TD_LEAD_MIN earlier), except the leading time
+  of a tl log entry line (`YYYY-MM-DD HH:MM - …`, the pattern tl uses).
+  Inbox bullets fire while they are open: [ ]/[Y]/[A]/[W]. A dedicated
+  file fires while its bullet is open; a file with no bullet, unless its
+  first H1 is `# [x]`/`# [X]`/`# [!]`. The agenda marks a bullet with
+  " (*)" when a dedicated file with the same slug exists.
 
       # refactor td parser
       2026-11-01 10:00
@@ -39,21 +42,28 @@ Commands:
                        added: newest first-seen first. modified: most
                        recently changed first (its line, or its dedicated
                        file; hand edits count from the next td run).
-  td promote           stdin: a bullet line (or --from PATH --line N; nothing
-                       from the agenda). Creates (or reuses) ~/tasks/<slug>.md
-                       and prints the bullet unchanged.
-  td jump [--file] --from PATH:LINE
-                       read line LINE from file PATH, slugify its bullet text,
-                       print ~/tasks/<slug>.md if it exists, else PATH:LINE.
-                       From an agenda row: its inbox line (INBOX:N), or with
-                       --file its dedicated file.
+  td promote [--from PATH:LINE]
+                       stdin: a line, at PATH:LINE. A bullet gets its file
+                       ~/tasks/<slug>.md: created with a `# [S] title`
+                       heading, or reused with the heading retagged (nothing
+                       is written from the agenda). Prints where `space , P`
+                       goes, and writes it to ~/.cache/td/open: that file
+                       (from an agenda row, the row's file, if any), else
+                       PATH:LINE.
+  td jump [--from PATH:LINE]
+                       stdin: a line, at PATH:LINE. Prints where `space , p`
+                       goes, and writes it to ~/.cache/td/open: a bullet's
+                       ~/tasks/<slug>.md if it exists; from an agenda row,
+                       its todo.md line (INBOX:N); a file-task or orphan row,
+                       its file; else PATH:LINE (stay).
   td set PATH LINE S   rewrite checkbox char at PATH:LINE to S (" "/Y/A/x/!)
   td toggle S          stdin: a line. Toggle the checkbox between " " and S
                        in place. With --from the agenda: no change (it is a
                        view; exits 1 with --line). With --from any other
                        file, the inbox bullet with the same slug gets the
-                       same state; in a dedicated file the `# [S] title`
-                       heading toggles too and sets the file's bullet. If S is "x"
+                       same state (an open one first, if there are several);
+                       in a dedicated file the `# [S] title` heading toggles
+                       too and sets the file's bullet. If S is "x"
                        and the line carries an org-style ++Nu/.+Nu repeater
                        as its own token (u = d|w|m|y, N ≥ 1; `C++1d` does not
                        count), the date is bumped instead and state
@@ -82,7 +92,7 @@ Commands:
 
 Env: $TL_DIR (default ~/tasks), $TD_FILE (default $TL_DIR/todo.md),
      $TL_NOW="YYYY-MM-DD HH:MM" fakes the clock,
-     $TD_LEAD_MIN (default 0),
+     $TD_LEAD_MIN (default 15: one tick, so reminders fire before they are due),
      $TD_DRY_RUN=1 skips notifications and prints "would fire: ..." instead.
 """
 import calendar
@@ -102,24 +112,22 @@ TASK = re.compile(r"^(?P<indent>\s*)- \[(?P<state>[ xXyYaAwW!])\]\s+(?P<text>.*?
 # which skips the leading time of a tl log entry (see TL_ENTRY).
 SCHEDULE_TS = re.compile(
     r"(\d{4}-\d{2}-\d{2})(?: [A-Z][a-z]{2})? (\d{1,2}:\d{2})")
-# A tl log entry, same shape as tl's ENTRY: the line *starts* (after an
-# optional "- " / "* " / "- [ ] ") with date, time, then "-" or "–". That
-# leading time is a log, never a schedule. A " - " after a time elsewhere is
-# just text: `call bank 2026-10-12 10:00 - bring docs` is a reminder.
+# A tl log entry: the line *starts* (after an optional "- " / "* " /
+# "- [ ] ") with date, time, then "-" or "–". That leading time is a log,
+# never a schedule. The same pattern as tl's ATTEMPT (a test checks), so a
+# line is either a log entry to tl or a reminder to td, never both or
+# neither. A " - " after a time elsewhere is just text:
+# `call bank 2026-10-12 10:00 - bring docs` is a reminder.
 TL_ENTRY = re.compile(
-    r"^\s*(?:[-*]\s+(?:\[[ xX]\]\s+)?)?\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}\s*[-–]")
+    r"^\s*(?:[-*]\s+(?:\[[ xX]\]\s+)?)?(\d{4}-\d{2}-\d{2})\s+\d{1,2}:\d{2}\s*[-–]")
 # org-mode-style repeater, as its own token: ++2w bumps the old date by
 # N units until >today; .+2w bumps to today + N units. Units: d/w/m/y.
 # Whitespace (or start) before the sigil, and a non-word after the unit,
 # so `C++1d` and `++1days` are not repeaters. See _bump_recurring.
 # N must be at least 1: `++0d` would never move the date, so it is plain text.
 REPEATER = re.compile(r"(?<!\S)(\+\+|\.\+)(0*[1-9]\d*)([dwmy])(?!\w)")
-TAG = re.compile(r"#(\w+)")
 LINK = re.compile(r"\s*→\s*\S+\s*$")
 MARKER = re.compile(r"\s*\(\*\)\s*$")
-# Trailing #tags sit outside the stamp (`… 09:00 ++1m #errand`). Peeled
-# and reattached so the stamp can be removed without eating the tags.
-_TAG_TAIL = re.compile(r"((?:\s+#\w+)+)\s*$")
 _REPEATER_TAIL = re.compile(r"\s+(?:\+\+|\.\+)0*[1-9]\d*[dwmy]\s*$")
 AGENDA_ROW = re.compile(
     r"^(?P<rest>- \[[ xXyYaAwW!]\].*?)\s{2,}(?P<path>\S+?):(?P<line>\d+):\d+\s*$")
@@ -152,12 +160,14 @@ STAMPED_NOW_PATH = CACHE / "stamped-now"
 LIST_PATH = CACHE / "agenda.md"
 # Cursor column `space , s` and `+`/`-` hand from Helix to td (and back).
 COL_PATH = CACHE / "stamp-col"
+# Where `space , p` / `P` go: td jump/promote write it, the key :opens it.
+OPEN_PATH = CACHE / "open"
 TICK_SHIM = Path("~/.config/helix/bin/td-tick").expanduser()
 
 LEGEND = ("# td VIEW ONLY (space , p jumps to the todo.md line): "
           "[ ] todo  [Y] today  [A] active  [W] waiting")
 
-Bullet = namedtuple("Bullet", "path line raw indent state text tags hash")
+Bullet = namedtuple("Bullet", "path line raw indent state text hash")
 Scheduled = namedtuple("Scheduled", "path line due title hash")
 
 
@@ -211,11 +221,6 @@ def _identity_text(text):
     """
     s = MARKER.sub("", text).strip()
     s = LINK.sub("", s).strip()
-    tags = ""
-    tag_m = _TAG_TAIL.search(s)
-    if tag_m:
-        tags = tag_m.group(1)
-        s = s[:tag_m.start()].rstrip()
     # Repeater belongs to the stamp. Drop it only when a stamp is actually
     # trailing — a bare `++1d` in the title is not one.
     rep = _REPEATER_TAIL.search(s)
@@ -226,8 +231,6 @@ def _identity_text(text):
             stamp = m
     if stamp and (stamp.start() == 0 or head[stamp.start() - 1].isspace()):
         s = head[:stamp.start()].rstrip()
-    if tags:
-        s = f"{s}{tags}" if s else tags.strip()
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -306,8 +309,7 @@ def parse_bullet(path, lineno, raw):
     if not m:
         return None
     text = m["text"]
-    tags = TAG.findall(text)
-    return Bullet(path, lineno, raw, m["indent"], canon(m["state"]), text, tags,
+    return Bullet(path, lineno, raw, m["indent"], canon(m["state"]), text,
                   bullet_hash(str(path), text))
 
 
@@ -333,16 +335,21 @@ def scan_schedules():
 
     Any `YYYY-MM-DD HH:MM` timestamp counts — no `SCHEDULE:` marker needed —
     except the leading time of a tl log entry (see TL_ENTRY). On inbox
-    bullets, only visible states ([ ], [Y], [A]) are eligible — [x]/[!]
-    skip. A dedicated file whose first H1 is tagged [x]/[X]/[!] is skipped;
-    otherwise every timestamp in it is a candidate. The inbox is scanned
-    even when $TD_FILE lives outside $TL_DIR.
+    bullets, only open states ([ ], [Y], [A], [W]) are eligible — [x]/[!]
+    skip. A dedicated file follows its inbox bullet (the one whose slug is
+    the file name), as the agenda does: it is skipped unless that bullet is
+    open, whatever its heading says, so a bullet marked done by hand stops
+    its file too. A file with no bullet is skipped when its first H1 is
+    `# [x]`/`# [X]`/`# [!]`. Otherwise every timestamp in the file is a
+    candidate. The inbox is scanned even when $TD_FILE lives outside $TL_DIR.
     """
     folder = task_folder()
     files = sorted(folder.glob("*.md")) if folder.is_dir() else []
-    inbox = td_file()
+    inbox, bullets = scan_inbox()
     if inbox.is_file() and not any(_same_file(f, inbox) for f in files):
         files.append(inbox)
+    has_bullet = {slugify(b.text) for b in bullets}
+    open_bullet = {slugify(b.text) for b in bullets if b.state in VISIBLE}
     out = []
     for f in files:
         is_inbox = _same_file(f, inbox)
@@ -358,8 +365,12 @@ def scan_schedules():
                 sm = H1_STATE.match(raw)
                 file_state = sm[1] if sm else None
                 break
-        if not is_inbox and file_state in ("x", "X", "!"):
-            continue
+        if not is_inbox:
+            if f.stem in has_bullet:
+                if f.stem not in open_bullet:
+                    continue
+            elif file_state in ("x", "X", "!"):
+                continue
         for i, raw in enumerate(lines, 1):
             if is_inbox:
                 b = parse_bullet(f, i, raw)
@@ -500,26 +511,6 @@ def load_stamped_now():
     return out
 
 
-def prune_fired(now_dt, max_age):
-    lines = _read_sidecar(FIRED_PATH)
-    if not lines:
-        return
-    kept = []
-    for line in lines:
-        parts = line.split("\t")
-        if len(parts) < 2:
-            continue
-        try:
-            due = datetime.fromisoformat(parts[0])
-        except ValueError:
-            kept.append(line)
-            continue
-        if now_dt - due < max_age:
-            kept.append(line)
-    FIRED_PATH.write_text("\n".join(kept) + ("\n" if kept else ""),
-                          encoding="utf-8", errors="surrogateescape")
-
-
 # ---------------------------------------------------------------- fire
 
 def fire_notification(title, body, open_path):
@@ -560,7 +551,9 @@ def cmd_tick():
     one tick interval, fires once. Missed fires across Doze / reboots still
     fire on the next tick, however late."""
     t = now()
-    lead = timedelta(minutes=int(os.environ.get("TD_LEAD_MIN", "0")))
+    # Default one tick period (15 min), so a reminder fires on the last tick
+    # before it is due rather than up to 15 min after.
+    lead = timedelta(minutes=int(os.environ.get("TD_LEAD_MIN", "15")))
     items = scan_schedules()
     update_added([(s.hash, s.title) for s in items], t.isoformat(timespec="minutes"))
     scheduled = load_scheduled()
@@ -640,7 +633,7 @@ def _file_tasks(skip_slugs):
             continue
         title = m["title"]
         out.append(Bullet(f, 1, first, "", canon(m["state"]), title,
-                          TAG.findall(title), bullet_hash(str(f), title)))
+                          bullet_hash(str(f), title)))
     return out
 
 
@@ -956,139 +949,91 @@ def _record_stamped_now(stamped, t):
         pass
 
 
-def cmd_promote(args=None):
-    """Create/reuse ~/tasks/<slug>.md for a bullet.
-
-    Two input modes:
-      • `--from PATH --line N` reads the bullet from PATH:N on disk. No
-        stdout output. Used by Helix bindings so the editor buffer never
-        gets :pipe-dirtied.
-      • Otherwise reads stdin, echoes bullet to stdout. Used by shells.
-
-    In both modes the dedicated file is written if missing; if it already
-    exists its H1 is retagged with the current state. The agenda is
-    refreshed so new ` (*)` markers appear."""
-    args = args or []
-    from_path = None
-    line_no = None
-    i = 0
-    while i < len(args):
-        if args[i] == "--from" and i + 1 < len(args):
-            from_path = Path(args[i + 1]).expanduser()
-            i += 2
-        elif args[i] == "--line" and i + 1 < len(args):
-            try:
-                line_no = int(args[i + 1])
-            except ValueError:
-                sys.exit(f"bad --line: {args[i + 1]!r}")
-            i += 2
-        else:
-            i += 1
-
-    if _same_file(from_path, LIST_PATH):
-        return 0  # the agenda is view only; `P` there just opens the file
-    use_file = from_path is not None and line_no is not None
-    if use_file:
-        try:
-            data = from_path.read_bytes().decode("utf-8", "surrogateescape")
-        except OSError as e:
-            sys.exit(f"td: {from_path}: {e}")
-        lines = data.splitlines()
-        if not 1 <= line_no <= len(lines):
-            return 0
-        raw = lines[line_no - 1]
-    else:
-        raw = sys.stdin.read().rstrip("\n")
-
-    m = TASK.match(raw)
-    if not m:
-        if use_file:
-            return 0
-        sys.exit("not a bullet line")
-    core = LINK.sub("", MARKER.sub("", m["text"])).strip()
-    if not core:
-        if use_file:
-            return 0
-        sys.exit("empty bullet text")
-    slug = slugify(core)
-    folder = task_folder()
-    folder.mkdir(parents=True, exist_ok=True)
-    dedicated = folder / f"{slug}.md"
-    if not dedicated.exists():
-        dedicated.write_text(f"# [{canon(m['state'])}] {core}\n\n",
-                             encoding="utf-8", errors="surrogateescape")
-    else:
-        _retag_dedicated_h1(core, canon(m["state"]))
-    refresh_list()
-    if not use_file:
-        sys.stdout.write(f"{m['indent']}- [{m['state']}] {core}")
-    return 0
+def _from_spec(args):
+    """(Path, line) from `--from PATH:LINE`; (Path, None) without :LINE;
+    (None, None) without --from."""
+    if "--from" not in args:
+        return None, None
+    i = args.index("--from")
+    if i + 1 >= len(args):
+        return None, None
+    m = re.match(r"^(.+):(\d+)$", args[i + 1])
+    if m:
+        return Path(m[1]).expanduser(), int(m[2])
+    return Path(args[i + 1]).expanduser(), None
 
 
-def cmd_jump(args):
-    """Print ~/tasks/<slug>.md if it exists for the bullet at --from PATH:LINE.
+def _goto(source, lineno, raw, want_file):
+    """Where `space , p` (want_file False) or `space , P` (True) goes from
+    line lineno of source, whose text is raw -> a path or PATH:LINE.
 
-    From an agenda row, print INBOX:LINE of the inbox bullet it shows (same
-    state and text), so `:open` lands on that line; with --file, the
-    dedicated file instead. An orphan row prints its file either way.
-
-    Fallback (file missing, not a bullet) prints PATH:LINE (PATH when the
-    line is unreadable) so that `:open %sh{td jump ...}` stays put.
-    """
-    want_file = "--file" in args
-    source = None
-    lineno = None
-    i = 0
-    while i < len(args):
-        if args[i] == "--from" and i + 1 < len(args):
-            spec = args[i + 1]
-            m = re.match(r"^(.+):(\d+)$", spec)
-            if m:
-                source = Path(m[1]).expanduser()
-                lineno = int(m[2])
-            i += 2
-        else:
-            i += 1
-    fallback = str(source) if source else str(td_file())
-    if not source or not source.is_file():
-        print(fallback)
-        return 0
-    try:
-        lines = source.read_bytes().decode("utf-8", "surrogateescape").splitlines()
-    except OSError:
-        print(fallback)
-        return 0
-    if lineno is None or lineno < 1 or lineno > len(lines):
-        print(fallback)
-        return 0
-    raw = lines[lineno - 1]
-    # Stay on this line: a bare path would put the cursor back at the top.
-    fallback = f"{source}:{lineno}"
-    # Orphan row (and legacy agenda rows): line ends with `path:line:col` —
-    # the path is the jump target.
+    A line ending in `path:line:col` (file-task and orphan rows) goes to
+    that file. A bullet goes to its ~/tasks/<slug>.md, if it exists; but p
+    on an agenda row goes to the row's line in the inbox, the source of
+    truth. Anything else stays: PATH:LINE (a bare path would put the
+    cursor back at the top)."""
+    here = f"{source}:{lineno}" if source and lineno else str(source or td_file())
     tail = re.search(r"(\S+):\d+:\d+\s*$", raw)
     if tail:
         candidate = Path(tail[1]).expanduser()
         if candidate.is_file():
-            print(str(candidate))
-            return 0
+            return str(candidate)
     bm = TASK.match(raw)
     if not bm:
-        print(fallback)
-        return 0
-    slug = slugify(bm["text"])
-    target = task_folder() / f"{slug}.md"
-    inbox = td_file()
+        return here
     if _same_file(source, LIST_PATH) and not want_file:
-        # An agenda row: jump to its line in the inbox, the source of truth.
+        inbox = td_file()
         if inbox.is_file():
             _, hits, _ = _find_bullet_lines(inbox, bm["text"], bm["state"])
             if hits:
-                print(f"{inbox}:{hits[0] + 1}")
-                return 0
-        print(fallback)
-        return 0
-    print(str(target) if target.is_file() else fallback)
+                return f"{inbox}:{hits[0] + 1}"
+        return here
+    target = task_folder() / f"{slugify(bm['text'])}.md"
+    return str(target) if target.is_file() else here
+
+
+def _hand_back(target):
+    """Print target and write it to ~/.cache/td/open: the p and P keys send
+    the line with :pipe-to, which drops stdout, then :open that file."""
+    CACHE.mkdir(parents=True, exist_ok=True)
+    OPEN_PATH.write_text(target + "\n", encoding="utf-8", errors="surrogateescape")
+    print(target)
+
+
+def cmd_promote(args):
+    """stdin: a line; --from PATH:LINE says where it is. The `space , P` key
+    pipes the line from the buffer, so a bullet not saved yet counts.
+
+    A bullet gets its dedicated file ~/tasks/<slug>.md: written with a
+    `# [S] title` heading if missing, else its heading is retagged with
+    the bullet's state, and the agenda is refreshed for the new ` (*)`.
+    From the agenda nothing is written (it is a view). Then prints where P
+    goes (see _goto): the dedicated file, or the line itself."""
+    source, lineno = _from_spec(args)
+    raw = sys.stdin.read().rstrip("\r\n")
+    m = TASK.match(raw)
+    core = LINK.sub("", MARKER.sub("", m["text"])).strip() if m else ""
+    if core and not _same_file(source, LIST_PATH):
+        folder = task_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        dedicated = folder / f"{slugify(core)}.md"
+        if not dedicated.exists():
+            dedicated.write_text(f"# [{canon(m['state'])}] {core}\n\n",
+                                 encoding="utf-8", errors="surrogateescape")
+        else:
+            _retag_dedicated_h1(core, canon(m["state"]))
+        refresh_list()
+    _hand_back(_goto(source, lineno, raw, want_file=True))
+    return 0
+
+
+def cmd_jump(args):
+    """stdin: a line; --from PATH:LINE says where it is. The `space , p` key
+    pipes the line from the buffer, so unsaved edits count. Prints where p
+    goes (see _goto); never writes a task file."""
+    source, lineno = _from_spec(args)
+    raw = sys.stdin.read().rstrip("\r\n")
+    _hand_back(_goto(source, lineno, raw, want_file=False))
     return 0
 
 
@@ -1139,9 +1084,10 @@ def cmd_toggle(args):
     --line). Everywhere else the line is toggled, and from a file other
     than $TD_FILE the inbox bullet with the same slug gets the same state.
     In a dedicated file (~/tasks/<slug>.md) the `# [S] title` heading
-    toggles too, and sets the inbox bullet named by the file. The inbox
-    line is rewritten from itself, so it keeps its indent, tags, and link,
-    and marking it done bumps it if it repeats. The dedicated file's
+    toggles too, and sets the inbox bullet named by the file (an open one
+    first, see _set_inbox_state). The inbox line is rewritten from itself,
+    so it keeps its indent and link, and marking it done bumps it if it
+    repeats. The dedicated file's
     heading follows the inbox (unless that file is the one being edited:
     Helix saves it next), and agenda.md is refreshed."""
     if not args:
@@ -1261,20 +1207,26 @@ def _dedicated_slug(path):
 
 
 def _set_inbox_state(inbox, slug, new_state):
-    """Set the first inbox bullet whose slug is slug to new_state (bumping
-    it if it repeats and new_state is done) -> its new line, or None."""
+    """Set the inbox bullet whose slug is slug to new_state (bumping it if
+    it repeats and new_state is done) -> its new line, or None. With
+    several, the first open one ([ ]/[Y]/[A]/[W]); a done or ignored copy
+    is an old task with the same name. Without an open one, the first."""
     if not inbox.is_file():
         return None
     lines = inbox.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
+    hits = []  # (closed, index)
     for i, line in enumerate(lines):
-        raw = line.rstrip("\n")
-        m = TASK.match(raw)
+        m = TASK.match(line.rstrip("\n"))
         if m and slugify(m["text"]) == slug:
-            new = _set_state(raw, new_state)
-            if new != raw:
-                _write_line(inbox, lines, i, new)
-            return new
-    return None
+            hits.append((canon(m["state"]) not in VISIBLE, i))
+    if not hits:
+        return None
+    _, i = min(hits)
+    raw = lines[i].rstrip("\n")
+    new = _set_state(raw, new_state)
+    if new != raw:
+        _write_line(inbox, lines, i, new)
+    return new
 
 
 def _write_line(path, lines, i, new):
@@ -1468,8 +1420,10 @@ def run_tests(verbose=False):
             return p
 
         def td(self, *args, stdin="", now_=NOW, **env):
+            """Run td. Lead time 0 unless given; an env value None unsets it."""
             e = {**os.environ, "HOME": str(self.home), "TL_DIR": str(self.tasks),
-                 "TL_NOW": now_, "TD_DRY_RUN": "1", **env}
+                 "TL_NOW": now_, "TD_DRY_RUN": "1", "TD_LEAD_MIN": "0", **env}
+            e = {k: v for k, v in e.items() if v is not None}
             r = sp.run([sys.executable, TD, *args], env=e, capture_output=True,
                        input=stdin.encode("utf-8", "surrogateescape"), check=True)
             return r.stdout.decode("utf-8", "surrogateescape")
@@ -1487,9 +1441,9 @@ def run_tests(verbose=False):
         def test_bullet_shapes(self):
             p = Path("x.md")
             b = parse_bullet(p, 1, "- [ ] call jon")
-            self.assertEqual((b.state, b.text, b.tags), (" ", "call jon", []))
-            b = parse_bullet(p, 2, "- [Y] pay rent #errand")
-            self.assertEqual((b.state, b.tags), ("Y", ["errand"]))
+            self.assertEqual((b.state, b.text), (" ", "call jon"))
+            b = parse_bullet(p, 2, "- [Y] pay rent")
+            self.assertEqual(b.state, "Y")
             b = parse_bullet(p, 3, "  - [A] indented")
             self.assertEqual((b.indent, b.state), ("  ", "A"))
             self.assertIsNone(parse_bullet(p, 4, "not a task"))
@@ -1507,10 +1461,8 @@ def run_tests(verbose=False):
             plain = bullet_hash(p, "pay rent")
             stamped = bullet_hash(p, "pay rent 2026-11-01 Sat 09:00")
             bumped = bullet_hash(p, "pay rent 2026-12-01 Tue 09:00 ++1m")
-            tagged = bullet_hash(p, "pay rent 2026-11-01 Sat 09:00 ++1m #errand")
             self.assertEqual(plain, stamped)
             self.assertEqual(plain, bumped)
-            self.assertEqual(bullet_hash(p, "pay rent #errand"), tagged)
             self.assertNotEqual(plain, bullet_hash(p, "pay rent later"))
 
         def test_slugify(self):
@@ -1529,9 +1481,6 @@ def run_tests(verbose=False):
             self.assertEqual(
                 slugify("pay rent 2026-10-01 Thu 09:00 ++1m"),
                 slugify("pay rent 2026-11-01 Sun 09:00 ++1m"))
-            self.assertEqual(
-                slugify("pay rent 2026-11-01 Sat 09:00 ++1m #errand"),
-                "pay-rent-errand")
             self.assertEqual(
                 slugify("refactor td parser 2026-10-12 Sun 09:00 (*)"),
                 "refactor-td-parser")
@@ -1796,6 +1745,40 @@ def run_tests(verbose=False):
                     out = self.td("tick", now_="2026-10-10 12:00")
                     self.assertNotIn("would fire", out)
 
+        def test_dedicated_file_follows_its_bullet(self):
+            # Done by hand (or `space . x`, which writes [X]): the heading
+            # was never retagged, but the file stops firing with its bullet.
+            self.put_dedicated("call-vendor.md",
+                               "# call vendor\n\nfollow up 2026-10-10 12:00\n")
+            for inbox, fires in (("- [X] call vendor\n", False),
+                                 ("- [!] call vendor\n", False),
+                                 ("- [W] call vendor\n", True),
+                                 # an old done copy doesn't stop the open one
+                                 ("- [x] call vendor\n- [ ] call vendor\n", True)):
+                with self.subTest(inbox=inbox):
+                    self.cache.joinpath("fired").unlink(missing_ok=True)
+                    self.put_inbox(inbox)
+                    self.td("tick")
+                    out = self.td("tick", now_="2026-10-10 12:00")
+                    self.assertEqual("would fire" in out, fires)
+
+        def test_open_bullet_beats_a_stale_done_heading(self):
+            self.put_inbox("- [ ] renew passport\n")
+            self.put_dedicated("renew-passport.md",
+                               "# [x] renew passport\n\n2026-10-10 12:00\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 12:00")
+            self.assertIn("renew passport", out)
+
+        def test_lead_defaults_to_one_tick(self):
+            # TD_LEAD_MIN unset: 15 min, so due 11:10 fires at 11:00 (10:55).
+            self.put_dedicated("rent.md", "# rent\n2026-10-10 11:10\n")
+            self.td("tick", now_="2026-10-10 10:00", TD_LEAD_MIN=None)
+            out = self.td("tick", now_="2026-10-10 10:50", TD_LEAD_MIN=None)
+            self.assertNotIn("would fire", out)
+            out = self.td("tick", TD_LEAD_MIN=None)
+            self.assertIn("would fire", out)
+
         def test_active_dedicated_file_fires(self):
             self.put_dedicated("renew-passport.md",
                                "# [A] renew passport\n\n2026-10-10 12:00\n")
@@ -2014,16 +1997,29 @@ def run_tests(verbose=False):
 
     class Promote(Case):
         def test_creates_dedicated_file(self):
-            out = self.td("promote", stdin="- [ ] Costco run!\n")
-            self.assertEqual(out.strip(), "- [ ] Costco run!")
+            inbox = self.put_inbox("- [ ] alpha\n- [ ] Costco run!\n")
+            out = self.td("promote", "--from", f"{inbox}:2", stdin="- [ ] Costco run!\n")
             p = self.tasks / "costco-run.md"
-            self.assertTrue(p.is_file())
-            txt = p.read_text()
-            self.assertIn("# [ ] Costco run!", txt)
+            # Where P goes: printed, and in ~/.cache/td/open for the key.
+            self.assertEqual(out, f"{p}\n")
+            self.assertEqual(self.read_cache("open"), f"{p}\n")
+            self.assertEqual(p.read_text(), "# [ ] Costco run!\n\n")
+
+        def test_uses_the_piped_line_not_the_file(self):
+            # The key pipes the buffer's line: a bullet not saved yet counts.
+            inbox = self.put_inbox("- [ ] old text\n")
+            out = self.td("promote", "--from", f"{inbox}:1", stdin="- [ ] new text\n")
+            self.assertEqual(out.strip(), str(self.tasks / "new-text.md"))
+            self.assertFalse((self.tasks / "old-text.md").exists())
+
+        def test_non_bullet_stays(self):
+            inbox = self.put_inbox("# notes\n")
+            out = self.td("promote", "--from", f"{inbox}:1", stdin="# notes\n")
+            self.assertEqual(out.strip(), f"{inbox}:1")
+            self.assertEqual(sorted(p.name for p in self.tasks.iterdir()), ["todo.md"])
 
         def test_promote_active_bullet_h1_has_state(self):
-            out = self.td("promote", stdin="- [A] foo bar\n")
-            self.assertEqual(out.strip(), "- [A] foo bar")
+            self.td("promote", stdin="- [A] foo bar\n")
             self.assertIn("# [A] foo bar", (self.tasks / "foo-bar.md").read_text())
 
         def test_promote_existing_file_h1_gets_retagged(self):
@@ -2038,15 +2034,14 @@ def run_tests(verbose=False):
             self.td("promote", stdin="- [ ] costCo RUN\n")
             self.assertIn("notes", existing.read_text())
 
-        def test_preserves_state_and_indent(self):
-            out = self.td("promote", stdin="  - [A] refactor TD parser\n")
-            self.assertEqual(out.strip(), "- [A] refactor TD parser")
-            self.assertTrue(out.startswith("  - "))
+        def test_indented_bullet(self):
+            self.td("promote", stdin="  - [A] refactor TD parser\n")
+            self.assertEqual((self.tasks / "refactor-td-parser.md").read_text(),
+                             "# [A] refactor TD parser\n\n")
 
-        def test_strips_existing_link_from_bullet(self):
-            out = self.td("promote",
-                          stdin="- [Y] Pay rent → ~/tasks/pay-rent.md\n")
-            self.assertEqual(out.strip(), "- [Y] Pay rent")
+        def test_heading_leaves_out_an_old_link(self):
+            self.td("promote", stdin="- [Y] Pay rent → ~/tasks/pay-rent.md\n")
+            self.assertEqual((self.tasks / "pay-rent.md").read_text(), "# [Y] Pay rent\n\n")
 
         def test_promote_stamped_bullet_uses_unstamped_slug(self):
             self.td("promote",
@@ -2091,87 +2086,90 @@ def run_tests(verbose=False):
             self.assertNotIn("# ORPHANS", out)
 
     class Jump(Case):
+        def go(self, cmd, path, lineno):
+            """Run `td jump`/`td promote` the way p/P do: the line piped in."""
+            line = Path(path).read_text().splitlines(keepends=True)[lineno - 1]
+            out = self.td(cmd, "--from", f"{path}:{lineno}", stdin=line)
+            self.assertEqual(self.read_cache("open"), out)
+            return out.strip()
+
+        def agenda_line(self, text):
+            agenda = self.cache / "agenda.md"
+            lines = agenda.read_text().splitlines()
+            return agenda, next(i for i, line in enumerate(lines, 1) if text in line)
+
         def test_jumps_to_dedicated_when_exists(self):
             inbox = self.put_inbox("- [A] refactor td parser\n")
             target = self.put_dedicated("refactor-td-parser.md",
                                         "# refactor td parser\n")
-            out = self.td("jump", "--from", f"{inbox}:1").strip()
-            self.assertEqual(out, str(target))
+            self.assertEqual(self.go("jump", inbox, 1), str(target))
 
         def test_fallback_when_missing(self):
             inbox = self.put_inbox("- [ ] call jon\n")
-            out = self.td("jump", "--from", f"{inbox}:1").strip()
-            self.assertEqual(out, f"{inbox}:1")
+            self.assertEqual(self.go("jump", inbox, 1), f"{inbox}:1")
+
+        def test_uses_the_piped_line_not_the_file(self):
+            inbox = self.put_inbox("- [ ] alpha\n")
+            target = self.put_dedicated("bravo.md", "# bravo\n")
+            out = self.td("jump", "--from", f"{inbox}:1", stdin="- [ ] bravo\n")
+            self.assertEqual(out.strip(), str(target))
 
         def test_jump_ignores_stamp(self):
             inbox = self.put_inbox(
                 "- [A] refactor td parser 2026-10-12 Sun 09:00 ++1w\n")
             target = self.put_dedicated("refactor-td-parser.md",
                                         "# refactor td parser\n")
-            out = self.td("jump", "--from", f"{inbox}:1").strip()
-            self.assertEqual(out, str(target))
+            self.assertEqual(self.go("jump", inbox, 1), str(target))
 
         def test_fallback_on_non_bullet(self):
             inbox = self.put_inbox("just a note\n")
-            out = self.td("jump", "--from", f"{inbox}:1").strip()
-            self.assertEqual(out, f"{inbox}:1")
+            self.assertEqual(self.go("jump", inbox, 1), f"{inbox}:1")
 
         def test_jump_from_agenda_row(self):
             inbox = self.put_inbox("- [A] refactor td parser\n")
             target = self.put_dedicated("refactor-td-parser.md",
                                         "# refactor td parser\n")
-            # Simulate the user running `space . l` then pressing `space . p`
-            # from an agenda row in agenda.md.
+            # `space , a`, then `space , p` / `space , P` on the row.
             self.td("list")
-            cache_list = self.home / ".cache" / "td" / "agenda.md"
-            lines = cache_list.read_text().splitlines()
-            lineno = next(i for i, line in enumerate(lines, 1)
-                          if "refactor td parser" in line and "- [A]" in line)
-            # p: the todo.md line, even with a dedicated file; P (--file): the file
-            out = self.td("jump", "--from", f"{cache_list}:{lineno}").strip()
-            self.assertEqual(out, f"{inbox}:1")
-            out = self.td("jump", "--file", "--from", f"{cache_list}:{lineno}").strip()
-            self.assertEqual(out, str(target))
+            agenda, lineno = self.agenda_line("- [A] refactor td parser")
+            # p: the todo.md line, even with a dedicated file; P: the file
+            self.assertEqual(self.go("jump", agenda, lineno), f"{inbox}:1")
+            self.assertEqual(self.go("promote", agenda, lineno), str(target))
 
-        def test_jump_file_from_agenda_row_without_file_stays(self):
+        def test_promote_from_agenda_row_without_file_stays(self):
             self.put_inbox("- [ ] alpha\n")
             self.td("list")
-            cache_list = self.home / ".cache" / "td" / "agenda.md"
-            lineno = cache_list.read_text().splitlines().index("- [ ] alpha") + 1
-            out = self.td("jump", "--file", "--from", f"{cache_list}:{lineno}").strip()
-            self.assertEqual(out, f"{cache_list}:{lineno}")
+            agenda, lineno = self.agenda_line("- [ ] alpha")
+            self.assertEqual(self.go("promote", agenda, lineno), f"{agenda}:{lineno}")
+            self.assertFalse((self.tasks / "alpha.md").exists())
 
         def test_jump_from_agenda_row_to_inbox_line(self):
             inbox = self.put_inbox("- [ ] alpha\n- [Y] call jon 2026-10-12 09:00\n")
             self.td("list")
-            cache_list = self.home / ".cache" / "td" / "agenda.md"
-            lines = cache_list.read_text().splitlines()
-            lineno = next(i for i, line in enumerate(lines, 1)
-                          if "call jon" in line)
-            out = self.td("jump", "--from", f"{cache_list}:{lineno}").strip()
-            self.assertEqual(out, f"{inbox}:2")
+            agenda, lineno = self.agenda_line("call jon")
+            self.assertEqual(self.go("jump", agenda, lineno), f"{inbox}:2")
 
         def test_jump_from_stale_agenda_row_stays(self):
             self.put_inbox("- [ ] alpha\n")
             self.td("list")
-            cache_list = self.home / ".cache" / "td" / "agenda.md"
             self.put_inbox("- [ ] bravo\n")
-            lines = cache_list.read_text().splitlines()
-            lineno = next(i for i, line in enumerate(lines, 1)
-                          if "alpha" in line)
-            out = self.td("jump", "--from", f"{cache_list}:{lineno}").strip()
-            self.assertEqual(out, f"{cache_list}:{lineno}")
+            agenda, lineno = self.agenda_line("alpha")
+            self.assertEqual(self.go("jump", agenda, lineno), f"{agenda}:{lineno}")
 
         def test_jump_from_orphan_row(self):
             self.put_inbox("- [ ] alpha\n")
             orphan = self.put_dedicated("costco-run.md", "# Costco run!\n")
             self.td("list")
-            cache_list = self.home / ".cache" / "td" / "agenda.md"
-            lines = cache_list.read_text().splitlines()
-            lineno = next(i for i, line in enumerate(lines, 1)
-                          if "costco-run" in line)
-            out = self.td("jump", "--from", f"{cache_list}:{lineno}").strip()
-            self.assertEqual(out, str(orphan))
+            agenda, lineno = self.agenda_line("costco-run")
+            self.assertEqual(self.go("jump", agenda, lineno), str(orphan))
+
+        def test_jump_from_file_task_row(self):
+            self.put_inbox("- [ ] alpha\n")
+            d = self.put_dedicated("passport.md", "# [W] renew passport\n")
+            self.td("list")
+            agenda, lineno = self.agenda_line("renew passport")
+            for cmd in ("jump", "promote"):
+                self.assertEqual(self.go(cmd, agenda, lineno), str(d), cmd)
 
     class SetToggle(Case):
         def test_set_rewrites_checkbox(self):
@@ -2223,7 +2221,7 @@ def run_tests(verbose=False):
             with self.assertRaises(sp.CalledProcessError) as cm:
                 self.td("toggle", "x", "--from", str(agenda), "--line", str(lineno))
             self.assertIn(b"view only", cm.exception.stderr)
-            self.td("promote", "--from", str(agenda), "--line", str(lineno))
+            self.td("promote", "--from", f"{agenda}:{lineno}", stdin=row)
             self.assertEqual(p.read_text(), "- [ ] alpha 2026-10-20 Tue 09:00\n")
             self.assertEqual((self.tasks / "alpha.md").read_text(), "# [ ] alpha\n")
             self.assertEqual(agenda.read_text(), before)
@@ -2276,17 +2274,6 @@ def run_tests(verbose=False):
             self.assertNotIn("passport", orphans)
             self.td("list", "--sort", "modified")  # file tasks sort too
 
-        def test_jump_from_file_task_row(self):
-            self.put_inbox("- [ ] alpha\n")
-            d = self.put_dedicated("passport.md", "# [W] renew passport\n")
-            self.td("list")
-            agenda = self.home / ".cache" / "td" / "agenda.md"
-            lineno = next(i for i, line in enumerate(agenda.read_text().splitlines(), 1)
-                          if "renew passport" in line)
-            for flag in ([], ["--file"]):
-                out = self.td("jump", *flag, "--from", f"{agenda}:{lineno}").strip()
-                self.assertEqual(out, str(d), flag)
-
         def test_agenda_rebuild_replaces_read_only_file(self):
             self.put_inbox("- [ ] alpha\n")
             self.td("list")
@@ -2298,8 +2285,8 @@ def run_tests(verbose=False):
             self.assertEqual(agenda.stat().st_mode & 0o777, 0o444)
 
         def test_heading_toggle_sets_inbox(self):
-            p = self.put_inbox("- [ ] note\n- [Y] refactor td parser #dev\n")
-            d = self.put_dedicated("refactor-td-parser-dev.md", "# [Y] refactor parser\n")
+            p = self.put_inbox("- [ ] note\n- [Y] refactor td parser\n")
+            d = self.put_dedicated("refactor-td-parser.md", "# [Y] refactor parser\n")
             # The file names the bullet, so an edited heading title still works.
             heading = "# [Y] refactor parser\n"
             for state, want, inbox_state in (("A", "# [A] refactor parser", "A"),
@@ -2308,8 +2295,20 @@ def run_tests(verbose=False):
                 heading = self.td("toggle", state, "--from", str(d), stdin=heading)
                 self.assertEqual(heading, want + "\n", state)
                 self.assertEqual(p.read_text(),
-                                 f"- [ ] note\n- [{inbox_state}] refactor td parser #dev\n")
+                                 f"- [ ] note\n- [{inbox_state}] refactor td parser\n")
             self.assertNotIn("refactor", self.read_cache("agenda.md").split("# ORPHANS")[0])
+
+        def test_heading_toggle_prefers_the_open_bullet(self):
+            # An old done `call mom` above a new one: the new one changes.
+            p = self.put_inbox("- [x] call mom\n- [ ] call mom\n")
+            d = self.put_dedicated("call-mom.md", "# [ ] call mom\n")
+            out = self.td("toggle", "Y", "--from", str(d), stdin="# [ ] call mom\n")
+            self.assertEqual(out, "# [Y] call mom\n")
+            self.assertEqual(p.read_text(), "- [x] call mom\n- [Y] call mom\n")
+            # With no open copy, the first one changes.
+            p.write_text("- [x] call mom\n- [!] call mom\n")
+            self.td("toggle", "todo", "--from", str(d), stdin="# [x] call mom\n")
+            self.assertEqual(p.read_text(), "- [ ] call mom\n- [!] call mom\n")
 
         def test_heading_without_state_and_line_mode(self):
             p = self.put_inbox("- [ ] alpha\n")
@@ -2569,6 +2568,25 @@ def run_tests(verbose=False):
                     now_="2026-10-10T11:00")
             self.assertEqual(p.read_text(), "- [Y] alpha\n")
 
+    class TlAgrees(unittest.TestCase):
+        def test_tl_entry_is_tls_pattern(self):
+            # tl logs (and flags typos in) the lines that start with date,
+            # time, dash; td never fires their leading time. One pattern,
+            # so each such line belongs to exactly one of them.
+            from importlib.machinery import SourceFileLoader
+            from importlib.util import module_from_spec, spec_from_loader
+            path = Path(TD).with_name("tl")
+            if not path.exists():
+                self.skipTest("no tl next to td")
+            loader = SourceFileLoader("tl", str(path))
+            tl = module_from_spec(spec_from_loader("tl", loader))
+            sys.dont_write_bytecode, before = True, sys.dont_write_bytecode
+            try:
+                loader.exec_module(tl)
+            finally:
+                sys.dont_write_bytecode = before
+            self.assertEqual(TL_ENTRY.pattern, tl.ATTEMPT.pattern)
+
     class KeysDoc(unittest.TestCase):
         # keys.md lists every `space ,` key in config.toml and the `+`/`-`
         # stamp keys, and nothing else.
@@ -2597,7 +2615,7 @@ def run_tests(verbose=False):
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
                                for c in (Parse, List, Tick, New, Stamp, Next,
                                          Promote, Marker, Jump, SetToggle,
-                                         Fire, Recurring, KeysDoc))
+                                         Fire, Recurring, TlAgrees, KeysDoc))
     ok = unittest.TextTestRunner(verbosity=2 if verbose else 1).run(suite).wasSuccessful()
     return 0 if ok else 1
 

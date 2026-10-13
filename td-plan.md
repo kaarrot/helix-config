@@ -1,5 +1,10 @@
 # TODO Scheduler — `td`
 
+> **Historical: the original plan, kept for the record. It no longer
+> describes `td`** (lowercase states, `space .` keys, `#tags`,
+> `last-list.md` and more have changed or gone). The current design is in
+> [bin/agenda.md](bin/agenda.md), the keys in [bin/keys.md](bin/keys.md).
+
 ## Context
 
 You want two complementary things in one tool:
