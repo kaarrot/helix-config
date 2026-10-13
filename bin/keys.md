@@ -53,7 +53,7 @@ left out). Renaming the bullet unlinks it from its file.
 | Key | What it does |
 |---|---|
 | `t` | Open the inbox, `~/tasks/todo.md` |
-| `a` | **Agenda.** Opens a snapshot of todo.md grouped TODAY, ACTIVE, TODO, WAITING, newest-added first; done and ignored bullets are hidden. A bullet with its own file shows ` (*)`. Files without a bullet are listed by the status on their first line (`# [W] renew passport`), or under ORPHANS if they have none. View only: Helix shows `[readonly]`, and anything typed there is thrown away by the next `a`. Change tasks in todo.md; `p` takes you there |
+| `a` | **Agenda.** Opens a snapshot of todo.md grouped TODAY, ACTIVE, TODO, WAITING, newest-added first; done and ignored bullets are hidden. A bullet with its own file shows ` (*)`. Files without a bullet are listed by the status on their first line (`# [W] renew passport`), or under ORPHANS if they have none. View only: Helix shows `[readonly]`, and anything typed there is thrown away by the next `a`. But `x` and the status keys work on its rows: they change the task itself (see below), and the agenda reloads. For anything else, `p` takes you to the task |
 | `A` | The same agenda, most recently changed first: a bullet's line (state, text, stamp) or its own file. Edits by hand count from the next `a`, `A` or status key |
 | `p` | **Go to the task.** On a bullet: open its own file, if it has one; otherwise stay. On an agenda row: go to that bullet's line in todo.md; a row for a file goes to the file. Never creates anything. Uses the line as it is in the buffer, saved or not |
 | `P` | **Give the task a file.** Saves, then creates `~/tasks/<slug>.md` for the bullet, with a heading `# [S] title` that carries the bullet's state, and opens it. An existing file is reused and its heading's state updated. On an agenda row it only opens the row's file, if any. Works on a bullet you have just typed, saved or not |
@@ -74,6 +74,13 @@ Each `, ` status key is the letter its checkbox gets: `, y` writes `[Y]`,
 `x` and the `, ` keys work on any bullet, change the line at once, and then
 save the file. They also keep the task's other copies in step:
 
+- **On an agenda row:** the row itself stays as it is; the task it shows
+  changes where it lives: the todo.md bullet (found by its state and text,
+  as `p` finds it, and its own file's heading follows), or, on a file-task
+  row, that file's `# [S] title` heading. Then the agenda is rebuilt, in
+  the order you opened it (`a` or `A`), and Helix reloads it. A row that
+  is out of date (its bullet changed since) only gets the rebuild.
+
 - **In todo.md:** the bullet changes, and so does the state on its own
   file's heading.
 - **On a task file's heading** `# [S] title`: the heading toggles, and the
@@ -83,7 +90,6 @@ save the file. They also keep the task's other copies in step:
 - **On a bullet in another file with the same text as a todo.md bullet:**
   that todo.md bullet changes too.
 - **On any other bullet** (subtasks): only that line.
-- **On the agenda:** nothing; it is a view.
 
 If several todo.md bullets have the same text (an old done `call mom` and a
 new one), the open one changes. A state typed by hand doesn't reach other
@@ -127,9 +133,17 @@ next to starting Python, so they see the saved file in practice.
 
 - **Status keys, `x`, `s`, `+`, `-`:** `extend_to_line_bounds` selects the
   line, and `:pipe` sends it through `td` and puts the result in its place,
-  so the change shows at once and unsaved edits are kept. The status keys
-  and `x` then `:write`. `td` writes other files (todo.md, a task file's
-  heading) itself. `:pipe` puts anything printed on stderr in place of the
+  so the change shows at once and unsaved edits are kept. `td` writes other
+  files (todo.md, a task file's heading, the agenda) itself.
+- **Status keys and `x`** then run
+  `:earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}`
+  and `:update`. A key can't branch, and `:pipe` always marks the buffer
+  modified, even when the line comes back the same. On the agenda, td has
+  already changed the task and rebuilt `agenda.md`, so `:earlier 1` takes
+  back the pipe's edit, `:update` has nothing to save (the read-only file
+  is never written), and Helix's auto-reload shows the rebuilt agenda. In
+  any other file `:earlier 0` changes nothing (it says "Already at oldest
+  change" until the save's "written" replaces it) and `:update` saves. `:pipe` puts anything printed on stderr in place of the
   line, so `td` prints nothing there. Two earlier designs failed: `:write`
   then `:sh td … --line N` showed the change only on the next keypress, so
   pressing again toggled it back; `:write` then `%sh{td … --line N}` and

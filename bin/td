@@ -38,7 +38,9 @@ Commands:
                        bullets whose slug has a dedicated file. Files with
                        no matching bullet are listed under their status if
                        their first line is `# [S] title` (done/ignored ones
-                       hidden), else in # ORPHANS.
+                       hidden), else in # ORPHANS. The options are kept
+                       in ~/.cache/td/agenda-args, so a rebuild after a
+                       change keeps the order.
                        added: newest first-seen first. modified: most
                        recently changed first (its line, or its dedicated
                        file; hand edits count from the next td run).
@@ -58,8 +60,11 @@ Commands:
                        its file; else PATH:LINE (stay).
   td set PATH LINE S   rewrite checkbox char at PATH:LINE to S (" "/Y/A/x/!)
   td toggle S          stdin: a line. Toggle the checkbox between " " and S
-                       in place. With --from the agenda: no change (it is a
-                       view; exits 1 with --line). With --from any other
+                       in place. With --from the agenda, the row stays as
+                       it is (it is a view): the task it shows changes
+                       where it lives (its todo.md bullet, or a file
+                       task's heading) and the agenda is rebuilt. With
+                       --from any other
                        file, the inbox bullet with the same slug gets the
                        same state (an open one first, if there are several);
                        in a dedicated file the `# [S] title` heading toggles
@@ -158,14 +163,17 @@ CHANGED_PATH = CACHE / "changed"
 LAST_TICK_PATH = CACHE / "last-tick"
 STAMPED_NOW_PATH = CACHE / "stamped-now"
 LIST_PATH = CACHE / "agenda.md"
+# The `td list` options the agenda was last built with, so a rebuild after a
+# change keeps the view's order (space , A) instead of falling back to added.
+LIST_ARGS_PATH = CACHE / "agenda-args"
 # Cursor column `space , s` and `+`/`-` hand from Helix to td (and back).
 COL_PATH = CACHE / "stamp-col"
 # Where `space , p` / `P` go: td jump/promote write it, the key :opens it.
 OPEN_PATH = CACHE / "open"
 TICK_SHIM = Path("~/.config/helix/bin/td-tick").expanduser()
 
-LEGEND = ("# td VIEW ONLY (space , p jumps to the todo.md line): "
-          "[ ] todo  [Y] today  [A] active  [W] waiting")
+LEGEND = ("# td VIEW ONLY (status keys change the task itself; space , p "
+          "goes there): [ ] todo  [Y] today  [A] active  [W] waiting")
 
 Bullet = namedtuple("Bullet", "path line raw indent state text hash")
 Scheduled = namedtuple("Scheduled", "path line due title hash")
@@ -743,16 +751,20 @@ def _write_agenda(text):
 
 
 def cmd_list(args):
+    state, sort = _parse_list_args(args)
     text = build_list(args)
     _write_agenda(text)
+    LIST_ARGS_PATH.write_text(f"--state {state} --sort {sort}\n", encoding="utf-8")
     sys.stdout.write(text)
     return 0
 
 
 def refresh_list():
-    """Write agenda.md without touching stdout (used after a state mutation)."""
+    """Rebuild agenda.md, with the options it was last listed with, without
+    touching stdout (used after a state change)."""
     try:
-        _write_agenda(build_list([]))
+        saved = _read_sidecar(LIST_ARGS_PATH)
+        _write_agenda(build_list(saved[0].split() if saved else []))
     except Exception:
         pass
 
@@ -1080,8 +1092,9 @@ def cmd_toggle(args):
         --from; Helix puts stderr in place of the line, so that mode is
         silent on stderr.
 
-    The agenda is view only: a row comes back unchanged (exit 1 with
-    --line). Everywhere else the line is toggled, and from a file other
+    The agenda is a view: a row comes back unchanged, and the task it
+    shows changes where it lives (see _toggle_agenda_row). Everywhere else
+    the line is toggled, and from a file other
     than $TD_FILE the inbox bullet with the same slug gets the same state.
     In a dedicated file (~/tasks/<slug>.md) the `# [S] title` heading
     toggles too, and sets the inbox bullet named by the file (an open one
@@ -1139,11 +1152,10 @@ def cmd_toggle(args):
             sys.stdout.write(new_raw + nl)
 
     if _same_file(from_path, LIST_PATH):
-        # View only: change the task in todo.md (space , p jumps there).
-        if use_file:
-            sys.stderr.write("td: the agenda is view only; jump to the "
-                             "todo.md line with space , p\n")
-            return 1
+        # The agenda is a view: the task changes where it lives, and the
+        # agenda is rebuilt. The row itself comes back unchanged (the keys
+        # undo it with :earlier, so Helix reloads the rebuilt agenda).
+        _toggle_agenda_row(raw, state)
         emit(raw)
         return 0
 
@@ -1177,6 +1189,36 @@ def cmd_toggle(args):
         _retag_dedicated_h1(bm["text"], heading_state)
     refresh_list()
     return 0
+
+
+def _toggle_agenda_row(raw, state):
+    """Toggle state on the task an agenda row shows, where it lives, then
+    rebuild the agenda. A bullet row: its todo.md line (the one with the
+    same state and text, as space , p finds it), bumped instead if it
+    repeats and state is done; its file's heading follows. A file-task row
+    (ending `path:1:1`): that file's `# [S] title` heading. Anything else
+    (orphans, headings, a stale row): nothing but the rebuild."""
+    bm = TASK.match(raw)
+    if bm:
+        wanted = " " if canon(bm["state"]) == state else state
+        frow = AGENDA_ROW.match(raw)
+        if frow:
+            path = Path(frow["path"]).expanduser()
+            lines = (path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
+                     if path.is_file() else [])
+            hm = H1_PARTS.match(lines[0].rstrip("\n")) if lines else None
+            if hm:
+                _write_line(path, lines, 0, f"{hm['hash']}[{wanted}] {hm['title']}{hm['trail']}")
+        elif td_file().is_file():
+            lines, hits, _ = _find_bullet_lines(td_file(), bm["text"], bm["state"])
+            if hits:
+                old = lines[hits[0]].rstrip("\n")
+                new = _set_state(old, wanted)
+                if new != old:
+                    _write_line(td_file(), lines, hits[0], new)
+                nm = TASK.match(new)
+                _retag_dedicated_h1(nm["text"], canon(nm["state"]))
+    refresh_list()
 
 
 def _set_state(raw, new_state):
@@ -2205,7 +2247,9 @@ def run_tests(verbose=False):
             r = self.piped("x", p, "just a note\n")
             self.assertEqual(r.stdout, b"just a note\n")
 
-        def test_agenda_is_view_only(self):
+        def test_agenda_rows_dont_change(self):
+            # The agenda is a view: +/-, space , s and P leave a row and the
+            # task alone (status keys change the task: AgendaToggle).
             p = self.put_inbox("- [ ] alpha 2026-10-20 Tue 09:00\n")
             self.put_dedicated("alpha.md", "# [ ] alpha\n")
             self.td("list")
@@ -2214,13 +2258,9 @@ def run_tests(verbose=False):
             before = agenda.read_text()
             row = "- [ ] alpha 2026-10-20 Tue 09:00 (*)\n"
             lineno = before.splitlines().index(row.strip()) + 1
-            for args in (["toggle", "Y"], ["toggle", "x"], ["shift", "+1", "--col", "20"],
-                         ["stamp", "--col", "3"]):
+            for args in (["shift", "+1", "--col", "20"], ["stamp", "--col", "3"]):
                 out = self.td(*args, "--from", str(agenda), stdin=row)
                 self.assertEqual(out, row, args)
-            with self.assertRaises(sp.CalledProcessError) as cm:
-                self.td("toggle", "x", "--from", str(agenda), "--line", str(lineno))
-            self.assertIn(b"view only", cm.exception.stderr)
             self.td("promote", "--from", f"{agenda}:{lineno}", stdin=row)
             self.assertEqual(p.read_text(), "- [ ] alpha 2026-10-20 Tue 09:00\n")
             self.assertEqual((self.tasks / "alpha.md").read_text(), "# [ ] alpha\n")
@@ -2399,6 +2439,91 @@ def run_tests(verbose=False):
             self.td("toggle", "A", "--from", str(inbox),
                     stdin="- [ ] foo bar\n")
             self.assertIn("# [A] foo bar", dedicated.read_text())
+
+    class AgendaToggle(Case):
+        """A status key on an agenda row changes the task where it lives
+        (todo.md, or a file task's heading) and rebuilds the agenda."""
+
+        def toggle_row(self, state, text, *args):
+            agenda = self.cache / "agenda.md"
+            row = next(line for line in agenda.read_text().splitlines(keepends=True)
+                       if text in line)
+            out = self.td("toggle", state, "--from", str(agenda), *args, stdin=row)
+            self.assertEqual(out, row)  # the row itself is left alone
+            return self.read_cache("agenda.md")
+
+        def test_bullet_row_sets_todo_md(self):
+            p = self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
+            self.td("list")
+            agenda = self.toggle_row("Y", "bravo")
+            self.assertEqual(p.read_text(), "- [ ] alpha\n- [Y] bravo\n")
+            self.assertIn("# TODAY\n\n- [Y] bravo", agenda)
+            agenda = self.toggle_row("Y", "bravo")  # toggles back
+            self.assertEqual(p.read_text(), "- [ ] alpha\n- [ ] bravo\n")
+            self.assertNotIn("TODAY", agenda)
+
+        def test_done_hides_the_row_and_bumps_a_repeater(self):
+            p = self.put_inbox("- [ ] alpha\n- [Y] rent 2026-10-01 Thu 09:00 ++1m\n")
+            self.td("list")
+            agenda = self.toggle_row("x", "alpha")
+            self.assertEqual(p.read_text().splitlines()[0], "- [x] alpha")
+            self.assertNotIn("alpha", agenda)
+            self.toggle_row("x", "rent")
+            self.assertEqual(p.read_text().splitlines()[1], "- [ ] rent 2026-11-01 Sun 09:00 ++1m")
+
+        def test_row_with_a_file_retags_its_heading(self):
+            p = self.put_inbox("- [ ] refactor td parser\n")
+            d = self.put_dedicated("refactor-td-parser.md", "# [ ] refactor td parser\n\nnotes\n")
+            self.td("list")
+            self.toggle_row("A", "refactor td parser (*)")
+            self.assertEqual(p.read_text(), "- [A] refactor td parser\n")
+            self.assertEqual(d.read_text(), "# [A] refactor td parser\n\nnotes\n")
+
+        def test_file_task_row_sets_its_heading(self):
+            self.put_inbox("- [ ] alpha\n")
+            d = self.put_dedicated("passport.md", "# [W] renew passport\r\n\r\nnotes\r\n")
+            self.td("list")
+            agenda = self.toggle_row("A", "renew passport")
+            self.assertEqual(d.read_bytes(), b"# [A] renew passport\r\n\r\nnotes\r\n")
+            self.assertIn("# ACTIVE\n\n- [A] renew passport  ~/tasks/passport.md:1:1", agenda)
+            self.assertEqual(self.inbox.read_text(), "- [ ] alpha\n")
+
+        def test_stale_or_other_rows_change_nothing(self):
+            p = self.put_inbox("- [ ] alpha\n")
+            self.put_dedicated("old.md", "# old\n")
+            self.td("list")
+            p.write_text("- [ ] alpha renamed\n")
+            agenda = self.toggle_row("Y", "- [ ] alpha")  # stale: no such bullet now
+            self.assertEqual(p.read_text(), "- [ ] alpha renamed\n")
+            self.assertIn("- [ ] alpha renamed", agenda)  # but the agenda is rebuilt
+            self.toggle_row("Y", "- old")  # an orphan has no state
+            self.toggle_row("Y", "VIEW ONLY")
+            self.assertEqual(p.read_text(), "- [ ] alpha renamed\n")
+            self.assertEqual((self.tasks / "old.md").read_text(), "# old\n")
+
+        def test_line_mode(self):
+            p = self.put_inbox("- [ ] alpha\n")
+            self.td("list")
+            agenda = self.cache / "agenda.md"
+            lineno = agenda.read_text().splitlines().index("- [ ] alpha") + 1
+            self.td("toggle", "W", "--from", str(agenda), "--line", str(lineno))
+            self.assertEqual(p.read_text(), "- [W] alpha\n")
+            self.assertIn("# WAITING\n\n- [W] alpha", agenda.read_text())
+
+        def test_rebuild_keeps_the_views_order(self):
+            p = self.put_inbox("- [ ] alpha\n")
+            self.td("list", now_="2026-10-10 11:00")
+            self.put_inbox("- [ ] alpha\n- [ ] bravo\n- [ ] charlie\n")
+            self.td("list", now_="2026-10-10 11:05")
+            self.put_inbox("- [ ] alpha 2026-10-12 Mon 09:00\n- [ ] bravo\n- [ ] charlie\n")
+            out = self.td("list", "--sort", "modified", now_="2026-10-10 11:10")
+            self.assertLess(out.index("alpha"), out.index("bravo"))
+            # space , A's order survives the rebuild after a change.
+            agenda = self.toggle_row("A", "charlie")
+            self.assertLess(agenda.index("alpha"), agenda.index("bravo"))
+            self.td("list")  # space , a: back to newest added first
+            agenda = self.toggle_row("A", "charlie")
+            self.assertLess(agenda.index("bravo"), agenda.index("alpha"))
 
     class Fire(Case):
         def test_fire_by_file(self):
@@ -2615,7 +2740,8 @@ def run_tests(verbose=False):
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
                                for c in (Parse, List, Tick, New, Stamp, Next,
                                          Promote, Marker, Jump, SetToggle,
-                                         Fire, Recurring, TlAgrees, KeysDoc))
+                                         AgendaToggle, Fire, Recurring, TlAgrees,
+                                         KeysDoc))
     ok = unittest.TextTestRunner(verbosity=2 if verbose else 1).run(suite).wasSuccessful()
     return 0 if ok else 1
 

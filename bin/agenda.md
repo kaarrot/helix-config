@@ -193,7 +193,7 @@ exists.
 `space , a` writes `~/.cache/td/agenda.md` and opens it:
 
 ```
-# td VIEW ONLY (space , p jumps to the todo.md line): [ ] todo  [Y] today  [A] active  [W] waiting
+# td VIEW ONLY (status keys change the task itself; space , p goes there): [ ] todo  [Y] today  [A] active  [W] waiting
 
 # TODAY
 
@@ -228,11 +228,20 @@ exists.
   (`space , A`; the bullet's line in `~/.cache/td/changed`, or its file's
   modification time).
 
-The agenda is a view: nothing done there reaches todo.md. `td` writes it
-read-only (0444), replacing it by a rename so Helix still reloads it; Helix
-shows `[readonly]` and refuses `:write`. The status keys, `+`, `-` and
-`space , s` leave its rows unchanged, and `td toggle --from agenda.md
---line N` exits 1. To change a task, `space , p` to its todo.md line.
+The agenda is a view: it is always built from todo.md and the task
+files, never edited. `td` writes it read-only (0444), replacing it by a
+rename so Helix still reloads it; Helix shows `[readonly]` and refuses
+`:write`.
+
+The status keys and `space , x` still work on its rows, by changing the
+task where it lives: a bullet row sets its todo.md bullet (and its own
+file's heading follows), a file-task row sets that file's `# [S] title`
+heading. Then `td` rebuilds the agenda with the options it was opened
+with (`~/.cache/td/agenda-args`, so `space , A`'s order stays), and Helix
+reloads it; the row itself is never written. `+`, `-`, `space , s` and
+`space , P` leave rows and tasks alone. For anything else, `space , p` to
+the task. How the keys manage this is in
+[keys.md](keys.md#how-the-keys-are-built).
 
 ## Recurring tasks
 
@@ -263,10 +272,10 @@ is `++0d` (it would never move), so those lines are just marked done.
 | `td install` | write the `td-tick` shim, register job 7421 (every 15 min) |
 | `td uninstall` | cancel the job, remove the shim |
 | `td tick` | what the job runs: scan, record future times, fire due ones |
-| `td list [--state todo\|today\|active\|waiting\|all] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout |
+| `td list [--state todo\|today\|active\|waiting\|all] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout, and the options to `~/.cache/td/agenda-args` |
 | `td promote [--from PATH:LINE]` | stdin: a line. Create or reuse the bullet's task file (not from the agenda), then print where `space , P` goes and write it to `~/.cache/td/open` |
 | `td jump [--from PATH:LINE]` | stdin: a line. Print where `space , p` goes and write it to `~/.cache/td/open` |
-| `td toggle S [--from PATH [--line N]]` | toggle the line's state between `[ ]` and `S` (a name like `waiting` works too); stdin to stdout, or with `--line` the file on disk. Keeps the task's other copies in step (see [keys.md](keys.md#status-keys-in-other-files)); moves a repeating date instead of marking done |
+| `td toggle S [--from PATH [--line N]]` | toggle the line's state between `[ ]` and `S` (a name like `waiting` works too); stdin to stdout, or with `--line` the file on disk. On an agenda row, the task it shows changes instead, and the agenda is rebuilt. Keeps the task's other copies in step (see [keys.md](keys.md#status-keys-in-other-files)); moves a repeating date instead of marking done |
 | `td set PATH LINE S` | set the checkbox at `PATH:LINE` to `S` |
 | `td stamp [--restamp] [--col N]` | stdin: a line. Add a stamp, or move its date to today keeping the time; `--restamp`, or `--col N` on the stamp, only fixes the weekday |
 | `td shift +N\|-N [--col N]` | stdin: a line. Move its stamp by the part under column N (the day without `--col`); with `--col`, save the part's new column to `~/.cache/td/stamp-col` |
@@ -290,6 +299,7 @@ remember what `td` has seen. Reminders are keyed by (file, time), tasks by
 | `added` | when each task was first seen (the agenda's newest-added order) |
 | `changed` | when each bullet's line last changed (`space , A`'s order) |
 | `agenda.md` | the agenda, read-only |
+| `agenda-args` | the `td list` options the agenda was built with, reused when a change rebuilds it |
 | `stamp-col` | the cursor column for `space , s`, `+` and `-` |
 | `open` | where `space , p` / `P` go next |
 
