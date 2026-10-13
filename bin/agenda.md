@@ -91,7 +91,8 @@ the previous tick is kept in `~/.cache/td/last-tick`). Consequences:
 ## Keybindings
 
 Under `[keys.normal.space.","]` in `~/.config/helix/config.toml` (the `space ,`
-namespace is reserved for `td`/`tl`; `space .` holds AI-tool launchers):
+namespace is reserved for `td`/`tl`; `space .` holds AI-tool launchers).
+Every `space ,` key, `tl` ones included, is listed in [keys.md](keys.md):
 
 | key | action |
 |-----|--------|
@@ -103,8 +104,7 @@ namespace is reserved for `td`/`tl`; `space .` holds AI-tool launchers):
 | `space , Y` | toggle `[ ]` ↔ `[Y]` (today); on an agenda row, toggles the inbox line that row shows (the row stays in place until `space , a`) |
 | `space , L` | toggle `[ ]` ↔ `[A]` (active); on an agenda row, the same |
 | `space , x` | toggle `[ ]` ↔ `[x]` (done). If the line carries a `++Nu`/`.+Nu` repeater (u = d\|w\|m\|y), **bumps the stamped date instead** and keeps `[ ]` — see [Recurring tasks](#recurring-tasks) |
-| `space , s` | stamp the current line with `YYYY-MM-DD Xxx HH:MM` (now, weekday included). If a stamp already exists, replace its date with today's and keep the time. Inbox bullets with such a stamp fire a notification once a future time comes; a stamp of "now" (or of a time already past) doesn't |
-| `space , R` | restamp — recompute **only the weekday** on the current line to match its date (useful after manually editing the date part) |
+| `space , s` | stamp the current line with `YYYY-MM-DD Xxx HH:MM` (now, weekday included). If a stamp already exists, replace its date with today's and keep the time — unless the cursor is on that stamp: then the date was edited by hand, so keep it and fix only the weekday. Inbox bullets with such a stamp fire a notification once a future time comes; a stamp of "now" (or of a time already past) doesn't |
 | `space , <ret>` | fire a tick manually (`:write` + `td-tick`); same code the 15-min scheduler runs. Useful for testing without waiting |
 | `space . x` | plain `[ ]` ↔ `[X]` sed toggle on the current line, no selection needed (`[x]` unticks too). Only the line's first bracket counts, and only if it's a checkbox. Predates `td`: no repeater handling, no inbox sync; works in any file |
 
@@ -293,8 +293,8 @@ Doze catch-up or DST fall-back can't double-fire a reminder.
 
 Stamps live in the files you edit; there is no separate schedule store.
 
-- `space , s` → `td stamp` inserts/replaces a `YYYY-MM-DD Xxx HH:MM`.
-- `space , R` → `td stamp --restamp` fixes only the weekday after you
+- `space , s` → `td stamp` inserts/replaces a `YYYY-MM-DD Xxx HH:MM`;
+  with the cursor on the stamp, it fixes only the weekday after you
   hand-edit the date.
 - `space , x` → `td toggle x`: on a line with a `++Nu`/`.+Nu` repeater,
   bump the stamp (new hash → new row in `scheduled` → re-arms as a new

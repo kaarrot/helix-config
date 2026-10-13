@@ -56,9 +56,11 @@ Commands:
                        1st); .+ sets it to today + N units (floating).
   td new [--state todo|today|active]
                        print "- [S] " for pipe/insert
-  td stamp [--restamp] stdin: a line. If it contains a date, replace (default)
+  td stamp [--restamp] [--col N]
+                       stdin: a line. If it contains a date, replace (default)
                        with today's date (preserving the time) or recompute
-                       the weekday only (--restamp). If no date, append a
+                       the weekday only (--restamp, or --col N with column N,
+                       1-based, on the stamp). If no date, append a
                        fresh "YYYY-MM-DD Xxx HH:MM" to the end of the line.
                        The weekday is always kept in sync with the date.
   td fire PATH         fire a dedicated file's timestamp now (testing)
@@ -724,8 +726,20 @@ def cmd_new(args):
     return 0
 
 
+def _col_arg(args):
+    """1-based column after --col, or None (missing or not a number)."""
+    if "--col" not in args:
+        return None
+    i = args.index("--col")
+    try:
+        return int(args[i + 1])
+    except (IndexError, ValueError):
+        return None
+
+
 def cmd_stamp(args):
     restamp = "--restamp" in args
+    col = _col_arg(args)
     data = sys.stdin.read()
     trailing_nl = data.endswith("\n")
     body = data[:-1] if trailing_nl else data
@@ -733,6 +747,10 @@ def cmd_stamp(args):
     stamped = None  # "YYYY-MM-DD HH:MM" this run wrote (not for --restamp)
 
     m = find_stamp(body)
+    # Cursor on the stamp (or just past it): the date was edited by hand,
+    # so only fix the weekday instead of moving the date to today.
+    if m and col is not None and m.start() <= col - 1 <= m.end():
+        restamp = True
     if m:
         date_str = m.group(1)
         time_str = m.group(2)
@@ -1729,6 +1747,25 @@ def run_tests(verbose=False):
             self.assertTrue(out.endswith("2026-10-10 Sat 11:00"))
             self.assertTrue(out.startswith("2026-10-08 19:16 - 19:17"))
 
+        def test_col_on_stamp_fixes_weekday_only(self):
+            line = "- [Y] pay rent 2026-10-15 Sun 09:00"
+            for col in (16, 27, 31, 35, 36):  # first digit .. just past the end
+                out = self.td("stamp", "--col", str(col), stdin=line)
+                self.assertEqual(out, "- [Y] pay rent 2026-10-15 Thu 09:00", col)
+
+        def test_col_off_stamp_moves_to_today(self):
+            out = self.td("stamp", "--col", "3",
+                          stdin="- [Y] pay rent 2026-10-15 Sun 09:00")
+            self.assertEqual(out, "- [Y] pay rent 2026-10-10 Sat 09:00")
+
+        def test_col_without_stamp_appends(self):
+            out = self.td("stamp", "--col", "3", stdin="- [Y] call jon")
+            self.assertEqual(out, "- [Y] call jon 2026-10-10 Sat 11:00")
+
+        def test_col_bad_value_ignored(self):
+            out = self.td("stamp", "--col", stdin="meeting 2025-12-25 09:00")
+            self.assertEqual(out, "meeting 2026-10-10 Sat 09:00")
+
         def test_note_after_time_is_restamped(self):
             out = self.td("stamp",
                           stdin="- [ ] call bank 2025-12-25 10:00 - bring docs")
@@ -2273,11 +2310,28 @@ def run_tests(verbose=False):
                     now_="2026-10-10T11:00")
             self.assertEqual(p.read_text(), "- [Y] alpha\n")
 
+    class KeysDoc(unittest.TestCase):
+        # keys.md lists every `space ,` key in config.toml, and nothing else.
+        def test_keys_md_matches_config(self):
+            import tomllib
+            here = Path(TD).parent
+            config = here.parent / "config.toml"
+            if not config.exists():
+                self.skipTest("no config.toml next to bin/")
+            with open(config, "rb") as f:
+                keys = tomllib.load(f)["keys"]["normal"]["space"][","]
+            names = {"ret": "Enter"}
+            in_config = {names.get(k, k) for k in keys}
+            doc = (here / "keys.md").read_text(encoding="utf-8")
+            in_doc = set(re.findall(r"^\| `([^`]+)` \|", doc, re.M))
+            self.assertEqual(in_doc, in_config,
+                             "bin/keys.md is out of sync with config.toml")
+
     loader = unittest.defaultTestLoader
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
                                for c in (Parse, List, Tick, New, Stamp, Next,
                                          Promote, Marker, Jump, SetToggle,
-                                         Fire, Recurring))
+                                         Fire, Recurring, KeysDoc))
     ok = unittest.TextTestRunner(verbosity=2 if verbose else 1).run(suite).wasSuccessful()
     return 0 if ok else 1
 
