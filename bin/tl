@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Time-log helper for Helix (keys: space , i / o / r / S; see keys.md).
+"""Time-log helper for Helix (keys: space , i / I / o / r / S; see keys.md).
 
 An entry is any line that starts with a date (optionally after indentation and
 a list bullet), so entries can sit anywhere in a file, in any order:
@@ -22,6 +22,9 @@ the start/end times.
     tl stop - [--file F]
                         the same for stdin, written to stdout byte for byte otherwise. F is the file
                         the text came from: if it is td's inbox, the text passes through unchanged.
+    tl back [--skip F]  the same as `tl stop`, then print the task file to clock in to: the one worked
+                        on before the running entry's file; with nothing running, the latest entry's.
+                        F (the current buffer) if there is none. For `space , I`.
     tl recent [N]       numbered list of the N (default 9) most recently modified task files
     tl recent --nth K [ELSE]
                         path of the Kth most recently modified task file (ELSE if none)
@@ -163,7 +166,18 @@ def cmd_stop(args):
             stop_lines(lines, t)
         sys.stdout.buffer.write("".join(lines).encode("utf-8", "surrogateescape"))
         return 0
-    skip = Path(args[1]) if args[:1] == ["--skip"] and len(args) > 1 else None
+    stopped = stop_files(skip_arg(args), t)
+    print(f"stopped {', '.join(stopped)}" if stopped else "", end="")  # no newline: for :echo %sh{}
+    return 0
+
+
+def skip_arg(args):
+    return Path(args[1]) if args[:1] == ["--skip"] and len(args) > 1 else None
+
+
+def stop_files(skip, t):
+    """End, at t, the running entries started less than MAX_SANE ago in the task files on disk,
+    but skip (its buffer gets `tl stop -`) -> where, as ["~/tasks/x.md:3", ...]."""
     _, files = recent_files(None)
     stopped = []
     for path in files or []:
@@ -174,7 +188,34 @@ def cmd_stop(args):
         if closed:
             path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
             stopped += [f"{tilde(path)}:{n}" for n in closed]
-    print(f"stopped {', '.join(stopped)}" if stopped else "", end="")  # no newline: for :echo %sh{}
+    return stopped
+
+
+def cmd_back(args):
+    """tl back [--skip F]: for `space , I`. End what is running, as `tl stop` does, and print the
+    task file to clock in to: the one worked on before the running entry's file (its latest entry
+    in another file); with nothing running, the latest entry's file. F is the current buffer: its
+    entries count as they are on disk, but are ended in the buffer by `tl stop -`. With no such
+    file, F is printed, so the key goes on as `space , i` does."""
+    t = now()
+    skip = skip_arg(args)
+    _, files = recent_files(None)
+    starts = []   # (start, path) of every entry already started
+    running = []  # the same, for entries running, started in the last 12h
+    for path in files or []:
+        if is_td_inbox(path):
+            continue
+        for raw in path.read_bytes().decode("utf-8", "surrogateescape").splitlines():
+            e, _ = parse(raw)
+            if e is None or started_at(e) > t:
+                continue
+            starts.append((started_at(e), str(path)))
+            if e.end is None and t - started_at(e) < timedelta(minutes=MAX_SANE):
+                running.append((started_at(e), str(path)))
+    current = max(running)[1] if running else None
+    earlier = [path for _, path in sorted(starts, reverse=True) if path != current]
+    stop_files(skip, t)
+    print(earlier[0] if earlier else str(skip or ""), end="")  # no newline: for :open %sh{}
     return 0
 
 
@@ -387,6 +428,8 @@ def main(argv):
         return cmd_out(" ".join(argv[2:]))
     elif cmd == "stop":
         return cmd_stop(argv[2:])
+    elif cmd == "back":
+        return cmd_back(argv[2:])
     elif cmd == "recent":
         return cmd_recent(argv[2:])
     elif cmd == "test":
@@ -576,6 +619,47 @@ def run_tests(verbose=False):
             self.tl(argv=["bash", "-c", line])
             self.assertEqual(self.get("A.md"), f"# {comment}\n2026-10-09 13:00 - 14:05 = 1h 05min\n")
 
+    class Back(Case):
+        def test_back_to_the_task_before_the_running_one(self):
+            a = self.put("A.md", "2026-10-09 09:00 - 10:00\n2026-10-09 11:00 - 12:00\n")
+            self.put("B.md", "2026-10-09 12:00 - 13:00\n2026-10-09 13:30 -\n")
+            self.assertEqual(self.tl("back", "--skip", str(self.home / "notes.md")), str(a))
+            self.assertEqual(self.get("B.md"),
+                             "2026-10-09 12:00 - 13:00\n2026-10-09 13:30 - 14:05 = 0h 35min\n")
+
+        def test_pressed_again_switches_back(self):
+            a = self.put("A.md", "2026-10-09 09:00 - 10:00\n")
+            b = self.put("B.md", "2026-10-09 10:00 - 11:00\n2026-10-09 13:00 -\n")
+            self.assertEqual(self.tl("back", "--skip", str(b)), str(a))
+            self.put("B.md", "2026-10-09 10:00 - 11:00\n2026-10-09 13:00 - 13:30\n")
+            self.put("A.md", "2026-10-09 09:00 - 10:00\n2026-10-09 13:30 -\n")
+            self.assertEqual(self.tl("back", "--skip", str(a)), str(b))
+
+        def test_running_in_the_current_buffer_is_left_to_it(self):
+            # The key pipes the buffer through `tl stop -`; on disk it still runs.
+            a = self.put("A.md", "2026-10-09 09:00 - 10:00\n")
+            b = self.put("B.md", "2026-10-09 13:30 -\n")
+            self.assertEqual(self.tl("back", "--skip", str(b)), str(a))
+            self.assertEqual(self.get("B.md"), "2026-10-09 13:30 -\n")
+
+        def test_nothing_running_resumes_the_latest(self):
+            self.put("A.md", "2026-10-09 09:00 - 10:00\n")
+            b = self.put("B.md", "2026-10-09 10:00 - 12:00\n")
+            self.assertEqual(self.tl("back"), str(b))
+
+        def test_no_other_task_stays(self):
+            a = self.put("A.md", "2026-10-09 09:00 - 10:00\n2026-10-09 13:00 -\n")
+            self.assertEqual(self.tl("back", "--skip", str(a)), str(a))
+            self.assertEqual(self.tl("back", "--skip", "nowhere.md"), "nowhere.md")
+
+        def test_skips_todos_future_and_forgotten_entries(self):
+            self.put("todo.md", "- [ ] 2026-10-09 13:50 - prep slides\n")  # a todo, not an entry
+            self.put("A.md", "2026-10-09 09:00 - 10:00\n")
+            b = self.put("B.md", "2026-10-09 11:00 - 12:00\n2026-10-09 18:00 - 19:00\n")  # 18:00: future
+            self.put("C.md", "2026-10-08 01:00 -\n")  # running 37h: forgotten, not current
+            self.assertEqual(self.tl("back"), str(b))
+            self.assertEqual(self.get("C.md"), "2026-10-08 01:00 -\n")
+
     class Summary(Case):
         def test_one_line_per_task_and_day_with_heading_bullets(self):
             self.put("A.md", "# Title A\n2026-10-09 11:00 - 12:00\n"
@@ -639,7 +723,7 @@ def run_tests(verbose=False):
                              f"Task folder not found: {missing}\n(create it or set TL_DIR)\n")
 
     loader = unittest.defaultTestLoader
-    suite = unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in (Parse, Commands, Out, Summary))
+    suite = unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in (Parse, Commands, Out, Back, Summary))
     return 0 if unittest.TextTestRunner(verbosity=2 if verbose else 1).run(suite).wasSuccessful() else 1
 
 

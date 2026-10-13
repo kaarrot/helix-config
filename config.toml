@@ -102,6 +102,8 @@ d = "@:: /data/data/com.termux/files/home/PRJ/kukuryku/target/release/ryk --send
 
 # Clock in: stop the running entry, start a new one at the end of the buffer
 i = [":echo %sh{~/.config/helix/bin/tl stop --skip %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/tl start", "insert_at_line_end"]
+# Switch back: end the running entry (no heading), clock in to the task worked on before it
+I = ["select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{~/.config/helix/bin/tl back --skip %{buffer_name}}", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/tl start", "insert_at_line_end"]
 # Clock out: type what you did at the "# done:" prompt, Enter ends the running entry
 o = "@:write-all<ret>:sh ~/.config/helix/bin/tl out \"$BASH_EXECUTION_STRING\" # done: "
 # Recently changed task files, newest first, in a popup

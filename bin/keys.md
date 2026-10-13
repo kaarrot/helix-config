@@ -28,6 +28,7 @@ from the times. todo.md is not a task file for `tl`: its bullets are todos.
 | Key | What it does |
 |---|---|
 | `i` | **Clock in.** First ends every entry still running that started less than 12 hours ago, in the other task files on disk and in this buffer (without saving it). Then adds `YYYY-MM-DD HH:MM - ` on a new line at the end of the buffer and leaves you in insert mode to type the note. In todo.md the new line is not an entry: `tl` skips todo.md, so it is never stopped or counted |
+| `I` | **Switch back.** Ends what is running, as `i` does (no heading), and clocks in to the task you worked on before it: opens that task file and adds `YYYY-MM-DD HH:MM - ` at its end, in insert mode. "Before it" means the latest entry in a file other than the running entry's, so pressing `I` again switches back. With nothing running (say after `o`), it resumes the task of the latest entry. If there is no other task, it works like `i` in this buffer. This buffer is saved first, so the end time it got is kept |
 | `o` | **Clock out.** Saves all buffers, then waits at the command prompt `# done: `. Type what you did and press Enter: the latest running entry (in any task file, started in the last 12 hours) gets its end time and duration, and your text becomes the `# heading` line right above it, or is added to the heading already there after ` - `. Enter on an empty prompt ends the entry with no heading; Esc does nothing. The text needs no quoting; only `%` is special (type `%%` for one) |
 | `r` | **Recent files.** A popup with the 9 most recently changed task files, newest first, each with its last entry. Open one with `:o <path>` |
 | `S` | **Summary.** Saves, then shows time per day for the last 14 days in a popup: per task file its total and title, and under it the `# headings` it was worked under. Running entries come first, and problems (overlaps, duplicates, typos, entries over 12 hours) last, as `~/path:line` you can open with `gf`. In a file outside `~/tasks`, only that file is counted |
@@ -168,6 +169,12 @@ next to starting Python, so they see the saved file in practice.
 - **`i`:** `tl stop` runs inside `%sh{}` for the other files, then the
   whole buffer goes through `:pipe tl stop -` (a `:write` would land too
   late), then `tl start`'s output goes on a new last line.
+- **`I`:** the buffer goes through `:pipe tl stop -` as for `i`, and
+  `:update` saves it, since you are leaving it. Then
+  `:open %sh{tl back --skip …}` reads the task files on disk (where this
+  buffer's entry still shows as running, as the save lands later, so `tl`
+  knows which task was current), ends the entries running in the other
+  files, and prints the file to open; the rest is `i`'s new line.
 - **`o`** is a macro, so the command prompt stays open for you to type.
   The prompt holds `:sh tl out "$BASH_EXECUTION_STRING" # done: `, so what
   you type is a shell comment, which bash ignores. `tl` reads it back from
