@@ -31,15 +31,16 @@ The character inside the checkbox is the state:
 | `[ ]` | todo      |
 | `[Y]` | today     |
 | `[A]` | active    |
+| `[W]` | waiting   |
 | `[x]` | done      |
 | `[!]` | ignore    |
 
-Older lowercase `[y]` and `[a]` still count as today and active; td writes
-the uppercase form when it changes a line.
+Lowercase `[y]`, `[a]` and `[w]` still count as today, active and waiting;
+td writes the uppercase form when it changes a line.
 
 Inbox bullets may carry an inline `YYYY-MM-DD HH:MM` timestamp — press
 `space , s` to stamp the current line with "now", then edit. `[x]`/`[!]`
-bullets never fire.
+bullets never fire; `[W]` waiting ones do.
 
 **Tier 2 — dedicated follow-up files.** One markdown file per task in `$TL_DIR`
 (default `~/tasks`), created on promote. Notes + an optional timestamp:
@@ -62,9 +63,15 @@ time — no `SCHEDULE:` marker needed. Exceptions:
   A ` - ` after a time elsewhere is just text:
   `- [ ] call bank 2026-10-12 10:00 - bring docs` still fires.
 - A dedicated file whose first H1 is tagged `[x]`, `[X]` or `[!]` doesn't
-  fire. Inbox bullets fire only while they're `[ ]`, `[Y]` or `[A]`.
+  fire. Inbox bullets fire only while they're `[ ]`, `[Y]`, `[A]` or `[W]`.
 
 The inbox fires even when `$TD_FILE` lives outside `$TL_DIR`.
+
+**File tasks.** A long-lived task can live in its file alone, with no todo.md
+bullet: give the file a status on its first line, `# [W] renew passport`.
+The agenda lists it under that status (`[x]`/`[!]` hide it), with the file's
+path so `space , p` opens it. Set the status with the `space , ,` keys on
+the heading. A file with a bullet in todo.md follows the bullet instead.
 
 ### "First seen as future" rule
 
@@ -98,21 +105,24 @@ Every `space ,` key, `tl` ones included, and the `+`/`-` stamp keys are listed i
 | key | action |
 |-----|--------|
 | `space , t` | open the inbox (`~/tasks/todo.md`) |
-| `space , a` | agenda in a reusable buffer — grouped TODAY / ACTIVE / TODO, newest-added first |
+| `space , a` | agenda in a reusable buffer — grouped TODAY / ACTIVE / TODO / WAITING, newest-added first; todo.md bullets and file tasks. **View only**: see [The agenda is a view](#the-agenda-is-a-view) |
 | `space , A` | same agenda, most recently changed first: a bullet's line (state, text, stamp) or its dedicated file. Hand edits count from the next `td` run (`space , a`/`A` or a toggle) |
-| `space , P` | **create + jump**: promote current bullet to `~/tasks/<slug>.md` (reuses if exists), save the inbox, then jump into the file. Bullet text in the inbox is left unchanged |
-| `space , p` | **jump**: open `~/tasks/<slug>.md` for the current bullet if it exists. On an agenda row without one, open the inbox at that bullet's line; otherwise no-op |
-| `space , Y` | toggle `[ ]` ↔ `[Y]` (today); on an agenda row, toggles the inbox line that row shows (the row stays in place until `space , a`) |
-| `space , L` | toggle `[ ]` ↔ `[A]` (active); on an agenda row, the same |
-| `space , x` | toggle `[ ]` ↔ `[x]` (done). If the line carries a `++Nu`/`.+Nu` repeater (u = d\|w\|m\|y), **bumps the stamped date instead** and keeps `[ ]` — see [Recurring tasks](#recurring-tasks) |
+| `space , P` | **create + jump**: promote current bullet to `~/tasks/<slug>.md` (reuses if exists), save the inbox, then jump into the file. Bullet text in the inbox is left unchanged. On an agenda row: only open the row's dedicated file, if any |
+| `space , p` | **jump**: open `~/tasks/<slug>.md` for the current bullet if it exists; otherwise stay put. On an agenda row: open todo.md at that bullet's line (even when it has a dedicated file — `P` opens that) |
+| `space , , y` | toggle `[ ]` ↔ `[Y]` (today). In a dedicated file, also on its `# [ ] title` heading; the todo.md bullet follows. Nothing on the agenda |
+| `space , , a` | toggle `[ ]` ↔ `[A]` (active); the same |
+| `space , , w` | toggle `[ ]` ↔ `[W]` (waiting); the same |
+| `space , , d` | toggle `[ ]` ↔ `[x]` (done); the same as `space , x` |
+| `space , , space` | set `[ ]` (todo); a heading keeps `# [ ]` |
+| `space , x` | toggle `[ ]` ↔ `[x]` (done); like `, y` in dedicated files and the agenda. If the line carries a `++Nu`/`.+Nu` repeater (u = d\|w\|m\|y), **bumps the stamped date instead** and keeps `[ ]` — see [Recurring tasks](#recurring-tasks) |
 | `space , s` | stamp the current line with `YYYY-MM-DD Xxx HH:MM` (now, weekday included). If a stamp already exists, replace its date with today's and keep the time — unless the cursor is on that stamp: then the date was edited by hand, so keep it and fix only the weekday. Inbox bullets with such a stamp fire a notification once a future time comes; a stamp of "now" (or of a time already past) doesn't |
 | `space , <ret>` | fire a tick manually (`:write` + `td-tick`); same code the 15-min scheduler runs. Useful for testing without waiting |
 | `space . x` | plain `[ ]` ↔ `[X]` sed toggle on the current line, no selection needed (`[x]` unticks too). Only the line's first bracket counts, and only if it's a checkbox. Predates `td`: no repeater handling, no inbox sync; works in any file |
 
 `space , p` works both in the inbox (slugify current bullet) and in the
-agenda buffer (slugify the bullet text, trailing ` (*)` marker stripped).
-Orphan rows carry a `path:line:col`, so `space , p` on an orphan jumps
-straight to that file.
+agenda buffer (find the row's bullet in todo.md, trailing ` (*)` marker
+stripped). Orphan rows carry a `path:line:col`, so `space , p` (or `P`) on an
+orphan jumps straight to that file.
 
 ### Why `P` and `p` are separate
 
@@ -123,8 +133,7 @@ orphan file (`refacror td parser` → `refacror-td-parser.md`). Splitting
 them makes:
 
 - `p` **read-only** — jump if the file exists (from the agenda, to the
-  inbox line when it does not), no-op otherwise. Safe to
-  mash on anything.
+  inbox line), no-op otherwise. Safe to mash on anything.
 - `P` **explicit write** — the verb that creates the dedicated file.
   Uppercase matches the Vim convention that capital = more deliberate.
   `P` also jumps into the newly-created file as a convenience; the key
@@ -133,11 +142,11 @@ them makes:
 ## Agenda row format
 
 Bullet rows have no path — just the checkbox, text, and a trailing ` (*)` if a
-dedicated file exists for that slug. Orphan rows carry a `path:line:col` so
-`gf` (or `space , p`) jumps straight to the file:
+dedicated file exists for that slug. File-task and orphan rows carry a
+`path:line:col` so `gf` (or `space , p`) jumps straight to the file:
 
 ```
-# td: [ ] todo  [Y] today  [A] active
+# td VIEW ONLY (space , p jumps to the todo.md line): [ ] todo  [Y] today  [A] active  [W] waiting
 
 # TODAY
 
@@ -151,38 +160,55 @@ dedicated file exists for that slug. Orphan rows carry a `path:line:col` so
 
 - [ ] call jon
 
+# WAITING
+
+- [W] renew passport  ~/tasks/passport.md:1:1
+
 # ORPHANS
 
 - old-task  ~/tasks/old-task.md:1:1
 ```
 
-The `# ORPHANS` section lists dedicated files in `$TL_DIR` with no matching
-inbox bullet — files you've either forgotten about or deleted the bullet for.
+The `# ORPHANS` section lists files in `$TL_DIR` with no matching inbox
+bullet and no `# [S] title` first line — files you've either forgotten about
+or deleted the bullet for. Give one a status heading to make it a file task.
+
+### The agenda is a view
+
+todo.md is the source of truth. The agenda is a snapshot of it, rebuilt by
+`space , a` / `A` (and after a toggle elsewhere), and nothing done in the
+agenda reaches todo.md or a dedicated file:
+
+- td writes `agenda.md` read-only (0444), replacing it with a rename so
+  Helix still reloads it. Helix shows `[readonly]` and refuses `:write`
+  ("Path is read only"). It can't stop typing in the buffer; `space , a`
+  `:reload`s, which throws that away.
+- The toggle keys, `+`/`-` and `space , s` leave agenda rows unchanged.
+  `td toggle --from agenda.md --line N` exits 1 with a message.
+- To change a task, `space , p` to its todo.md line and change it there.
+
+The one way up: a status toggle in a dedicated file `~/tasks/<slug>.md`.
+
+- On its heading `# [S] title`: the heading toggles, and the todo.md bullet
+  the file belongs to (the one whose slug is the file name, so an edited
+  heading title still finds it) gets the same state. Marking a repeating
+  bullet done bumps its date instead, and the heading goes back to `[ ]`.
+- On a bullet with the task's own text: the same for todo.md. The heading in
+  that same file is left alone, because Helix is saving that buffer.
+- On any other bullet (subtasks): only that line.
+
+Typing a state by hand into a heading doesn't propagate; only the keys do.
+Toggles in todo.md retag the dedicated file's heading.
 
 ### Why bullet rows have no path
 
 Paths used to trail every bullet (`~/tasks/todo.md:N:1`) so `gf` could jump to
-the inbox line and `td toggle` could propagate state changes to disk. Both
-jobs are now covered differently:
+the inbox line. `space , p` does that now: it finds the inbox line the row
+shows (same state and text, minus the display-only ` (*)`). If the inbox
+changed since the agenda was built and nothing matches, it stays put;
+`space , a` rebuilds.
 
-- Jumping to the dedicated file goes through `space , p`, which slugifies the
-  current line — no path needed.
-- `td toggle` takes `--from PATH`. From the agenda, it finds the inbox line
-  the row shows (same state and text, link included, minus the display-only
-  ` (*)`) and toggles that line. Piped from Helix, it prints the row with
-  its new state; the row stays where it is until `space , a` regroups the
-  agenda. If nothing matches — the inbox was edited since the agenda was
-  built — nothing changes and the row gets `← agenda out of date: space , a`
-  (with `--line`: a message on stderr and exit 1). From any other file that isn't
-  `$TD_FILE`, it toggles the line there and applies the same toggle to the
-  inbox bullet with the same text (link ignored).
-
-The trade-off: identical bullet text in `$TD_FILE` means only the first match
-gets toggled — a nearly-never scenario, and visible in the agenda itself.
-When this happens, `td toggle --line` emits a warning to stderr naming the
-duplicate (piped, it stays silent; see below).
-
-### Why `x`/`Y`/`L` use `:pipe`
+### Why the toggles (`x`, `, y`, `, a`) use `:pipe`
 
 They pipe the current line through `td toggle S --from PATH`, then `:write`.
 The buffer changes at once, and the save includes any unsaved edits.
@@ -198,12 +224,11 @@ Two other ways don't work in this Helix:
   throws away the unsaved edits.
 
 `:pipe` puts anything on stderr in place of the line, even on success, so a
-piped `td toggle` writes nothing to stderr, keeps the line's newline, and
-exits 0. Piped from the agenda it doesn't rebuild `agenda.md`, since Helix
-saves that buffer right after.
+piped `td toggle` writes nothing to stderr and keeps the line's newline.
 
-`P` still runs `:write` then `:sh td promote --from PATH --line N`: promote
+`P` still runs `:update` then `:sh td promote --from PATH --line N`: promote
 doesn't change the current file, so there is no reload to wait for.
+(`:update`, not `:write`: it doesn't try to save the read-only agenda.)
 
 ## Recurring tasks
 
@@ -343,11 +368,11 @@ Title = first `# H1` in the file, or the filename stem.
 | `td install` | write the shim at `~/.config/helix/bin/td-tick`, register job-id 7421 |
 | `td uninstall` | cancel the job, remove the shim |
 | `td tick` | what the job calls — scan every `~/tasks/*.md`, fire due timestamps |
-| `td list [--state S] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout; marks `(*)` for bullets with a dedicated file; lists `# ORPHANS` |
+| `td list [--state S] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout; marks `(*)` for bullets with a dedicated file; lists file tasks by status and `# ORPHANS` |
 | `td promote [--from PATH --line N]` | create/reuse `~/tasks/<slug>.md` for a bullet. With `--from/--line` reads the file (no stdout); otherwise reads stdin and echoes |
-| `td jump --from PATH:LINE` | print `~/tasks/<slug>.md` if the bullet at `PATH:LINE` has a dedicated file; from an agenda row without one, print `INBOX:N` (its inbox line); else print `PATH` (no-op fallback) |
+| `td jump [--file] --from PATH:LINE` | print `~/tasks/<slug>.md` if the bullet at `PATH:LINE` has a dedicated file; from an agenda row, print `INBOX:N` (its inbox line), or with `--file` the dedicated file; else print `PATH:LINE` (stay-put fallback) |
 | `td set PATH LINE S` | rewrite the checkbox char at `PATH:LINE` to `S` |
-| `td toggle S [--from PATH [--line N]]` | toggle the bullet's state. With `--from/--line` reads the file and writes back (no stdout); otherwise reads stdin and echoes (keeping the newline; with `--from`, nothing on stderr). From the agenda, toggles the inbox line the row shows (out of date: exits 1 with `--line`, or echoes the row with a hint when piped); from another file, also applies the toggle to the matching `$TD_FILE` bullet |
+| `td toggle S [--from PATH [--line N]]` | toggle the bullet's state. With `--from/--line` reads the file and writes back (no stdout); otherwise reads stdin and echoes (keeping the newline; with `--from`, nothing on stderr). From the agenda: no change (exits 1 with `--line`). From another file, the `$TD_FILE` bullet with the same slug gets the same state; in a dedicated file the `# [S] title` heading toggles too and sets the file's bullet |
 | `td new [--state S]` | print `- [S] ` template for pipe/insert |
 | `td stamp [--restamp]` | stdin: a line. Insert/replace a `YYYY-MM-DD Xxx HH:MM` stamp (today's date, keeps the time if one exists). `--restamp` only fixes the weekday to match the date. `tl` log entries are left alone and a fresh stamp is appended |
 | `td next` | print the next-due timestamp (for a statusline) |
@@ -434,7 +459,7 @@ Note: re-running `td install` overwrites the shim and drops the export.
 - **Duplicate job on reinstall** — fixed `--job-id 7421`; `td install` cancels
   first.
 - **Clock skew for tests** — honor `TL_NOW` (same env var `tl` uses).
-- **`gf` on agenda row** — path sits at end-of-line; press `gl` (goto end)
-  first, then `gf`.
+- **`gf` on an orphan row** — path sits at end-of-line; press `gl` (goto end)
+  first, then `gf` (or just `space , p`).
 - **No notification tap-action** — `--action "termux-open <file>"` needs the
   Termux:API addon.
