@@ -49,7 +49,7 @@ Commands:
                        With --from any other file, also apply the toggle to
                        the matching inbox bullet. If S is "x"
                        and the line carries an org-style ++Nu/.+Nu repeater
-                       as its own token (u = d|w|m|y; `C++1d` does not
+                       as its own token (u = d|w|m|y, N ≥ 1; `C++1d` does not
                        count), the date is bumped instead and state
                        stays [ ]: ++ advances the stamped date by N units
                        until it is in the future (anchored, e.g. rent on the
@@ -96,14 +96,15 @@ TL_ENTRY = re.compile(
 # N units until >today; .+2w bumps to today + N units. Units: d/w/m/y.
 # Whitespace (or start) before the sigil, and a non-word after the unit,
 # so `C++1d` and `++1days` are not repeaters. See _bump_recurring.
-REPEATER = re.compile(r"(?<!\S)(\+\+|\.\+)(\d+)([dwmy])(?!\w)")
+# N must be at least 1: `++0d` would never move the date, so it is plain text.
+REPEATER = re.compile(r"(?<!\S)(\+\+|\.\+)(0*[1-9]\d*)([dwmy])(?!\w)")
 TAG = re.compile(r"#(\w+)")
 LINK = re.compile(r"\s*→\s*\S+\s*$")
 MARKER = re.compile(r"\s*\(\*\)\s*$")
 # Trailing #tags sit outside the stamp (`… 09:00 ++1m #errand`). Peeled
 # and reattached so the stamp can be removed without eating the tags.
 _TAG_TAIL = re.compile(r"((?:\s+#\w+)+)\s*$")
-_REPEATER_TAIL = re.compile(r"\s+(?:\+\+|\.\+)\d+[dwmy]\s*$")
+_REPEATER_TAIL = re.compile(r"\s+(?:\+\+|\.\+)0*[1-9]\d*[dwmy]\s*$")
 AGENDA_ROW = re.compile(
     r"^(?P<rest>- \[[ xXya!]\].*?)\s{2,}(?P<path>\S+?):(?P<line>\d+):\d+\s*$")
 H1 = re.compile(r"^#\s+(?:\[[ xXya!]\]\s+)?(.+?)\s*$")
@@ -1978,6 +1979,21 @@ def run_tests(verbose=False):
                 "- [ ] upgrade C++1d parser 2026-10-01 Thu 09:00 ++1m", today)
             self.assertEqual(
                 out, "- [ ] upgrade C++1d parser 2026-11-01 Sun 09:00 ++1m")
+
+        def test_zero_count_is_not_a_repeater(self):
+            # `++0d` would never move the date (an endless loop): plain text.
+            self.assertIsNone(REPEATER.search("- [ ] standup ++0d"))
+            self.assertIsNone(REPEATER.search("- [ ] standup .+00w"))
+            self.assertIsNotNone(REPEATER.search("- [ ] standup ++01d"))
+            self.assertIsNone(_bump_recurring(
+                "- [ ] standup 2026-10-01 Thu 09:00 ++0d",
+                datetime(2026, 10, 10, 11, 0)))
+
+        def test_toggle_x_zero_count_marks_done(self):
+            out = self.td("toggle", "x",
+                          stdin="- [ ] standup 2026-10-01 Thu 09:00 ++0d\n")
+            self.assertEqual(out.strip(),
+                             "- [x] standup 2026-10-01 Thu 09:00 ++0d")
 
         def test_bump_no_date(self):
             self.assertIsNone(_bump_recurring(

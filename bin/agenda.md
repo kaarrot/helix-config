@@ -184,8 +184,9 @@ picks up the change — the editor buffer stays clean (no `:pipe`-dirty races).
 
 ## Recurring tasks
 
-An org-style repeater token `++Nu` or `.+Nu` (u = `d`|`w`|`m`|`y`) after
-the stamp turns a bullet into a recurring one. Pressing `space , x` on
+An org-style repeater token `++Nu` or `.+Nu` (u = `d`|`w`|`m`|`y`, N ≥ 1)
+after the stamp turns a bullet into a recurring one. `++0d` is plain text,
+so `space , x` just marks the line done. Pressing `space , x` on
 such a line bumps the stamped date instead of marking done; state stays
 `[ ]`. The repeater and surrounding text are preserved.
 
