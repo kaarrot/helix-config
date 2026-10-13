@@ -118,7 +118,7 @@ S = [":write", "align_view_top", ":sh ~/.config/helix/bin/tl summary --file %{bu
 ### TODO scheduler ###
 
 # td — ~/.config/helix/bin/td. Inbox bullets live in $TD_FILE (default ~/tasks/todo.md).
-# States live in the checkbox: [ ] todo  [y] today  [a] active  [x] done  [!] ignore.
+# States live in the checkbox: [ ] todo  [Y] today  [A] active  [x] done  [!] ignore.
 # Any `YYYY-MM-DD HH:MM` on an open inbox bullet or in a dedicated file (not tagged
 # [x]/[!]) fires a Termux notification; a tl entry's leading time does not.
 # Install the 15-min job once from the shell: `td install`.
@@ -137,28 +137,31 @@ s = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td stamp"]
 # because `S` is already `tl summary` above.
 R = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td stamp --restamp"]
 # Reusable agenda buffer, grouped ACTIVE / TODAY / TODO, newest-added at the top.
-# auto-reload = true refreshes the same buffer on re-run (no new window).
-l = [":sh ~/.config/helix/bin/td list >/dev/null", ":open /data/data/com.termux/files/home/.cache/td/agenda.md"]
+# auto-reload = true refreshes the same buffer on re-run (no new window). td runs
+# inside %sh{} so it finishes before :open; with `:sh` (async) the buffer showed
+# the previous run's agenda.
+a = [":open %sh{~/.config/helix/bin/td list >/dev/null; echo ~/.cache/td/agenda.md}"]
 # Same agenda, most recently changed at the top: a bullet's line (state, text, stamp)
-# or its dedicated file. Edits by hand count from the next td run (l, L, or a toggle).
-L = [":sh ~/.config/helix/bin/td list --sort modified >/dev/null", ":open /data/data/com.termux/files/home/.cache/td/agenda.md"]
+# or its dedicated file. Edits by hand count from the next td run (a, A, or a toggle).
+A = [":open %sh{~/.config/helix/bin/td list --sort modified >/dev/null; echo ~/.cache/td/agenda.md}"]
 # Promote the current bullet to a dedicated ~/tasks/<slug>.md file (reuses if exists).
 # `:write` first so td reads a fresh file; td creates/reuses the dedicated file
 # and refreshes agenda.md on disk (auto-reload picks up the new ' (*)'
 # marker). Finally :open jumps into the dedicated file.
 P = [":write", ":sh ~/.config/helix/bin/td promote --from %{buffer_name} --line %{cursor_line}", ":open %sh{~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}}"]
-# Jump: slugify the current bullet, open ~/tasks/<slug>.md if it exists. If not,
-# `td jump` prints the current buffer path, so :open becomes a no-op reopen.
-# Works from the inbox AND from an agenda row in agenda.md.
+# Jump: slugify the current bullet, open ~/tasks/<slug>.md if it exists. From an
+# agenda row without one, open the inbox at that bullet's line. Otherwise `td jump`
+# prints the current buffer path, so :open becomes a no-op reopen.
 p = ":open %sh{~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}}"
 # Toggle state of the current line. `:write` first so td reads a fresh file;
 # td rewrites the checkbox on disk, and Helix picks the change up via
 # auto-reload (buffer stays clean, no :pipe-dirty races). When invoked from
 # the agenda, td toggles the inbox line that row shows (exact text match), then
 # rebuilds agenda.md. If the agenda is out of date and nothing matches, td says
-# so and changes nothing: reopen the agenda with `space , l`.
-y = [":write", ":sh ~/.config/helix/bin/td toggle y --from %{buffer_name} --line %{cursor_line}"]
-a = [":write", ":sh ~/.config/helix/bin/td toggle a --from %{buffer_name} --line %{cursor_line}"]
+# so and changes nothing: reopen the agenda with `space , a`.
+# Y toggles [Y] today; L toggles [A] active (`A` is the modified-sort agenda).
+Y = [":write", ":sh ~/.config/helix/bin/td toggle Y --from %{buffer_name} --line %{cursor_line}"]
+L = [":write", ":sh ~/.config/helix/bin/td toggle A --from %{buffer_name} --line %{cursor_line}"]
 # Mark done. If the line has an org-style ++Nu or .+Nu repeater
 # (u = d|w|m|y), the stamped date is bumped instead and state stays [ ]:
 #   ++1m   anchored: new = old_date + 1m (repeat until future). "rent on the 1st"
@@ -168,7 +171,3 @@ x = [":write", ":sh ~/.config/helix/bin/td toggle x --from %{buffer_name} --line
 # Fire a tick manually — useful while testing schedules without waiting for the
 # 15-min job. Runs the same code the scheduler would.
 ret = [":write", ":sh ~/.config/helix/bin/td-tick"]
-# NOTE: `a` is already bound to `agy -c …` above (line ~82). Pick a free key
-# for the active-state toggle, e.g. uncomment one of:
-# A = ":pipe ~/.config/helix/bin/td toggle a"   # also taken (agy no-perms)
-# w = ":pipe ~/.config/helix/bin/td toggle a"   # mnemonic: "work on it"

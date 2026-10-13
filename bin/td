@@ -5,8 +5,8 @@ Two tiers of tasks:
 
   Inbox bullets in $TD_FILE (default $TL_DIR/todo.md). Lightweight, fire-and-forget.
       - [ ] call jon                            # [ ] todo
-      - [y] pay rent                            # [y] today
-      - [a] refactor td parser                  # [a] active (promoted — see $TL_DIR/)
+      - [Y] pay rent                            # [Y] today
+      - [A] refactor td parser                  # [A] active (promoted — see $TL_DIR/)
       - [x] took bins out                       # [x] done
       - [!] call mom                            # [!] ignore
 
@@ -14,7 +14,7 @@ Two tiers of tasks:
   `YYYY-MM-DD HH:MM` timestamp fires a termux notification at that time,
   except the leading time of a tl log entry line (`YYYY-MM-DD HH:MM - …`),
   and except in a file whose H1 is tagged [x]/[X]/[!]. Inbox bullets fire
-  the same way while they are [ ]/[y]/[a]. The agenda marks a bullet
+  the same way while they are [ ]/[Y]/[A]. The agenda marks a bullet
   with " (*)" when a dedicated file with the same slug exists.
 
       # refactor td parser
@@ -41,7 +41,7 @@ Commands:
   td jump --from PATH:LINE
                        read line LINE from file PATH, slugify its bullet text,
                        print ~/tasks/<slug>.md if it exists, else print PATH.
-  td set PATH LINE S   rewrite checkbox char at PATH:LINE to S (" "/y/a/x/!)
+  td set PATH LINE S   rewrite checkbox char at PATH:LINE to S (" "/Y/A/x/!)
   td toggle S          stdin: a line. Toggle the checkbox between " " and S
                        in place. With --from the agenda, toggle the inbox
                        line that the row shows (exact text match; exits 1
@@ -79,7 +79,7 @@ from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
 
-TASK = re.compile(r"^(?P<indent>\s*)- \[(?P<state>[ xXya!])\]\s+(?P<text>.*?)\s*$")
+TASK = re.compile(r"^(?P<indent>\s*)- \[(?P<state>[ xXyYaA!])\]\s+(?P<text>.*?)\s*$")
 # A scheduled timestamp is any YYYY-MM-DD [Xxx ]HH:MM. The optional
 # 3-letter weekday between date and time is purely decorative and ignored
 # by parsing — `td stamp` keeps it in sync with the date. Use find_stamp(),
@@ -106,18 +106,23 @@ MARKER = re.compile(r"\s*\(\*\)\s*$")
 _TAG_TAIL = re.compile(r"((?:\s+#\w+)+)\s*$")
 _REPEATER_TAIL = re.compile(r"\s+(?:\+\+|\.\+)0*[1-9]\d*[dwmy]\s*$")
 AGENDA_ROW = re.compile(
-    r"^(?P<rest>- \[[ xXya!]\].*?)\s{2,}(?P<path>\S+?):(?P<line>\d+):\d+\s*$")
-H1 = re.compile(r"^#\s+(?:\[[ xXya!]\]\s+)?(.+?)\s*$")
-H1_STATE = re.compile(r"^#\s+\[([ xXya!])\]")
+    r"^(?P<rest>- \[[ xXyYaA!]\].*?)\s{2,}(?P<path>\S+?):(?P<line>\d+):\d+\s*$")
+H1 = re.compile(r"^#\s+(?:\[[ xXyYaA!]\]\s+)?(.+?)\s*$")
+H1_STATE = re.compile(r"^#\s+\[([ xXyYaA!])\]")
 SLUG_SPLIT = re.compile(r"[^a-z0-9]+")
-CHECKBOX = re.compile(r"- \[[ xXya!]\]")
+CHECKBOX = re.compile(r"- \[[ xXyYaA!]\]")
 
-STATE_NAMES = {" ": "todo", "y": "today", "a": "active",
+STATE_NAMES = {" ": "todo", "Y": "today", "A": "active",
                "x": "done", "X": "done", "!": "ignore"}
-STATE_FROM_NAME = {"todo": " ", "today": "y", "active": "a",
+STATE_FROM_NAME = {"todo": " ", "today": "Y", "active": "A",
                    "done": "x", "ignore": "!"}
-VISIBLE = {" ", "y", "a"}
+VISIBLE = {" ", "Y", "A"}
 GROUPS = ("today", "active", "todo")
+
+
+def canon(state):
+    """Today and active are written [Y]/[A]; older [y]/[a] read the same."""
+    return {"y": "Y", "a": "A"}.get(state, state)
 
 JOB_ID = 7421
 CACHE = Path("~/.cache/td").expanduser()
@@ -130,7 +135,7 @@ STAMPED_NOW_PATH = CACHE / "stamped-now"
 LIST_PATH = CACHE / "agenda.md"
 TICK_SHIM = Path("~/.config/helix/bin/td-tick").expanduser()
 
-LEGEND = "# td: [ ] todo  [y] today  [a] active"
+LEGEND = "# td: [ ] todo  [Y] today  [A] active"
 
 Bullet = namedtuple("Bullet", "path line raw indent state text tags hash")
 Scheduled = namedtuple("Scheduled", "path line due title hash")
@@ -280,7 +285,7 @@ def parse_bullet(path, lineno, raw):
         return None
     text = m["text"]
     tags = TAG.findall(text)
-    return Bullet(path, lineno, raw, m["indent"], m["state"], text, tags,
+    return Bullet(path, lineno, raw, m["indent"], canon(m["state"]), text, tags,
                   bullet_hash(str(path), text))
 
 
@@ -306,7 +311,7 @@ def scan_schedules():
 
     Any `YYYY-MM-DD HH:MM` timestamp counts — no `SCHEDULE:` marker needed —
     except the leading time of a tl log entry (see TL_ENTRY). On inbox
-    bullets, only visible states ([ ], [y], [a]) are eligible — [x]/[!]
+    bullets, only visible states ([ ], [Y], [A]) are eligible — [x]/[!]
     skip. A dedicated file whose first H1 is tagged [x]/[X]/[!] is skipped;
     otherwise every timestamp in it is a candidate. The inbox is scanned
     even when $TD_FILE lives outside $TL_DIR.
@@ -830,10 +835,10 @@ def cmd_promote(args=None):
     folder.mkdir(parents=True, exist_ok=True)
     dedicated = folder / f"{slug}.md"
     if not dedicated.exists():
-        dedicated.write_text(f"# [{m['state']}] {core}\n\n",
+        dedicated.write_text(f"# [{canon(m['state'])}] {core}\n\n",
                              encoding="utf-8", errors="surrogateescape")
     else:
-        _retag_dedicated_h1(core, m["state"])
+        _retag_dedicated_h1(core, canon(m["state"]))
     refresh_list()
     if not use_file:
         sys.stdout.write(f"{m['indent']}- [{m['state']}] {core}")
@@ -842,6 +847,9 @@ def cmd_promote(args=None):
 
 def cmd_jump(args):
     """Print ~/tasks/<slug>.md if it exists for the bullet at --from PATH:LINE.
+
+    From an agenda row with no dedicated file, print INBOX:LINE of the inbox
+    bullet it shows (same state and text), so `:open` lands on that line.
 
     Fallback (file missing, line unreadable, not a bullet) prints PATH so that
     `:open %sh{td jump ...}` becomes a no-op reopen of the current buffer.
@@ -886,7 +894,17 @@ def cmd_jump(args):
         return 0
     slug = slugify(bm["text"])
     target = task_folder() / f"{slug}.md"
-    print(str(target) if target.is_file() else fallback)
+    if target.is_file():
+        print(str(target))
+        return 0
+    # An agenda row with no dedicated file: jump to its line in the inbox.
+    inbox = td_file()
+    if _same_file(source, LIST_PATH) and inbox.is_file():
+        _, hits, _ = _find_bullet_lines(inbox, bm["text"], bm["state"])
+        if hits:
+            print(f"{inbox}:{hits[0] + 1}")
+            return 0
+    print(fallback)
     return 0
 
 
@@ -912,7 +930,7 @@ def cmd_set(args):
         lineno = int(args[1])
     except ValueError:
         sys.exit("line must be integer")
-    state = args[2]
+    state = canon(args[2])
     if state not in STATE_NAMES:
         sys.exit(f"bad state: {state!r}")
     if not path.is_file():
@@ -940,7 +958,7 @@ def cmd_toggle(args):
     file's H1 is retagged, and agenda.md is refreshed from the inbox."""
     if not args:
         sys.exit("usage: td toggle STATE [--from PATH [--line N]]")
-    state = args[0]
+    state = canon(args[0])
     if state not in STATE_NAMES:
         sys.exit(f"bad state: {state!r}")
     from_path = None
@@ -980,7 +998,7 @@ def cmd_toggle(args):
         return 0
 
     def toggle(line):
-        return _apply_toggle(line, bm["state"], state)
+        return _apply_toggle(line, canon(bm["state"]), state)
 
     if _same_file(from_path, LIST_PATH):
         # The agenda is a view rebuilt from the inbox. Toggle the inbox line
@@ -994,15 +1012,15 @@ def cmd_toggle(args):
         if new_line is None:
             sys.stderr.write(
                 "td: no inbox bullet matches this agenda row; the agenda is "
-                "out of date, reopen it (space , l)\n")
+                "out of date, reopen it (space , a)\n")
             return 1
         nm = TASK.match(new_line)
-        new_state = nm["state"]
+        new_state = canon(nm["state"])
         marker = " (*)" if MARKER.search(bm["text"]) else ""
         new_raw = f"{bm['indent']}- [{new_state}] {nm['text']}{marker}"
     else:
         new_raw = toggle(raw)
-        new_state = TASK.match(new_raw)["state"]
+        new_state = canon(TASK.match(new_raw)["state"])
         if use_file:
             _write_line(from_path, lines, line_no - 1, new_raw)
         if from_path and not _same_file(from_path, inbox) and inbox.is_file():
@@ -1058,7 +1076,8 @@ def _find_bullet_lines(path, text, old_state, exact=False):
     hits = []
     for i, raw in enumerate(lines):
         m = TASK.match(raw.rstrip("\n"))
-        if m and m["state"] == old_state and key(m["text"]) == needle:
+        if (m and canon(m["state"]) == canon(old_state)
+                and key(m["text"]) == needle):
             hits.append(i)
     return lines, hits, needle
 
@@ -1082,7 +1101,7 @@ def _rewrite_first_match(path, text, old_state, transform, exact=False):
     return new
 
 
-H1_WITH_STATE = re.compile(r"^(#\s+)(?:\[[ xXya!]\]\s+)?(.+?)(\s*)$")
+H1_WITH_STATE = re.compile(r"^(#\s+)(?:\[[ xXyYaA!]\]\s+)?(.+?)(\s*)$")
 
 
 def _retag_dedicated_h1(text, new_state):
@@ -1256,10 +1275,10 @@ def run_tests(verbose=False):
             p = Path("x.md")
             b = parse_bullet(p, 1, "- [ ] call jon")
             self.assertEqual((b.state, b.text, b.tags), (" ", "call jon", []))
-            b = parse_bullet(p, 2, "- [y] pay rent #errand")
-            self.assertEqual((b.state, b.tags), ("y", ["errand"]))
-            b = parse_bullet(p, 3, "  - [a] indented")
-            self.assertEqual((b.indent, b.state), ("  ", "a"))
+            b = parse_bullet(p, 2, "- [Y] pay rent #errand")
+            self.assertEqual((b.state, b.tags), ("Y", ["errand"]))
+            b = parse_bullet(p, 3, "  - [A] indented")
+            self.assertEqual((b.indent, b.state), ("  ", "A"))
             self.assertIsNone(parse_bullet(p, 4, "not a task"))
 
         def test_hash_invariant_under_link_suffix(self):
@@ -1311,7 +1330,7 @@ def run_tests(verbose=False):
 
     class List(Case):
         def test_groups_and_sort(self):
-            self.put_inbox("- [ ] call jon\n- [a] refactor\n- [y] pay rent\n")
+            self.put_inbox("- [ ] call jon\n- [A] refactor\n- [Y] pay rent\n")
             out = self.td("list")
             self.assertIn(LEGEND, out)
             self.assertLess(out.index("# TODAY"), out.index("# ACTIVE"))
@@ -1320,12 +1339,12 @@ def run_tests(verbose=False):
                 self.assertIn(word, out)
 
         def test_filter_state(self):
-            self.put_inbox("- [ ] a\n- [y] b\n- [a] c\n- [x] d\n")
+            self.put_inbox("- [ ] a\n- [Y] b\n- [A] c\n- [x] d\n")
             out = self.td("list", "--state", "today")
             self.assertIn("# TODAY", out)
-            self.assertIn("- [y] b", out)
+            self.assertIn("- [Y] b", out)
             self.assertNotIn("- [ ] a", out)
-            self.assertNotIn("- [a] c", out)
+            self.assertNotIn("- [A] c", out)
 
         def test_done_and_ignore_hidden(self):
             self.put_inbox("- [x] done\n- [X] also done\n- [!] ignore\n- [ ] visible\n")
@@ -1382,7 +1401,7 @@ def run_tests(verbose=False):
             self.assertLess(out.index("bravo"), out.index("alpha"))
             # Toggling alpha to [y] and back is a change, made through td.
             for _ in range(2):
-                self.td("toggle", "y", "--from", str(p), "--line", "2",
+                self.td("toggle", "Y", "--from", str(p), "--line", "2",
                         now_="2026-10-10 11:10")
             out = self.td("list", "--sort", "modified", now_="2026-10-10 11:15")
             self.assertLess(out.index("alpha"), out.index("bravo"))
@@ -1502,7 +1521,7 @@ def run_tests(verbose=False):
             self.assertNotIn("would fire", out)
 
         def test_inbox_today_bullet_with_future_date_fires(self):
-            self.put_inbox("- [y] call jon 2026-10-10 12:00\n")
+            self.put_inbox("- [Y] call jon 2026-10-10 12:00\n")
             self.td("tick")
             out = self.td("tick", now_="2026-10-10 12:00")
             self.assertIn("would fire", out)
@@ -1566,7 +1585,7 @@ def run_tests(verbose=False):
 
         def test_active_dedicated_file_fires(self):
             self.put_dedicated("renew-passport.md",
-                               "# [a] renew passport\n\n2026-10-10 12:00\n")
+                               "# [A] renew passport\n\n2026-10-10 12:00\n")
             self.td("tick")
             out = self.td("tick", now_="2026-10-10 12:00")
             self.assertIn("would fire", out)
@@ -1634,22 +1653,22 @@ def run_tests(verbose=False):
             self.assertEqual(self.td("new"), "- [ ] ")
 
         def test_states(self):
-            self.assertEqual(self.td("new", "--state", "today"), "- [y] ")
-            self.assertEqual(self.td("new", "--state", "active"), "- [a] ")
+            self.assertEqual(self.td("new", "--state", "today"), "- [Y] ")
+            self.assertEqual(self.td("new", "--state", "active"), "- [A] ")
 
     class Stamp(Case):
         # NOW = "2026-10-10 11:00"  → %a = "Sat"
         def test_append_when_no_date(self):
-            out = self.td("stamp", stdin="- [y] call jon")
-            self.assertEqual(out, "- [y] call jon 2026-10-10 Sat 11:00")
+            out = self.td("stamp", stdin="- [Y] call jon")
+            self.assertEqual(out, "- [Y] call jon 2026-10-10 Sat 11:00")
 
         def test_append_when_empty_line(self):
             self.assertEqual(self.td("stamp", stdin=""), "2026-10-10 Sat 11:00")
 
         def test_replace_existing_date_with_today(self):
             out = self.td("stamp",
-                          stdin="- [y] pay rent 2025-12-25 Thu 09:00")
-            self.assertEqual(out, "- [y] pay rent 2026-10-10 Sat 09:00")
+                          stdin="- [Y] pay rent 2025-12-25 Thu 09:00")
+            self.assertEqual(out, "- [Y] pay rent 2026-10-10 Sat 09:00")
 
         def test_replace_without_weekday_fills_it_in(self):
             # existing timestamp has no weekday — replace keeps the time
@@ -1666,8 +1685,8 @@ def run_tests(verbose=False):
         def test_restamp_fixes_weekday_only(self):
             # 2026-10-15 is a Thu — restamp fixes a wrong weekday
             out = self.td("stamp", "--restamp",
-                          stdin="- [y] pay rent 2026-10-15 Sun 09:00")
-            self.assertEqual(out, "- [y] pay rent 2026-10-15 Thu 09:00")
+                          stdin="- [Y] pay rent 2026-10-15 Sun 09:00")
+            self.assertEqual(out, "- [Y] pay rent 2026-10-15 Thu 09:00")
 
         def test_restamp_adds_missing_weekday(self):
             out = self.td("stamp", "--restamp",
@@ -1718,14 +1737,14 @@ def run_tests(verbose=False):
             self.assertIn("# [ ] Costco run!", txt)
 
         def test_promote_active_bullet_h1_has_state(self):
-            out = self.td("promote", stdin="- [a] foo bar\n")
-            self.assertEqual(out.strip(), "- [a] foo bar")
-            self.assertIn("# [a] foo bar", (self.tasks / "foo-bar.md").read_text())
+            out = self.td("promote", stdin="- [A] foo bar\n")
+            self.assertEqual(out.strip(), "- [A] foo bar")
+            self.assertIn("# [A] foo bar", (self.tasks / "foo-bar.md").read_text())
 
         def test_promote_existing_file_h1_gets_retagged(self):
             p = self.put_dedicated("foo-bar.md", "# foo bar\n\nnotes\n")
-            self.td("promote", stdin="- [a] foo bar\n")
-            self.assertIn("# [a] foo bar", p.read_text())
+            self.td("promote", stdin="- [A] foo bar\n")
+            self.assertIn("# [A] foo bar", p.read_text())
             self.assertIn("notes", p.read_text())  # body preserved
 
         def test_reuses_existing(self):
@@ -1735,18 +1754,18 @@ def run_tests(verbose=False):
             self.assertIn("notes", existing.read_text())
 
         def test_preserves_state_and_indent(self):
-            out = self.td("promote", stdin="  - [a] refactor TD parser\n")
-            self.assertEqual(out.strip(), "- [a] refactor TD parser")
+            out = self.td("promote", stdin="  - [A] refactor TD parser\n")
+            self.assertEqual(out.strip(), "- [A] refactor TD parser")
             self.assertTrue(out.startswith("  - "))
 
         def test_strips_existing_link_from_bullet(self):
             out = self.td("promote",
-                          stdin="- [y] Pay rent → ~/tasks/pay-rent.md\n")
-            self.assertEqual(out.strip(), "- [y] Pay rent")
+                          stdin="- [Y] Pay rent → ~/tasks/pay-rent.md\n")
+            self.assertEqual(out.strip(), "- [Y] Pay rent")
 
         def test_promote_stamped_bullet_uses_unstamped_slug(self):
             self.td("promote",
-                    stdin="- [a] refactor td parser 2026-10-12 Sun 09:00\n")
+                    stdin="- [A] refactor td parser 2026-10-12 Sun 09:00\n")
             self.assertTrue((self.tasks / "refactor-td-parser.md").is_file())
             dated = "refactor-td-parser-2026-10-12-sun-09-00.md"
             self.assertFalse((self.tasks / dated).exists())
@@ -1756,15 +1775,15 @@ def run_tests(verbose=False):
 
     class Marker(Case):
         def test_bullet_with_dedicated_file_gets_marker(self):
-            self.put_inbox("- [a] refactor td parser\n- [ ] call jon\n")
+            self.put_inbox("- [A] refactor td parser\n- [ ] call jon\n")
             self.put_dedicated("refactor-td-parser.md", "# refactor td parser\n")
             out = self.td("list")
-            self.assertIn("- [a] refactor td parser (*)", out)
+            self.assertIn("- [A] refactor td parser (*)", out)
             self.assertIn("- [ ] call jon", out)
             self.assertNotIn("call jon (*)", out)
 
         def test_orphans_section(self):
-            self.put_inbox("- [a] refactor td parser\n")
+            self.put_inbox("- [A] refactor td parser\n")
             self.put_dedicated("refactor-td-parser.md", "# refactor td parser\n")
             self.put_dedicated("costco-run.md", "# Costco run!\n")
             out = self.td("list")
@@ -1779,16 +1798,16 @@ def run_tests(verbose=False):
 
         def test_stamped_bullet_still_marks_dedicated_file(self):
             self.put_inbox(
-                "- [a] refactor td parser 2026-10-12 Sun 09:00 ++1w\n")
+                "- [A] refactor td parser 2026-10-12 Sun 09:00 ++1w\n")
             self.put_dedicated("refactor-td-parser.md", "# refactor td parser\n")
             out = self.td("list")
             self.assertIn(
-                "- [a] refactor td parser 2026-10-12 Sun 09:00 ++1w (*)", out)
+                "- [A] refactor td parser 2026-10-12 Sun 09:00 ++1w (*)", out)
             self.assertNotIn("# ORPHANS", out)
 
     class Jump(Case):
         def test_jumps_to_dedicated_when_exists(self):
-            inbox = self.put_inbox("- [a] refactor td parser\n")
+            inbox = self.put_inbox("- [A] refactor td parser\n")
             target = self.put_dedicated("refactor-td-parser.md",
                                         "# refactor td parser\n")
             out = self.td("jump", "--from", f"{inbox}:1").strip()
@@ -1801,7 +1820,7 @@ def run_tests(verbose=False):
 
         def test_jump_ignores_stamp(self):
             inbox = self.put_inbox(
-                "- [a] refactor td parser 2026-10-12 Sun 09:00 ++1w\n")
+                "- [A] refactor td parser 2026-10-12 Sun 09:00 ++1w\n")
             target = self.put_dedicated("refactor-td-parser.md",
                                         "# refactor td parser\n")
             out = self.td("jump", "--from", f"{inbox}:1").strip()
@@ -1813,7 +1832,7 @@ def run_tests(verbose=False):
             self.assertEqual(out, str(inbox))
 
         def test_jump_from_agenda_row(self):
-            inbox = self.put_inbox("- [a] refactor td parser\n")
+            inbox = self.put_inbox("- [A] refactor td parser\n")
             target = self.put_dedicated("refactor-td-parser.md",
                                         "# refactor td parser\n")
             # Simulate the user running `space . l` then pressing `space . p`
@@ -1822,9 +1841,30 @@ def run_tests(verbose=False):
             cache_list = self.home / ".cache" / "td" / "agenda.md"
             lines = cache_list.read_text().splitlines()
             lineno = next(i for i, line in enumerate(lines, 1)
-                          if "refactor td parser" in line and "- [a]" in line)
+                          if "refactor td parser" in line and "- [A]" in line)
             out = self.td("jump", "--from", f"{cache_list}:{lineno}").strip()
             self.assertEqual(out, str(target))
+
+        def test_jump_from_agenda_row_to_inbox_line(self):
+            inbox = self.put_inbox("- [ ] alpha\n- [Y] call jon 2026-10-12 09:00\n")
+            self.td("list")
+            cache_list = self.home / ".cache" / "td" / "agenda.md"
+            lines = cache_list.read_text().splitlines()
+            lineno = next(i for i, line in enumerate(lines, 1)
+                          if "call jon" in line)
+            out = self.td("jump", "--from", f"{cache_list}:{lineno}").strip()
+            self.assertEqual(out, f"{inbox}:2")
+
+        def test_jump_from_stale_agenda_row_stays(self):
+            self.put_inbox("- [ ] alpha\n")
+            self.td("list")
+            cache_list = self.home / ".cache" / "td" / "agenda.md"
+            self.put_inbox("- [ ] bravo\n")
+            lines = cache_list.read_text().splitlines()
+            lineno = next(i for i, line in enumerate(lines, 1)
+                          if "alpha" in line)
+            out = self.td("jump", "--from", f"{cache_list}:{lineno}").strip()
+            self.assertEqual(out, str(cache_list))
 
         def test_jump_from_orphan_row(self):
             self.put_inbox("- [ ] alpha\n")
@@ -1840,8 +1880,8 @@ def run_tests(verbose=False):
     class SetToggle(Case):
         def test_set_rewrites_checkbox(self):
             p = self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
-            self.td("set", str(p), "2", "y")
-            self.assertEqual(p.read_text(), "- [ ] alpha\n- [y] bravo\n")
+            self.td("set", str(p), "2", "Y")
+            self.assertEqual(p.read_text(), "- [ ] alpha\n- [Y] bravo\n")
 
         def test_set_bad_state(self):
             self.put_inbox("- [ ] alpha\n")
@@ -1849,44 +1889,58 @@ def run_tests(verbose=False):
                 self.td("set", str(self.inbox), "1", "z")
 
         def test_toggle_in_place_set(self):
-            out = self.td("toggle", "y", stdin="- [ ] alpha\n")
-            self.assertEqual(out.strip(), "- [y] alpha")
+            out = self.td("toggle", "Y", stdin="- [ ] alpha\n")
+            self.assertEqual(out.strip(), "- [Y] alpha")
 
         def test_toggle_in_place_unset(self):
-            out = self.td("toggle", "y", stdin="- [y] alpha\n")
+            out = self.td("toggle", "Y", stdin="- [Y] alpha\n")
             self.assertEqual(out.strip(), "- [ ] alpha")
+
+        def test_lowercase_states_still_read(self):
+            p = self.put_inbox("- [y] alpha\n- [a] bravo\n")
+            out = self.td("list")
+            self.assertIn("# TODAY\n\n- [Y] alpha", out)
+            self.assertIn("# ACTIVE\n\n- [A] bravo", out)
+            # The agenda row reads [Y]; the inbox line still says [y].
+            agenda = self.home / ".cache" / "td" / "agenda.md"
+            lineno = agenda.read_text().splitlines().index("- [Y] alpha") + 1
+            self.td("toggle", "y", "--from", str(agenda), "--line",
+                    str(lineno))
+            self.assertEqual(p.read_text(), "- [ ] alpha\n- [a] bravo\n")
+            out = self.td("toggle", "A", stdin="- [a] bravo\n")
+            self.assertEqual(out.strip(), "- [ ] bravo")
 
         def test_toggle_from_agenda_mutates_source(self):
             p = self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
             agenda = self.home / ".cache" / "td" / "agenda.md"
-            out = self.td("toggle", "a", "--from", str(agenda),
+            out = self.td("toggle", "A", "--from", str(agenda),
                           stdin="- [ ] bravo\n")
-            self.assertEqual(out.strip(), "- [a] bravo")
-            self.assertEqual(p.read_text(), "- [ ] alpha\n- [a] bravo\n")
+            self.assertEqual(out.strip(), "- [A] bravo")
+            self.assertEqual(p.read_text(), "- [ ] alpha\n- [A] bravo\n")
 
         def test_toggle_from_agenda_toggle_off(self):
-            p = self.put_inbox("- [a] alpha\n")
+            p = self.put_inbox("- [A] alpha\n")
             agenda = self.home / ".cache" / "td" / "agenda.md"
-            out = self.td("toggle", "a", "--from", str(agenda),
-                          stdin="- [a] alpha\n")
+            out = self.td("toggle", "A", "--from", str(agenda),
+                          stdin="- [A] alpha\n")
             self.assertEqual(out.strip(), "- [ ] alpha")
             self.assertEqual(p.read_text(), "- [ ] alpha\n")
 
         def test_toggle_from_agenda_with_marker(self):
-            p = self.put_inbox("- [a] refactor td parser\n")
+            p = self.put_inbox("- [A] refactor td parser\n")
             self.put_dedicated("refactor-td-parser.md", "# refactor td parser\n")
             agenda = self.home / ".cache" / "td" / "agenda.md"
-            out = self.td("toggle", "a", "--from", str(agenda),
-                          stdin="- [a] refactor td parser (*)\n")
+            out = self.td("toggle", "A", "--from", str(agenda),
+                          stdin="- [A] refactor td parser (*)\n")
             self.assertEqual(out.strip(), "- [ ] refactor td parser (*)")
             self.assertEqual(p.read_text(), "- [ ] refactor td parser\n")
 
         def test_toggle_from_inbox_no_double_write(self):
             p = self.put_inbox("- [ ] alpha\n")
             # Caller is TD_FILE itself: td toggle must NOT also mutate disk.
-            out = self.td("toggle", "y", "--from", str(p),
+            out = self.td("toggle", "Y", "--from", str(p),
                           stdin="- [ ] alpha\n")
-            self.assertEqual(out.strip(), "- [y] alpha")
+            self.assertEqual(out.strip(), "- [Y] alpha")
             # Disk still has old state — Helix will :write it with the new state.
             self.assertEqual(p.read_text(), "- [ ] alpha\n")
 
@@ -1895,17 +1949,17 @@ def run_tests(verbose=False):
             dedicated = self.put_dedicated("foo-bar.md",
                                            "# [ ] foo bar\n\nnotes\n")
             agenda = self.home / ".cache" / "td" / "agenda.md"
-            self.td("toggle", "a", "--from", str(agenda),
+            self.td("toggle", "A", "--from", str(agenda),
                     stdin="- [ ] foo bar (*)\n")
-            self.assertIn("# [a] foo bar", dedicated.read_text())
+            self.assertIn("# [A] foo bar", dedicated.read_text())
             self.assertIn("notes", dedicated.read_text())
 
         def test_toggle_retags_h1_from_inbox_too(self):
             inbox = self.put_inbox("- [ ] foo bar\n")
             dedicated = self.put_dedicated("foo-bar.md", "# [ ] foo bar\n")
-            self.td("toggle", "a", "--from", str(inbox),
+            self.td("toggle", "A", "--from", str(inbox),
                     stdin="- [ ] foo bar\n")
-            self.assertIn("# [a] foo bar", dedicated.read_text())
+            self.assertIn("# [A] foo bar", dedicated.read_text())
 
     class Fire(Case):
         def test_fire_by_file(self):
@@ -2062,9 +2116,9 @@ def run_tests(verbose=False):
         def test_toggle_x_from_agenda_marker_not_copied(self):
             # Agenda appends ` (*)`, drops indent, and is not the stored line.
             p = self.put_inbox(
-                "  - [a] pay rent 2026-10-01 Thu 09:00 ++1m #errand → note\n")
+                "  - [A] pay rent 2026-10-01 Thu 09:00 ++1m #errand → note\n")
             dedicated = self.put_dedicated(
-                "pay-rent-errand.md", "# [a] pay rent\n")
+                "pay-rent-errand.md", "# [A] pay rent\n")
             agenda, lineno = self.agenda_row("(*)")
             self.assertIn("(*)", agenda.read_text().splitlines()[lineno - 1])
             self.td("toggle", "x", "--from", str(agenda), "--line", str(lineno))
@@ -2079,7 +2133,7 @@ def run_tests(verbose=False):
             self.assertIn("# [ ] pay rent", dedicated.read_text())
 
         def test_toggle_x_from_agenda_floating_from_today(self):
-            p = self.put_inbox("- [y] water 2026-09-01 Tue 09:00 .+2w\n")
+            p = self.put_inbox("- [Y] water 2026-09-01 Tue 09:00 .+2w\n")
             agenda, lineno = self.agenda_row(".+2w")
             self.td("toggle", "x", "--from", str(agenda), "--line", str(lineno))
             self.assertEqual(p.read_text(),
@@ -2099,23 +2153,23 @@ def run_tests(verbose=False):
         def test_toggle_x_bumps_from_today_state(self):
             # Marking a [y] (today) line done also bumps if recurring.
             out = self.td("toggle", "x",
-                          stdin="- [y] rent 2026-10-01 Thu 09:00 ++1m\n")
+                          stdin="- [Y] rent 2026-10-01 Thu 09:00 ++1m\n")
             self.assertEqual(out.strip(),
                              "- [ ] rent 2026-11-01 Sun 09:00 ++1m")
 
         def test_toggle_from_stale_agenda_fails_and_changes_nothing(self):
-            p = self.put_inbox("- [a] pay rent 2026-10-01 Thu 09:00 ++1m\n")
-            dedicated = self.put_dedicated("pay-rent.md", "# [a] pay rent\n")
+            p = self.put_inbox("- [A] pay rent 2026-10-01 Thu 09:00 ++1m\n")
+            dedicated = self.put_dedicated("pay-rent.md", "# [A] pay rent\n")
             agenda, lineno = self.agenda_row("++1m")
             # Inbox edited by hand after the agenda was built.
-            p.write_text("- [a] pay rent 2026-10-02 Fri 09:00 ++1m\n")
+            p.write_text("- [A] pay rent 2026-10-02 Fri 09:00 ++1m\n")
             with self.assertRaises(sp.CalledProcessError) as cm:
                 self.td("toggle", "x", "--from", str(agenda),
                         "--line", str(lineno))
             self.assertIn(b"out of date", cm.exception.stderr)
             self.assertEqual(p.read_text(),
-                             "- [a] pay rent 2026-10-02 Fri 09:00 ++1m\n")
-            self.assertEqual(dedicated.read_text(), "# [a] pay rent\n")
+                             "- [A] pay rent 2026-10-02 Fri 09:00 ++1m\n")
+            self.assertEqual(dedicated.read_text(), "# [A] pay rent\n")
 
         def test_toggle_from_agenda_picks_the_row_with_its_link(self):
             p = self.put_inbox("- [ ] rent 2026-10-01 Thu 09:00 ++1m → a\n"
@@ -2141,9 +2195,9 @@ def run_tests(verbose=False):
             # The dedicated file's line repeats (its `→` part is `++1m`), the
             # inbox copy has the same core text but no repeater: the inbox
             # line is marked done, not reset to [ ].
-            p = self.put_inbox("- [y] pay rent 2026-10-01 Thu 09:00\n")
+            p = self.put_inbox("- [Y] pay rent 2026-10-01 Thu 09:00\n")
             d = self.put_dedicated(
-                "notes.md", "# notes\n- [y] pay rent 2026-10-01 Thu 09:00 → ++1m\n")
+                "notes.md", "# notes\n- [Y] pay rent 2026-10-01 Thu 09:00 → ++1m\n")
             self.td("toggle", "x", "--from", str(d), "--line", "2")
             self.assertEqual(d.read_text(), "# notes\n"
                              "- [ ] pay rent 2026-11-01 Sun 09:00 → ++1m\n")
@@ -2152,9 +2206,9 @@ def run_tests(verbose=False):
         def test_toggle_y_ignores_bad_fake_clock(self):
             # Only x/X needs the clock (for a bump).
             p = self.put_inbox("- [ ] alpha\n")
-            self.td("toggle", "y", "--from", str(p), "--line", "1",
+            self.td("toggle", "Y", "--from", str(p), "--line", "1",
                     now_="2026-10-10T11:00")
-            self.assertEqual(p.read_text(), "- [y] alpha\n")
+            self.assertEqual(p.read_text(), "- [Y] alpha\n")
 
     loader = unittest.defaultTestLoader
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)

@@ -13,8 +13,8 @@ holds lightweight, fire-and-forget bullets:
 
 ```
 - [ ] call jon
-- [y] pay rent
-- [a] refactor td parser
+- [Y] pay rent
+- [A] refactor td parser
 - [x] took bins out
 - [!] call mom
 ```
@@ -29,10 +29,13 @@ The character inside the checkbox is the state:
 | char  | meaning   |
 |-------|-----------|
 | `[ ]` | todo      |
-| `[y]` | today     |
-| `[a]` | active    |
+| `[Y]` | today     |
+| `[A]` | active    |
 | `[x]` | done      |
 | `[!]` | ignore    |
+
+Older lowercase `[y]` and `[a]` still count as today and active; td writes
+the uppercase form when it changes a line.
 
 Inbox bullets may carry an inline `YYYY-MM-DD HH:MM` timestamp — press
 `space , s` to stamp the current line with "now", then edit. `[x]`/`[!]`
@@ -59,7 +62,7 @@ time — no `SCHEDULE:` marker needed. Exceptions:
   A ` - ` after a time elsewhere is just text:
   `- [ ] call bank 2026-10-12 10:00 - bring docs` still fires.
 - A dedicated file whose first H1 is tagged `[x]`, `[X]` or `[!]` doesn't
-  fire. Inbox bullets fire only while they're `[ ]`, `[y]` or `[a]`.
+  fire. Inbox bullets fire only while they're `[ ]`, `[Y]` or `[A]`.
 
 The inbox fires even when `$TD_FILE` lives outside `$TL_DIR`.
 
@@ -93,12 +96,12 @@ namespace is reserved for `td`/`tl`; `space .` holds AI-tool launchers):
 | key | action |
 |-----|--------|
 | `space , t` | open the inbox (`~/tasks/todo.md`) |
-| `space , l` | agenda in a reusable buffer — grouped TODAY / ACTIVE / TODO, newest-added first |
-| `space , L` | same agenda, most recently changed first: a bullet's line (state, text, stamp) or its dedicated file. Hand edits count from the next `td` run (`space , l`/`L` or a toggle) |
+| `space , a` | agenda in a reusable buffer — grouped TODAY / ACTIVE / TODO, newest-added first |
+| `space , A` | same agenda, most recently changed first: a bullet's line (state, text, stamp) or its dedicated file. Hand edits count from the next `td` run (`space , a`/`A` or a toggle) |
 | `space , P` | **create + jump**: promote current bullet to `~/tasks/<slug>.md` (reuses if exists), save the inbox, then jump into the file. Bullet text in the inbox is left unchanged |
-| `space , p` | **jump**: open `~/tasks/<slug>.md` for the current bullet if it exists; otherwise no-op |
-| `space , y` | toggle `[ ]` ↔ `[y]` (today); on an agenda row, toggles the inbox line that row shows |
-| `space , a` | toggle `[ ]` ↔ `[a]` (active); on an agenda row, toggles the inbox line that row shows |
+| `space , p` | **jump**: open `~/tasks/<slug>.md` for the current bullet if it exists. On an agenda row without one, open the inbox at that bullet's line; otherwise no-op |
+| `space , Y` | toggle `[ ]` ↔ `[Y]` (today); on an agenda row, toggles the inbox line that row shows |
+| `space , L` | toggle `[ ]` ↔ `[A]` (active); on an agenda row, toggles the inbox line that row shows |
 | `space , x` | toggle `[ ]` ↔ `[x]` (done). If the line carries a `++Nu`/`.+Nu` repeater (u = d\|w\|m\|y), **bumps the stamped date instead** and keeps `[ ]` — see [Recurring tasks](#recurring-tasks) |
 | `space , s` | stamp the current line with `YYYY-MM-DD Xxx HH:MM` (now, weekday included). If a stamp already exists, replace its date with today's and keep the time. Inbox bullets with such a stamp fire a notification once a future time comes; a stamp of "now" (or of a time already past) doesn't |
 | `space , R` | restamp — recompute **only the weekday** on the current line to match its date (useful after manually editing the date part) |
@@ -118,7 +121,8 @@ key both jumped and created-on-miss, every typo would silently spawn an
 orphan file (`refacror td parser` → `refacror-td-parser.md`). Splitting
 them makes:
 
-- `p` **read-only** — jump if the file exists, no-op otherwise. Safe to
+- `p` **read-only** — jump if the file exists (from the agenda, to the
+  inbox line when it does not), no-op otherwise. Safe to
   mash on anything.
 - `P` **explicit write** — the verb that creates the dedicated file.
   Uppercase matches the Vim convention that capital = more deliberate.
@@ -132,15 +136,15 @@ dedicated file exists for that slug. Orphan rows carry a `path:line:col` so
 `gf` (or `space , p`) jumps straight to the file:
 
 ```
-# td: [ ] todo  [y] today  [a] active
+# td: [ ] todo  [Y] today  [A] active
 
 # TODAY
 
-- [y] pay rent
+- [Y] pay rent
 
 # ACTIVE
 
-- [a] refactor td parser (*)
+- [A] refactor td parser (*)
 
 # TODO
 
@@ -167,7 +171,7 @@ jobs are now covered differently:
   ` (*)`), toggles that line, and rebuilds the agenda; the row itself is
   never written back. If nothing matches — the inbox was edited since the
   agenda was built — it says so on stderr, exits 1, and changes nothing;
-  reopen the agenda with `space , l`. From any other file that isn't
+  reopen the agenda with `space , a`. From any other file that isn't
   `$TD_FILE`, it toggles the line there and applies the same toggle to the
   inbox bullet with the same text (link ignored).
 
@@ -320,7 +324,7 @@ Title = first `# H1` in the file, or the filename stem.
 | `td tick` | what the job calls — scan every `~/tasks/*.md`, fire due timestamps |
 | `td list [--state S] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout; marks `(*)` for bullets with a dedicated file; lists `# ORPHANS` |
 | `td promote [--from PATH --line N]` | create/reuse `~/tasks/<slug>.md` for a bullet. With `--from/--line` reads the file (no stdout); otherwise reads stdin and echoes |
-| `td jump --from PATH:LINE` | print `~/tasks/<slug>.md` if the bullet at `PATH:LINE` has a dedicated file; else print `PATH` (no-op fallback) |
+| `td jump --from PATH:LINE` | print `~/tasks/<slug>.md` if the bullet at `PATH:LINE` has a dedicated file; from an agenda row without one, print `INBOX:N` (its inbox line); else print `PATH` (no-op fallback) |
 | `td set PATH LINE S` | rewrite the checkbox char at `PATH:LINE` to `S` |
 | `td toggle S [--from PATH [--line N]]` | toggle the bullet's state. With `--from/--line` reads the file and writes back (no stdout); otherwise reads stdin and echoes. From the agenda, toggles the inbox line the row shows (exits 1 if the agenda is out of date); from another file, also applies the toggle to the matching `$TD_FILE` bullet |
 | `td new [--state S]` | print `- [S] ` template for pipe/insert |
