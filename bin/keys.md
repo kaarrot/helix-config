@@ -63,8 +63,11 @@ left out). Renaming the bullet unlinks it from its file.
 | `, y` | Toggle `[ ]` ↔ `[Y]` (today) |
 | `, a` | Toggle `[ ]` ↔ `[A]` (active) |
 | `, w` | Toggle `[ ]` ↔ `[W]` (waiting) |
-| `, d` | Toggle `[ ]` ↔ `[x]` (done), the same as `x` |
+| `, x` | Toggle `[ ]` ↔ `[x]` (done), the same as `x` |
 | `, space` | Set `[ ]` (todo); on a heading, `# [ ]` |
+
+Each `, ` status key is the letter its checkbox gets: `, y` writes `[Y]`,
+`, x` writes `[x]`, and `, space` the empty `[ ]`.
 
 ### Status keys in other files
 

@@ -128,7 +128,7 @@ x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{bu
 # Check for due reminders now, as the 15-minute job does
 ret = [":write", ":sh ~/.config/helix/bin/td-tick"]
 
-# Status keys, `space , ,` then a letter: toggle the line's state
+# Status keys, `space , ,` then the checkbox letter: toggle the line's state
 [keys.normal.space.",".","]
 # Today [Y]
 y = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle Y --from %{buffer_name}", ":write"]
@@ -137,6 +137,6 @@ a = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle A --from %{bu
 # Waiting [W]
 w = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle W --from %{buffer_name}", ":write"]
 # Done [x], the same as space , x
-d = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{buffer_name}", ":write"]
+x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{buffer_name}", ":write"]
 # Back to todo [ ]
 space = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle todo --from %{buffer_name}", ":write"]
