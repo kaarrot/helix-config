@@ -58,7 +58,9 @@ A-r = ":sh ryk-rewind"
 "." = ":insert-output date +\"<%%Y-%%m-%%d %%a>\""
 m = ":sh echo 'https://ADDRESS/-/blob/master/%{buffer_name}#L%{cursor_line}' | xclip -selection clipboard"
 b = ":sh echo 'https://ADDRESS/-/blob/'$(git branch --show-current)'/%{buffer_name}#L%{cursor_line}' | xclip -selection clipboard"
-x = [":pipe sed 's/^\\(.*\\[\\) \\(\\].*\\)$/\\1X\\2/; t; s/^\\(.*\\[\\)X\\(\\].*\\)$/\\1 \\2/'", ":write"]
+# Toggle the line's checkbox [ ] ↔ [X] ([x] unticks too). Works with no selection: the
+# whole line is piped. Only the first bracket on the line counts, and only if it is a checkbox.
+x = ["extend_to_line_bounds", ":pipe sed 's/^\\([^[]*\\)\\[ \\]/\\1[X]/; t; s/^\\([^[]*\\)\\[[xX]\\]/\\1[ ]/'", ":write"]
 
 
 # with std err output
@@ -99,8 +101,9 @@ d = "@:: /data/data/com.termux/files/home/PRJ/kukuryku/target/release/ryk --send
 # Time log helper for ~/.config/helix/bin/tl, task files in $TL_DIR, default ~/tasks
 # Start a new entry at the end of the buffer, so the latest is always last: "YYYY-MM-DD HH:MM - " then type the note.
 # First stops entries still running (started <12h ago): other task files on disk, this buffer via :pipe
-# (not :write + disk: a write in a key sequence lands only after the sequence).
-i = [":echo %sh{~/.config/helix/bin/tl stop --skip %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl stop -", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/tl start", "insert_at_line_end"]
+# (not :write + disk: a write in a key sequence lands only after the sequence). td's inbox is left alone,
+# on disk and as this buffer: a `- [ ] 2026-10-12 09:00 - …` bullet there is a todo, not a running entry.
+i = [":echo %sh{~/.config/helix/bin/tl stop --skip %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/tl start", "insert_at_line_end"]
 # Clock out: saves all, then waits in the command prompt for what you did ("# done: "); Enter ends the running
 # entry, whichever task file it is in, on disk (auto-reload shows it), with that text as its "# heading" bullet.
 # Empty: no heading. Esc: nothing happens. The text is a shell comment read back from $BASH_EXECUTION_STRING, so it
@@ -116,8 +119,9 @@ S = [":write", "align_view_top", ":sh ~/.config/helix/bin/tl summary --file %{bu
 
 # td — ~/.config/helix/bin/td. Inbox bullets live in $TD_FILE (default ~/tasks/todo.md).
 # States live in the checkbox: [ ] todo  [y] today  [a] active  [x] done  [!] ignore.
-# Scheduling lives in dedicated files: a `SCHEDULE: YYYY-MM-DD HH:MM` line fires
-# a Termux notification. Install the 15-min job once from the shell: `td install`.
+# Any `YYYY-MM-DD HH:MM` on an open inbox bullet or in a dedicated file (not tagged
+# [x]/[!]) fires a Termux notification; a tl entry's leading time does not.
+# Install the 15-min job once from the shell: `td install`.
 
 # Open the inbox file.
 t = ":open ~/tasks/todo.md"
@@ -125,8 +129,8 @@ t = ":open ~/tasks/todo.md"
 #   • No date on the line  → appends "YYYY-MM-DD Xxx HH:MM" at the end.
 #   • Existing date+time   → replaces the date with today's (keeps the
 #                            time, keeps/fixes the weekday).
-#   • tl log entries (`YYYY-MM-DD HH:MM - ...`) are left alone and a fresh
-#     stamp is appended, since those lines are history, not schedules.
+#   • tl log entries (a line starting `YYYY-MM-DD HH:MM - ...`) are left alone
+#     and a fresh stamp is appended, since those lines are history, not schedules.
 s = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td stamp"]
 # Restamp — recompute only the weekday of the date on the current line so
 # it matches the date (useful after manually editing the date). Picked `R`
@@ -135,7 +139,8 @@ R = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td stamp --restamp"]
 # Reusable agenda buffer, grouped ACTIVE / TODAY / TODO, newest-added at the top.
 # auto-reload = true refreshes the same buffer on re-run (no new window).
 l = [":sh ~/.config/helix/bin/td list >/dev/null", ":open /data/data/com.termux/files/home/.cache/td/agenda.md"]
-# Same agenda, sorted by file mtime (recently modified at the top).
+# Same agenda, most recently changed at the top: a bullet's line (state, text, stamp)
+# or its dedicated file. Edits by hand count from the next td run (l, L, or a toggle).
 L = [":sh ~/.config/helix/bin/td list --sort modified >/dev/null", ":open /data/data/com.termux/files/home/.cache/td/agenda.md"]
 # Promote the current bullet to a dedicated ~/tasks/<slug>.md file (reuses if exists).
 # `:write` first so td reads a fresh file; td creates/reuses the dedicated file
@@ -149,15 +154,16 @@ p = ":open %sh{~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}}
 # Toggle state of the current line. `:write` first so td reads a fresh file;
 # td rewrites the checkbox on disk, and Helix picks the change up via
 # auto-reload (buffer stays clean, no :pipe-dirty races). When invoked from
-# the agenda, td text-matches the bullet in the inbox and flips it there too,
-# then refreshes agenda.md so the agenda reflects the new state.
+# the agenda, td toggles the inbox line that row shows (exact text match), then
+# rebuilds agenda.md. If the agenda is out of date and nothing matches, td says
+# so and changes nothing: reopen the agenda with `space , l`.
 y = [":write", ":sh ~/.config/helix/bin/td toggle y --from %{buffer_name} --line %{cursor_line}"]
 a = [":write", ":sh ~/.config/helix/bin/td toggle a --from %{buffer_name} --line %{cursor_line}"]
 # Mark done. If the line has an org-style ++Nu or .+Nu repeater
 # (u = d|w|m|y), the stamped date is bumped instead and state stays [ ]:
 #   ++1m   anchored: new = old_date + 1m (repeat until future). "rent on the 1st"
 #   .+2w   floating: new = today + 2w, time-of-day preserved. "water plants"
-# Note: this is a td-aware alternative to `space . x` (plain sed toggle).
+# Note: this is a td-aware alternative to `space . x` (plain sed toggle, [X]).
 x = [":write", ":sh ~/.config/helix/bin/td toggle x --from %{buffer_name} --line %{cursor_line}"]
 # Fire a tick manually — useful while testing schedules without waiting for the
 # 15-min job. Runs the same code the scheduler would.

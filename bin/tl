@@ -19,7 +19,9 @@ the start/end times.
                         or is added to the one there (" - TEXT"). Comment form, so TEXT needs no quoting.
     tl stop [--skip F]  end, at now, every entry still running that started less than 12h ago, in
                         the task files on disk except F; print where ("stopped ~/tasks/x.md:3").
-    tl stop -           the same for stdin, written to stdout byte for byte otherwise.
+    tl stop - [--file F]
+                        the same for stdin, written to stdout byte for byte otherwise. F is the file
+                        the text came from: if it is td's inbox, the text passes through unchanged.
     tl recent [N]       numbered list of the N (default 9) most recently modified task files
     tl recent --nth K [ELSE]
                         path of the Kth most recently modified task file (ELSE if none)
@@ -32,7 +34,9 @@ the start/end times.
                         markdown "# heading" above its entries, as bullets (but the title).
     tl test [-v]        run the tests at the end of this file (temporary task folders, faked clock).
 
-Task files: $TL_DIR (default ~/tasks), *.txt and *.md. $TL_NOW="YYYY-MM-DD HH:MM" fakes the clock.
+Task files: $TL_DIR (default ~/tasks), *.txt and *.md. stop (also stop - --file), out and summary skip td's inbox
+($TD_FILE, default $TL_DIR/todo.md): a `- [ ] 2026-10-12 09:00 - prep slides` there is a todo,
+not a running entry. $TL_NOW="YYYY-MM-DD HH:MM" fakes the clock.
 """
 import os
 import re
@@ -150,16 +154,18 @@ def stop_lines(lines, t):
 def cmd_stop(args):
     t = now()
     # bytes in and out, so line endings and odd bytes survive a whole-buffer :pipe
-    if args == ["-"]:
+    if args[:1] == ["-"]:
         lines = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").splitlines(keepends=True)
-        stop_lines(lines, t)
+        source = Path(args[2]) if args[1:2] == ["--file"] and len(args) > 2 else None
+        if not (source and is_td_inbox(source)):  # td's inbox passes through unchanged
+            stop_lines(lines, t)
         sys.stdout.buffer.write("".join(lines).encode("utf-8", "surrogateescape"))
         return 0
     skip = Path(args[1]) if args[:1] == ["--skip"] and len(args) > 1 else None
     _, files = recent_files(None)
     stopped = []
     for path in files or []:
-        if skip and skip.is_file() and path.samefile(skip):
+        if (skip and skip.is_file() and path.samefile(skip)) or is_td_inbox(path):
             continue
         lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
         closed = stop_lines(lines, t)
@@ -180,6 +186,8 @@ def cmd_out(invocation=""):
     _, files = recent_files(None)
     running = []  # (start, path, index) of entries running, started in the last 12h
     for path in files or []:
+        if is_td_inbox(path):
+            continue
         for i, raw in enumerate(path.read_bytes().decode("utf-8", "surrogateescape").splitlines()):
             e, _ = parse(raw)
             if e and e.end is None and timedelta(0) <= t - started_at(e) < timedelta(minutes=MAX_SANE):
@@ -216,6 +224,17 @@ def recent_files(limit):
         return folder, None
     files = [*folder.glob("*.txt"), *folder.glob("*.md")]
     return folder, sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)[:limit]
+
+
+def is_td_inbox(path):
+    """True for td's inbox ($TD_FILE, default $TL_DIR/todo.md). It holds td bullets, and
+    `- [ ] 2026-10-12 09:00 - prep slides` there is a todo, not a running entry."""
+    env = os.environ.get("TD_FILE")
+    inbox = Path(env).expanduser() if env else Path(os.environ.get("TL_DIR", "~/tasks")).expanduser() / "todo.md"
+    try:
+        return path.samefile(inbox)
+    except OSError:
+        return False
 
 
 def cmd_recent(args):
@@ -269,7 +288,8 @@ def cmd_summary(arg, current=None):
     running = []                                    # (file, line, entry, heading), whatever the date
     titles = {}                                     # task -> its first line, "# " dropped, unless an entry
 
-    files = [single] if single else sorted([*folder.glob("*.txt"), *folder.glob("*.md")])
+    files = [single] if single else sorted(f for f in [*folder.glob("*.txt"), *folder.glob("*.md")]
+                                           if not is_td_inbox(f))
     for path in files:
         where = tilde(path)
         heading, fenced = "", False
@@ -472,6 +492,15 @@ def run_tests(verbose=False):
             self.assertEqual(self.tl("stop", "-", stdin=text),
                              text.replace("13:00 -\r", "13:00 - 14:05 = 1h 05min\r"))
 
+        def test_stop_stdin_from_td_inbox_passes_through(self):
+            # space , i in todo.md: its bullets are todos, not running entries
+            text = "- [ ] 2026-10-09 13:00 - prep slides\n"
+            todo = self.put("todo.md", text)
+            self.assertEqual(self.tl("stop", "-", "--file", str(todo), stdin=text), text)
+            other = self.put("A.md", text)
+            self.assertEqual(self.tl("stop", "-", "--file", str(other), stdin=text),
+                             "- [ ] 2026-10-09 13:00 - 14:05 = 1h 05min  prep slides\n")
+
         def test_recent(self):
             a = self.put("A.md", "2026-10-08 09:00 - 10:00  first\n2026-10-09 13:00 -\n")
             b = self.put("B.txt", "no entries\n")
@@ -485,6 +514,20 @@ def run_tests(verbose=False):
             self.assertTrue(lines[0].startswith("1  ~/tasks/A.md   "))
             self.assertEqual(lines[1], "     last: 2026-10-09 13:00 -")
             self.assertTrue(lines[2].startswith("2  ~/tasks/B.txt   "))
+
+        def test_td_inbox_left_alone(self):
+            # td's inbox holds todos: a bullet that starts with a time there is not a running entry
+            todo = "- [ ] 2026-10-09 13:00 - prep slides\n"
+            self.put("todo.md", todo)
+            self.put("A.md", "2026-10-09 13:30 -\n")
+            self.assertEqual(self.tl("stop"), "stopped ~/tasks/A.md:1")
+            self.assertEqual(self.out("x"), "nothing running (older open entries are left for the summary to flag)\n")
+            self.assertNotIn("todo.md", self.tl("summary"))
+            self.assertEqual(self.get("todo.md"), todo)
+            # $TD_FILE moves the inbox; todo.md is then an ordinary task file
+            inbox = self.put("inbox.md", todo)
+            self.assertEqual(self.tl("stop", TD_FILE=str(inbox)), "stopped ~/tasks/todo.md:1")
+            self.assertEqual(self.get("inbox.md"), todo)
 
     class Out(Case):
         def test_latest_running_entry_gets_a_new_heading(self):

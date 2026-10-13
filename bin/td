@@ -11,9 +11,11 @@ Two tiers of tasks:
       - [!] call mom                            # [!] ignore
 
   Dedicated files in $TL_DIR/*.md, one per follow-up task. Any
-  `YYYY-MM-DD HH:MM` timestamp (not followed by ` - `, which marks a tl
-  log entry) fires a termux notification at that time. The agenda marks
-  a bullet with " (*)" when a dedicated file with the same slug exists.
+  `YYYY-MM-DD HH:MM` timestamp fires a termux notification at that time,
+  except the leading time of a tl log entry line (`YYYY-MM-DD HH:MM - …`),
+  and except in a file whose H1 is tagged [x]/[X]/[!]. Inbox bullets fire
+  the same way while they are [ ]/[y]/[a]. The agenda marks a bullet
+  with " (*)" when a dedicated file with the same slug exists.
 
       # refactor td parser
       2026-11-01 10:00
@@ -24,20 +26,28 @@ Commands:
   td install           register a 15-min termux-job-scheduler job that runs `td tick`
   td uninstall         cancel it
   td tick              scan files, record future timestamps, fire due ones
+                       (also ones added since the previous tick, unless
+                       `td stamp` wrote them as "now")
   td list [--state todo|today|active|all] [--sort added|modified]
                        build the agenda from $TD_FILE bullets; write to
                        ~/.cache/td/agenda.md and stdout. Appends " (*)" to
                        bullets whose slug has a dedicated file. Lists orphan
                        dedicated files (no matching bullet) in # ORPHANS.
+                       added: newest first-seen first. modified: most
+                       recently changed first (its line, or its dedicated
+                       file; hand edits count from the next td run).
   td promote           stdin: a bullet line. Creates (or reuses) ~/tasks/<slug>.md
                        and prints the bullet unchanged.
   td jump --from PATH:LINE
                        read line LINE from file PATH, slugify its bullet text,
                        print ~/tasks/<slug>.md if it exists, else print PATH.
   td set PATH LINE S   rewrite checkbox char at PATH:LINE to S (" "/y/a/x/!)
-  td toggle S          stdin: a line. If agenda row, update source via `set`
-                       and print the row with the new state char. Else, toggle
-                       the checkbox between " " and S in-place. If S is "x"
+  td toggle S          stdin: a line. Toggle the checkbox between " " and S
+                       in place. With --from the agenda, toggle the inbox
+                       line that the row shows (exact text match; exits 1
+                       if the agenda is out of date) and rebuild the agenda.
+                       With --from any other file, also apply the toggle to
+                       the matching inbox bullet. If S is "x"
                        and the line carries an org-style ++Nu/.+Nu repeater
                        as its own token (u = d|w|m|y; `C++1d` does not
                        count), the date is bumped instead and state
@@ -70,13 +80,18 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 TASK = re.compile(r"^(?P<indent>\s*)- \[(?P<state>[ xXya!])\]\s+(?P<text>.*?)\s*$")
-# A scheduled timestamp is any YYYY-MM-DD [Xxx ]HH:MM NOT followed by " - "
-# (the ` - ` suffix is tl's running-entry convention — those are logs,
-# never schedules). The lookahead keeps tl entries out of the candidate list.
-# The optional 3-letter weekday between date and time is purely decorative
-# and ignored by parsing — `td stamp` keeps it in sync with the date.
+# A scheduled timestamp is any YYYY-MM-DD [Xxx ]HH:MM. The optional
+# 3-letter weekday between date and time is purely decorative and ignored
+# by parsing — `td stamp` keeps it in sync with the date. Use find_stamp(),
+# which skips the leading time of a tl log entry (see TL_ENTRY).
 SCHEDULE_TS = re.compile(
-    r"(\d{4}-\d{2}-\d{2})(?: [A-Z][a-z]{2})? (\d{1,2}:\d{2})(?! - )")
+    r"(\d{4}-\d{2}-\d{2})(?: [A-Z][a-z]{2})? (\d{1,2}:\d{2})")
+# A tl log entry, same shape as tl's ENTRY: the line *starts* (after an
+# optional "- " / "* " / "- [ ] ") with date, time, then "-" or "–". That
+# leading time is a log, never a schedule. A " - " after a time elsewhere is
+# just text: `call bank 2026-10-12 10:00 - bring docs` is a reminder.
+TL_ENTRY = re.compile(
+    r"^\s*(?:[-*]\s+(?:\[[ xX]\]\s+)?)?\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}\s*[-–]")
 # org-mode-style repeater, as its own token: ++2w bumps the old date by
 # N units until >today; .+2w bumps to today + N units. Units: d/w/m/y.
 # Whitespace (or start) before the sigil, and a non-word after the unit,
@@ -92,6 +107,7 @@ _REPEATER_TAIL = re.compile(r"\s+(?:\+\+|\.\+)\d+[dwmy]\s*$")
 AGENDA_ROW = re.compile(
     r"^(?P<rest>- \[[ xXya!]\].*?)\s{2,}(?P<path>\S+?):(?P<line>\d+):\d+\s*$")
 H1 = re.compile(r"^#\s+(?:\[[ xXya!]\]\s+)?(.+?)\s*$")
+H1_STATE = re.compile(r"^#\s+\[([ xXya!])\]")
 SLUG_SPLIT = re.compile(r"[^a-z0-9]+")
 CHECKBOX = re.compile(r"- \[[ xXya!]\]")
 
@@ -107,6 +123,9 @@ CACHE = Path("~/.cache/td").expanduser()
 FIRED_PATH = CACHE / "fired"
 ADDED_PATH = CACHE / "added"
 SCHEDULED_PATH = CACHE / "scheduled"
+CHANGED_PATH = CACHE / "changed"
+LAST_TICK_PATH = CACHE / "last-tick"
+STAMPED_NOW_PATH = CACHE / "stamped-now"
 LIST_PATH = CACHE / "agenda.md"
 TICK_SHIM = Path("~/.config/helix/bin/td-tick").expanduser()
 
@@ -136,6 +155,25 @@ def td_file():
     if env:
         return Path(env).expanduser()
     return task_folder() / "todo.md"
+
+
+def _same_file(a, b):
+    """True when paths a and b name the same file. False if either is None."""
+    if a is None or b is None:
+        return False
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
+
+
+def find_stamp(line):
+    """First SCHEDULE_TS match in line, skipping a tl log entry's leading time."""
+    m = SCHEDULE_TS.search(line)
+    entry = TL_ENTRY.match(line)
+    if m and entry and m.start() < entry.end():
+        m = SCHEDULE_TS.search(line, m.end())
+    return m
 
 
 def _identity_text(text):
@@ -203,7 +241,7 @@ def _bump_recurring(raw, today):
     ++Nu: new = old + N*unit, repeated until >today (anchored).
     .+Nu: new = today + N*unit (floating).
     """
-    m_ts = SCHEDULE_TS.search(raw)
+    m_ts = find_stamp(raw)
     if not m_ts:
         return None
     m_rep = REPEATER.search(raw)
@@ -265,44 +303,45 @@ def scan_inbox():
 def scan_schedules():
     """All schedule candidates across $TL_DIR files + inbox bullets.
 
-    Any `YYYY-MM-DD HH:MM` timestamp counts — no `SCHEDULE:` marker needed.
-    Timestamps followed by ` - ` are excluded (tl log entries). On inbox
+    Any `YYYY-MM-DD HH:MM` timestamp counts — no `SCHEDULE:` marker needed —
+    except the leading time of a tl log entry (see TL_ENTRY). On inbox
     bullets, only visible states ([ ], [y], [a]) are eligible — [x]/[!]
-    skip. On dedicated files every matching timestamp is a candidate.
+    skip. A dedicated file whose first H1 is tagged [x]/[X]/[!] is skipped;
+    otherwise every timestamp in it is a candidate. The inbox is scanned
+    even when $TD_FILE lives outside $TL_DIR.
     """
     folder = task_folder()
-    if not folder.is_dir():
-        return []
-    try:
-        inbox_resolved = td_file().resolve()
-    except OSError:
-        inbox_resolved = None
+    files = sorted(folder.glob("*.md")) if folder.is_dir() else []
+    inbox = td_file()
+    if inbox.is_file() and not any(_same_file(f, inbox) for f in files):
+        files.append(inbox)
     out = []
-    for f in sorted(folder.glob("*.md")):
-        try:
-            is_inbox = inbox_resolved is not None and f.resolve() == inbox_resolved
-        except OSError:
-            continue
+    for f in files:
+        is_inbox = _same_file(f, inbox)
         try:
             lines = f.read_bytes().decode("utf-8", "surrogateescape").splitlines()
         except OSError:
             continue
-        file_title = f.stem
-        title_found = False
-        for i, raw in enumerate(lines, 1):
+        file_title, file_state = f.stem, None
+        for raw in lines:
             hm = H1.match(raw)
-            if hm and not title_found:
+            if hm:
                 file_title = hm[1]
-                title_found = True
+                sm = H1_STATE.match(raw)
+                file_state = sm[1] if sm else None
+                break
+        if not is_inbox and file_state in ("x", "X", "!"):
+            continue
+        for i, raw in enumerate(lines, 1):
             if is_inbox:
                 b = parse_bullet(f, i, raw)
                 if not b or b.state not in VISIBLE:
                     continue
-                line_title = (MARKER.sub("", LINK.sub("", b.text)).strip()
+                line_title = (LINK.sub("", MARKER.sub("", b.text)).strip()
                               or f.stem)
             else:
                 line_title = file_title
-            ts = SCHEDULE_TS.search(raw)
+            ts = find_stamp(raw)
             if not ts:
                 continue
             try:
@@ -373,6 +412,66 @@ def update_added(pairs, when_iso):
     return seen
 
 
+def update_changed(bullets, when_iso, added):
+    """Record when each bullet last changed -> {hash: changed_iso}.
+
+    A bullet first seen here starts at its added time. Later, whenever its
+    line (state or text, stamp included) differs from the recorded one, its
+    time moves to when_iso. Bullets sharing a hash are fingerprinted together
+    so two copies with different states don't flip it on every run. Hand
+    edits count from the next time td builds the agenda.
+    """
+    last = {}  # hash -> (iso, fingerprint)
+    for line in _read_sidecar(CHANGED_PATH):
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            last[parts[1]] = (parts[0], parts[2])
+    lines_by_hash = {}
+    for b in bullets:
+        lines_by_hash.setdefault(b.hash, []).append(f"{b.state}\t{b.text}")
+    new = []
+    for h, lines in lines_by_hash.items():
+        fp = hashlib.sha1("\n".join(sorted(lines)).encode(
+            "utf-8", "surrogateescape")).hexdigest()[:16]
+        prev = last.get(h)
+        if prev is None:
+            row = (added.get(h, when_iso), h, fp)
+        elif prev[1] != fp:
+            row = (when_iso, h, fp)
+        else:
+            continue
+        new.append(row)
+        last[h] = (row[0], fp)
+    if new:
+        _append_sidecar(CHANGED_PATH, new)
+    return {h: iso for h, (iso, _) in last.items()}
+
+
+def load_last_tick():
+    """-> datetime of the previous `td tick`, or None."""
+    lines = _read_sidecar(LAST_TICK_PATH)
+    try:
+        return datetime.fromisoformat(lines[0]) if lines else None
+    except ValueError:
+        return None
+
+
+def save_last_tick(t):
+    CACHE.mkdir(parents=True, exist_ok=True)
+    LAST_TICK_PATH.write_text(t.isoformat(timespec="minutes") + "\n",
+                              encoding="utf-8")
+
+
+def load_stamped_now():
+    """-> set of due_iso that `td stamp` wrote when they were already now/past."""
+    out = set()
+    for line in _read_sidecar(STAMPED_NOW_PATH):
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            out.add(parts[1])
+    return out
+
+
 def prune_fired(now_dt, max_age):
     lines = _read_sidecar(FIRED_PATH)
     if not lines:
@@ -416,23 +515,30 @@ def fire_notification(title, body, open_path):
 def cmd_tick():
     """Fire scheduled items.
 
-    An item fires iff it was once observed as future (recorded in the
-    `scheduled` sidecar on a prior tick) and is now due or past-due.
+    An item fires once it is due or past-due, if either:
+      • it was observed as future on a prior tick (recorded in the
+        `scheduled` sidecar), or
+      • it was still to come at the previous tick — a reminder added
+        between two ticks (or inside the TD_LEAD_MIN window) — and is not
+        a stamp `td stamp` wrote as "now" (the `stamped-now` sidecar).
     Rule:
-      • new timestamp with due > now  →  add (hash, iso) to `scheduled`
-      • timestamp with due ≤ now AND (hash, iso) ∈ scheduled AND ∉ fired  →  fire
+      • new timestamp with due − lead > now  →  add (hash, iso) to `scheduled`
+      • timestamp with due − lead ≤ now, ∉ fired, AND (∈ scheduled OR
+        (previous tick < due AND due ∉ stamped-now))  →  fire
 
-    `tl` log entries are excluded by the SCHEDULE_TS regex itself (they
-    carry a ` - ` after the timestamp). Random past-date mentions never
-    enter `scheduled` because at first observation they're already past.
-    No catchup window — the sidecar handles missed fires across Doze /
-    reboots as long as the entry was captured as future at least once."""
+    `tl` log entries are excluded by find_stamp(). Old past-date mentions
+    never fire: they were already past at the previous tick. The cost of
+    catching late additions: a time typed by hand after it passed, within
+    one tick interval, fires once. Missed fires across Doze / reboots still
+    fire on the next tick, however late."""
     t = now()
     lead = timedelta(minutes=int(os.environ.get("TD_LEAD_MIN", "0")))
     items = scan_schedules()
     update_added([(s.hash, s.title) for s in items], t.isoformat(timespec="minutes"))
     scheduled = load_scheduled()
     fired = load_fired()
+    last_tick = load_last_tick()
+    stamped_now = load_stamped_now()
     new_scheduled = []
     for s in items:
         due_iso = s.due.isoformat(timespec="minutes")
@@ -445,7 +551,12 @@ def cmd_tick():
                 scheduled.add(key)
             continue
         if key not in scheduled:
-            continue
+            # Not seen as future: fire only if it was still to come at the
+            # previous tick (an old date was already past then) and is not
+            # a stamp of "now" from `td stamp`.
+            if (last_tick is None or s.due <= last_tick
+                    or due_iso in stamped_now):
+                continue
         if key in fired:
             continue
         fire_notification("TODO", s.title, s.path)
@@ -453,6 +564,7 @@ def cmd_tick():
         fired.add(key)
     if new_scheduled:
         _append_sidecar(SCHEDULED_PATH, new_scheduled)
+    save_last_tick(t)
     return 0
 
 
@@ -499,18 +611,31 @@ def _existing_slugs():
     return out
 
 
+def _modified_iso(b, changed):
+    """When bullet b was last touched: its line changed, or its dedicated
+    file was written, whichever is later."""
+    iso = changed.get(b.hash, "0")
+    dedicated = task_folder() / f"{slugify(b.text)}.md"
+    try:
+        mtime = datetime.fromtimestamp(dedicated.stat().st_mtime)
+    except OSError:
+        return iso
+    return max(iso, mtime.isoformat(timespec="minutes"))
+
+
 def build_list(args):
     state, sort = _parse_list_args(args)
     inbox, bullets = scan_inbox()
-    update_added([(b.hash, b.text) for b in bullets],
-                 now().isoformat(timespec="minutes"))
+    when = now().isoformat(timespec="minutes")
+    update_added([(b.hash, b.text) for b in bullets], when)
     added = load_added()
+    changed = update_changed(bullets, when, added)
     existing = _existing_slugs()
     bullet_slugs = {slugify(b.text) for b in bullets}
     kept = [b for b in bullets if b.state in VISIBLE
             and (state == "all" or STATE_NAMES[b.state] == state)]
     if sort == "modified":
-        kept.sort(key=lambda b: b.path.stat().st_mtime, reverse=True)
+        kept.sort(key=lambda b: _modified_iso(b, changed), reverse=True)
     else:
         kept.sort(key=lambda b: added.get(b.hash, "0"), reverse=True)
 
@@ -598,8 +723,9 @@ def cmd_stamp(args):
     trailing_nl = data.endswith("\n")
     body = data[:-1] if trailing_nl else data
     t = now()
+    stamped = None  # "YYYY-MM-DD HH:MM" this run wrote (not for --restamp)
 
-    m = SCHEDULE_TS.search(body)
+    m = find_stamp(body)
     if m:
         date_str = m.group(1)
         time_str = m.group(2)
@@ -611,6 +737,7 @@ def cmd_stamp(args):
                 new = body[m.start():m.end()]
         else:
             new = f"{t.strftime('%Y-%m-%d %a')} {time_str}"
+            stamped = f"{t.strftime('%Y-%m-%d')} {time_str}"
         rewritten = body[:m.start()] + new + body[m.end():]
     else:
         if restamp:
@@ -618,9 +745,31 @@ def cmd_stamp(args):
         else:
             stamp = t.strftime("%Y-%m-%d %a %H:%M")
             rewritten = f"{body} {stamp}" if body else stamp
+            stamped = t.strftime("%Y-%m-%d %H:%M")
 
     sys.stdout.write(rewritten + ("\n" if trailing_nl else ""))
+    _record_stamped_now(stamped, t)
     return 0
+
+
+def _record_stamped_now(stamped, t):
+    """Remember a stamp this run wrote that was already due (a stamp of
+    "now", or today at a time already past), so `td tick` doesn't take it
+    for a reminder added between ticks. A stamp later moved to another time
+    no longer matches and fires as usual."""
+    if stamped is None:
+        return
+    try:
+        due = datetime.strptime(stamped, "%Y-%m-%d %H:%M")
+    except ValueError:
+        return
+    if due > t:
+        return
+    try:
+        _append_sidecar(STAMPED_NOW_PATH, [(t.isoformat(timespec="minutes"),
+                                            due.isoformat(timespec="minutes"))])
+    except OSError:
+        pass
 
 
 def cmd_promote(args=None):
@@ -781,10 +930,12 @@ def cmd_toggle(args):
         bindings so the editor buffer never gets :pipe-dirtied.
       • Otherwise reads stdin, writes toggled line to stdout. Used by shells.
 
-    In both modes, when the source isn't $TD_FILE the toggle also text-matches
-    the bullet in $TD_FILE and updates it there. A repeater bump rewrites that
-    inbox line (its own indent, tags, and link) rather than pasting the
-    caller's row, so an agenda ` (*)` is not copied back. The dedicated
+    From the agenda, the toggle is applied to the inbox line the row shows
+    (exact match) and the agenda is rebuilt; a row that matches nothing
+    exits 1. From another file that isn't $TD_FILE, the same toggle is also
+    applied to the matching inbox bullet (core text, link ignored). Either
+    way the inbox line is rewritten from itself, so it keeps its indent,
+    tags, and link, and an agenda ` (*)` is never copied back. The dedicated
     file's H1 is retagged, and agenda.md is refreshed from the inbox."""
     if not args:
         sys.exit("usage: td toggle STATE [--from PATH [--line N]]")
@@ -826,48 +977,38 @@ def cmd_toggle(args):
         if not use_file:
             sys.stdout.write(raw)
         return 0
-    new_state = " " if bm["state"] == state else state
 
-    # Recurring: when marking done, bump the date and keep state as todo
-    # if the line carries a ++/.+ repeater. Preserves org-style anchored
-    # (++) or floating (.+) rescheduling. New state in {x,X} is the trigger.
-    today = now()
-    bumped = None
-    if new_state in ("x", "X"):
-        bumped = _bump_recurring(raw, today)
-    if bumped is not None:
-        new_state = " "
-        new_raw = CHECKBOX.sub(f"- [{new_state}]", bumped, count=1)
+    def toggle(line):
+        return _apply_toggle(line, bm["state"], state)
+
+    if _same_file(from_path, LIST_PATH):
+        # The agenda is a view rebuilt from the inbox. Toggle the inbox line
+        # the row shows, then rebuild; the row itself is never written back.
+        # The match is exact (state and text, minus the display-only ` (*)`),
+        # so bullets that differ only in their `→ link` stay apart, and a
+        # stale row matches nothing instead of the wrong line.
+        new_line = (_rewrite_first_match(inbox, bm["text"], bm["state"],
+                                         toggle, exact=True)
+                    if inbox.is_file() else None)
+        if new_line is None:
+            sys.stderr.write(
+                "td: no inbox bullet matches this agenda row; the agenda is "
+                "out of date, reopen it (space , l)\n")
+            return 1
+        nm = TASK.match(new_line)
+        new_state = nm["state"]
+        marker = " (*)" if MARKER.search(bm["text"]) else ""
+        new_raw = f"{bm['indent']}- [{new_state}] {nm['text']}{marker}"
     else:
-        new_raw = CHECKBOX.sub(f"- [{new_state}]", raw, count=1)
-
-    try:
-        same = from_path and from_path.resolve() == inbox.resolve()
-    except OSError:
-        same = False
-    try:
-        agenda = from_path and from_path.resolve() == LIST_PATH.resolve()
-    except OSError:
-        agenda = False
-
-    # A bumped agenda row is not written back. refresh_list rebuilds the
-    # agenda from the inbox, and the row we would write carries a
-    # display-only ` (*)`.
-    if use_file and not (agenda and bumped is not None):
-        keep_nl = lines[line_no - 1].endswith("\n")
-        lines[line_no - 1] = new_raw + ("\n" if keep_nl else "")
-        from_path.write_bytes(
-            "".join(lines).encode("utf-8", "surrogateescape")
-        )
-
-    if from_path and not same and inbox.is_file():
-        if bumped is not None:
-            # Re-bump the inbox line. Pasting `new_raw` would copy the
-            # agenda's ` (*)` and drop the inbox indent.
-            if not _bump_in_file(inbox, bm["text"], bm["state"], today):
-                _retag_in_file(inbox, bm["text"], bm["state"], new_state)
-        else:
-            _retag_in_file(inbox, bm["text"], bm["state"], new_state)
+        new_raw = toggle(raw)
+        new_state = TASK.match(new_raw)["state"]
+        if use_file:
+            _write_line(from_path, lines, line_no - 1, new_raw)
+        if from_path and not _same_file(from_path, inbox) and inbox.is_file():
+            # Mirror into the inbox: apply the same toggle to its copy of the
+            # bullet, so it keeps its own indent, tags, and `→ link`, and
+            # bumps if (and only if) the inbox line itself repeats.
+            _rewrite_first_match(inbox, bm["text"], bm["state"], toggle)
     _retag_dedicated_h1(bm["text"], new_state)
     refresh_list()
     if not use_file:
@@ -875,70 +1016,69 @@ def cmd_toggle(args):
     return 0
 
 
-def _find_bullet_lines(path, text, old_state):
-    """Lines whose checkbox state and core text match.
+def _apply_toggle(raw, cur_state, state):
+    """raw with its checkbox toggled between " " and state.
 
-    Core text drops a trailing ` (*)` and `→ link`. The agenda appends
-    ` (*)` for display; it is not part of the inbox bullet.
+    Recurring: marking done (x/X) a line that carries a ++/.+ repeater bumps
+    its date and keeps it todo instead — org-style anchored (++) or
+    floating (.+) rescheduling.
     """
-    # Marker before link: the agenda writes `→ link (*)` and LINK is anchored
-    # at end of line, so the marker has to come off first.
-    needle = LINK.sub("", MARKER.sub("", text)).strip()
+    new_state = " " if cur_state == state else state
+    if new_state in ("x", "X"):
+        bumped = _bump_recurring(raw, now())
+        if bumped is not None:
+            return CHECKBOX.sub("- [ ]", bumped, count=1)
+    return CHECKBOX.sub(f"- [{new_state}]", raw, count=1)
+
+
+def _write_line(path, lines, i, new):
+    """Replace lines[i] (keeping its line ending) and write lines to path."""
+    keep_nl = lines[i].endswith("\n")
+    lines[i] = new + ("\n" if keep_nl else "")
+    path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
+
+
+def _find_bullet_lines(path, text, old_state, exact=False):
+    """Lines whose checkbox state and text match -> (lines, hits, needle).
+
+    The caller's trailing ` (*)` is dropped: the agenda appends it for
+    display; it is not part of the inbox bullet. With exact, the rest must
+    match as is. Otherwise both sides also drop their `→ link` (core text).
+    """
+    def key(t):
+        # Marker before link: the agenda writes `→ link (*)` and LINK is
+        # anchored at end of line, so the marker has to come off first.
+        t = MARKER.sub("", t).strip()
+        return t if exact else LINK.sub("", t).strip()
+
+    needle = key(text)
     data = path.read_bytes().decode("utf-8", "surrogateescape")
     lines = data.splitlines(keepends=True)
     hits = []
     for i, raw in enumerate(lines):
         m = TASK.match(raw.rstrip("\n"))
-        if not m or m["state"] != old_state:
-            continue
-        core = LINK.sub("", MARKER.sub("", m["text"])).strip()
-        if core == needle:
+        if m and m["state"] == old_state and key(m["text"]) == needle:
             hits.append(i)
     return lines, hits, needle
 
 
-def _retag_in_file(path, text, old_state, new_state):
-    """Find the first `- [old_state] <same core text>` line and flip its checkbox.
+def _rewrite_first_match(path, text, old_state, transform, exact=False):
+    """Replace the first `- [old_state] <text>` line with transform(line).
 
-    Warns to stderr when more than one line matches — only the first flips.
+    -> the new line, or None when nothing matched. Warns to stderr when more
+    than one line matches; only the first changes.
     """
-    lines, hits, needle = _find_bullet_lines(path, text, old_state)
+    lines, hits, needle = _find_bullet_lines(path, text, old_state, exact)
     if not hits:
-        return False
+        return None
     if len(hits) > 1:
         sys.stderr.write(
             f"td: {len(hits)} duplicate bullets match {needle!r} in {path}; "
-            f"flipped line {hits[0] + 1} only\n"
+            f"changed line {hits[0] + 1} only\n"
         )
-    i = hits[0]
-    lines[i] = CHECKBOX.sub(f"- [{new_state}]", lines[i], count=1)
-    path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
-    return True
-
-
-def _bump_in_file(path, text, old_state, today):
-    """Bump the matching inbox bullet in place. The caller's line is only a key.
-
-    Re-running the bump on the stored line keeps its indent, tags, and
-    `→ link`, and does not copy an agenda ` (*)` back into the inbox.
-    """
-    lines, hits, needle = _find_bullet_lines(path, text, old_state)
-    if not hits:
-        return False
-    if len(hits) > 1:
-        sys.stderr.write(
-            f"td: {len(hits)} duplicate bullets match {needle!r} in {path}; "
-            f"bumped line {hits[0] + 1} only\n"
-        )
-    i = hits[0]
-    bumped = _bump_recurring(lines[i].rstrip("\n"), today)
-    if bumped is None:
-        return False
-    new_raw = CHECKBOX.sub("- [ ]", bumped, count=1)
-    keep_nl = lines[i].endswith("\n")
-    lines[i] = new_raw + ("\n" if keep_nl else "")
-    path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
-    return True
+    new = transform(lines[hits[0]].rstrip("\n"))
+    _write_line(path, lines, hits[0], new)
+    return new
 
 
 H1_WITH_STATE = re.compile(r"^(#\s+)(?:\[[ xXya!]\]\s+)?(.+?)(\s*)$")
@@ -987,7 +1127,7 @@ def cmd_fire(args):
         if hm and not title_found:
             title = hm[1]; title_found = True
         if due is None:
-            ts = SCHEDULE_TS.search(raw)
+            ts = find_stamp(raw)
             if ts:
                 try:
                     due = datetime.strptime(f"{ts[1]} {ts[2]}", "%Y-%m-%d %H:%M")
@@ -1105,6 +1245,11 @@ def run_tests(verbose=False):
             p = self.cache / name
             return p.read_text(encoding="utf-8", errors="surrogateescape") if p.exists() else ""
 
+        def touch(self, path, when):
+            """Set path's mtime to `when` ("YYYY-MM-DD HH:MM", local time)."""
+            ts = datetime.strptime(when, "%Y-%m-%d %H:%M").timestamp()
+            os.utime(path, (ts, ts))
+
     class Parse(unittest.TestCase):
         def test_bullet_shapes(self):
             p = Path("x.md")
@@ -1214,12 +1359,52 @@ def run_tests(verbose=False):
             self.assertNotIn("from dedicated", out)
 
         def test_sort_modified(self):
-            p = self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
-            os.utime(p, (0, 1000))
-            out = self.td("list", "--sort", "modified")
-            # single file, order comes from file order
-            self.assertIn("alpha", out)
-            self.assertIn("bravo", out)
+            # bravo is added after alpha, so it starts out on top. Changing
+            # alpha's line (here, stamping it) moves alpha above it, while
+            # the added order stays as it was.
+            self.put_inbox("- [ ] alpha\n")
+            self.td("list", now_="2026-10-10 11:00")
+            self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
+            out = self.td("list", "--sort", "modified", now_="2026-10-10 11:05")
+            self.assertLess(out.index("bravo"), out.index("alpha"))
+            self.put_inbox("- [ ] alpha 2026-10-12 Mon 09:00\n- [ ] bravo\n")
+            out = self.td("list", "--sort", "modified", now_="2026-10-10 11:10")
+            self.assertLess(out.index("alpha"), out.index("bravo"))
+            out = self.td("list", now_="2026-10-10 11:15")
+            self.assertLess(out.index("bravo"), out.index("alpha"))
+
+        def test_sort_modified_counts_toggles(self):
+            p = self.put_inbox("- [ ] alpha\n")
+            self.td("list", now_="2026-10-10 11:00")
+            self.put_inbox("- [ ] bravo\n- [ ] alpha\n")
+            out = self.td("list", "--sort", "modified", now_="2026-10-10 11:05")
+            self.assertLess(out.index("bravo"), out.index("alpha"))
+            # Toggling alpha to [y] and back is a change, made through td.
+            for _ in range(2):
+                self.td("toggle", "y", "--from", str(p), "--line", "2",
+                        now_="2026-10-10 11:10")
+            out = self.td("list", "--sort", "modified", now_="2026-10-10 11:15")
+            self.assertLess(out.index("alpha"), out.index("bravo"))
+
+        def test_sort_modified_counts_dedicated_file(self):
+            self.put_inbox("- [ ] alpha\n")
+            self.td("list", now_="2026-10-10 11:00")
+            self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
+            self.td("list", now_="2026-10-10 11:05")
+            notes = self.put_dedicated("alpha.md", "# alpha\n\nnotes\n")
+            self.touch(notes, "2026-10-10 11:20")
+            out = self.td("list", "--sort", "modified", now_="2026-10-10 11:25")
+            self.assertLess(out.index("alpha"), out.index("bravo"))
+            self.touch(notes, "2026-10-10 10:00")
+            out = self.td("list", "--sort", "modified", now_="2026-10-10 11:25")
+            self.assertLess(out.index("bravo"), out.index("alpha"))
+
+        def test_changed_sidecar_steady_with_duplicate_bullets(self):
+            # Same identity, different states: recorded once, not on every run.
+            self.put_inbox("- [ ] call mom\n- [x] call mom\n")
+            self.td("list")
+            self.td("list", now_="2026-10-10 11:30")
+            self.assertEqual(len(self.read_cache("changed").splitlines()), 1)
 
         def test_stamp_does_not_reshuffle_added_order(self):
             # Bravo is first-seen later, so added-sort puts it above alpha.
@@ -1340,6 +1525,109 @@ def run_tests(verbose=False):
             out = self.td("tick", now_="2026-10-10 12:00")
             self.assertIn("stemmed", out)
 
+        def test_note_after_time_still_fires(self):
+            # " - " after a stamp mid-line is text, not a tl entry.
+            self.put_inbox("- [ ] call bank 2026-10-10 12:00 - bring docs\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 12:00")
+            self.assertIn("would fire", out)
+            self.assertIn("call bank", out)
+
+        def test_tl_entry_shapes_dont_fire(self):
+            # The leading time of any line tl reads as an entry.
+            self.put_dedicated("log.md", "# log\n"
+                               "- [ ] 2026-10-10 12:00 -\n"
+                               "* 2026-10-10 12:00 -  note\n"
+                               "2026-10-10 12:00–13:00\n"
+                               "2026-10-10 12:00-13:00 = 1h 00min\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 13:00")
+            self.assertNotIn("would fire", out)
+
+        def test_inbox_outside_task_folder_fires(self):
+            inbox = self.home / "elsewhere" / "inbox.md"
+            inbox.parent.mkdir()
+            inbox.write_text("- [ ] dentist 2026-10-10 12:00\n")
+            self.td("tick", TD_FILE=str(inbox))
+            out = self.td("tick", now_="2026-10-10 12:00", TD_FILE=str(inbox))
+            self.assertIn("would fire", out)
+            self.assertIn("dentist", out)
+
+        def test_done_or_ignored_dedicated_file_doesnt_fire(self):
+            for state in ("x", "X", "!"):
+                with self.subTest(state=state):
+                    self.put_dedicated("renew-passport.md",
+                                       f"# [{state}] renew passport\n\n"
+                                       "2026-10-10 12:00\n")
+                    self.td("tick")
+                    out = self.td("tick", now_="2026-10-10 12:00")
+                    self.assertNotIn("would fire", out)
+
+        def test_active_dedicated_file_fires(self):
+            self.put_dedicated("renew-passport.md",
+                               "# [a] renew passport\n\n2026-10-10 12:00\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 12:00")
+            self.assertIn("would fire", out)
+            self.assertIn("renew passport", out)
+
+        def test_added_between_ticks_fires(self):
+            # Added after the 11:00 tick, due 11:05: no tick saw it as
+            # future, but it was still to come at the previous tick. The
+            # file was edited again after it was due (its mtime is "now"),
+            # which doesn't matter.
+            self.td("tick")
+            self.put_dedicated("call-back.md", "# call back\n2026-10-10 11:05\n")
+            out = self.td("tick", now_="2026-10-10 11:15")
+            self.assertIn("would fire", out)
+            self.assertIn("call back", out)
+            again = self.td("tick", now_="2026-10-10 11:30")
+            self.assertNotIn("would fire", again)
+
+        def test_inbox_bullet_added_between_ticks_fires(self):
+            self.td("tick")
+            self.put_inbox("- [ ] call back 2026-10-10 11:05\n- [ ] other\n")
+            out = self.td("tick", now_="2026-10-10 11:15")
+            self.assertIn("would fire", out)
+
+        def test_stamp_of_now_doesnt_fire(self):
+            # `space , s` on a line at 11:07 writes 11:07: already due when
+            # written, so it is a note, not a reminder.
+            self.td("tick")
+            line = self.td("stamp", stdin="- [ ] did it\n", now_="2026-10-10 11:07")
+            self.put_inbox(line)
+            out = self.td("tick", now_="2026-10-10 11:15")
+            self.assertNotIn("would fire", out)
+
+        def test_stamp_moved_to_later_time_fires(self):
+            # Stamp at 11:07, then the time edited to 11:10: a reminder.
+            self.td("tick")
+            line = self.td("stamp", stdin="- [ ] call\n", now_="2026-10-10 11:07")
+            self.put_inbox(line.replace("11:07", "11:10"))
+            out = self.td("tick", now_="2026-10-10 11:15")
+            self.assertIn("would fire", out)
+
+        def test_added_inside_lead_window_fires(self):
+            # Lead 15: due 11:00 fires from 10:45. Added after the 10:46
+            # tick, it fires on the 10:55 tick, before it is due.
+            self.td("tick", now_="2026-10-10 10:46", TD_LEAD_MIN="15")
+            self.put_dedicated("call.md", "# call\n2026-10-10 11:00\n")
+            out = self.td("tick", now_="2026-10-10 10:55", TD_LEAD_MIN="15")
+            self.assertIn("would fire", out)
+
+        def test_due_before_previous_tick_doesnt_fire(self):
+            # Due 10:50, before the 11:00 tick: an old date, not new.
+            self.td("tick")
+            self.put_dedicated("old.md", "# old\n2026-10-10 10:50\n")
+            out = self.td("tick", now_="2026-10-10 11:15")
+            self.assertNotIn("would fire", out)
+
+        def test_first_tick_ever_fires_nothing_past(self):
+            # No previous tick to compare with: nothing already due fires.
+            self.put_dedicated("x.md", "# x\n2026-10-10 10:59\n")
+            out = self.td("tick")
+            self.assertNotIn("would fire", out)
+
     class New(Case):
         def test_defaults(self):
             self.assertEqual(self.td("new"), "- [ ] ")
@@ -1394,11 +1682,17 @@ def run_tests(verbose=False):
                              "x 2026-10-10 Sat 11:00\n")
 
         def test_tl_log_entry_not_touched(self):
-            # ` - ` suffix → not a schedule → `stamp` leaves it alone and
-            # appends a fresh stamp at end
+            # A tl entry's leading time is not a schedule → `stamp` leaves it
+            # alone and appends a fresh stamp at end
             out = self.td("stamp",
                           stdin="2026-10-08 19:16 - 19:17 = 0h 01min")
             self.assertTrue(out.endswith("2026-10-10 Sat 11:00"))
+            self.assertTrue(out.startswith("2026-10-08 19:16 - 19:17"))
+
+        def test_note_after_time_is_restamped(self):
+            out = self.td("stamp",
+                          stdin="- [ ] call bank 2025-12-25 10:00 - bring docs")
+            self.assertEqual(out, "- [ ] call bank 2026-10-10 Sat 10:00 - bring docs")
 
     class Next(Case):
         def test_soonest_future(self):
@@ -1792,6 +2086,59 @@ def run_tests(verbose=False):
                           stdin="- [y] rent 2026-10-01 Thu 09:00 ++1m\n")
             self.assertEqual(out.strip(),
                              "- [ ] rent 2026-11-01 Sun 09:00 ++1m")
+
+        def test_toggle_from_stale_agenda_fails_and_changes_nothing(self):
+            p = self.put_inbox("- [a] pay rent 2026-10-01 Thu 09:00 ++1m\n")
+            dedicated = self.put_dedicated("pay-rent.md", "# [a] pay rent\n")
+            agenda, lineno = self.agenda_row("++1m")
+            # Inbox edited by hand after the agenda was built.
+            p.write_text("- [a] pay rent 2026-10-02 Fri 09:00 ++1m\n")
+            with self.assertRaises(sp.CalledProcessError) as cm:
+                self.td("toggle", "x", "--from", str(agenda),
+                        "--line", str(lineno))
+            self.assertIn(b"out of date", cm.exception.stderr)
+            self.assertEqual(p.read_text(),
+                             "- [a] pay rent 2026-10-02 Fri 09:00 ++1m\n")
+            self.assertEqual(dedicated.read_text(), "# [a] pay rent\n")
+
+        def test_toggle_from_agenda_picks_the_row_with_its_link(self):
+            p = self.put_inbox("- [ ] rent 2026-10-01 Thu 09:00 ++1m → a\n"
+                               "- [ ] rent 2026-10-01 Thu 09:00 ++1m → b\n")
+            agenda, lineno = self.agenda_row("→ b")
+            self.td("toggle", "x", "--from", str(agenda), "--line", str(lineno))
+            self.assertEqual(p.read_text(),
+                             "- [ ] rent 2026-10-01 Thu 09:00 ++1m → a\n"
+                             "- [ ] rent 2026-11-01 Sun 09:00 ++1m → b\n")
+
+        def test_toggle_from_agenda_bumps_like_inbox_with_note_after_time(self):
+            # The agenda row ends `09:00 - (*)`; it must bump, as the inbox
+            # line does, not end the recurrence by marking it done.
+            text = "rent ++1m 2026-10-01 Thu 09:00 -"
+            p = self.put_inbox(f"- [ ] {text}\n")
+            self.put_dedicated(f"{slugify(text)}.md", "# rent\n")
+            agenda, lineno = self.agenda_row("(*)")
+            self.td("toggle", "x", "--from", str(agenda), "--line", str(lineno))
+            self.assertEqual(p.read_text(),
+                             "- [ ] rent ++1m 2026-11-01 Sun 09:00 -\n")
+
+        def test_toggle_mirror_marks_inbox_done_when_it_cannot_bump(self):
+            # The dedicated file's line repeats (its `→` part is `++1m`), the
+            # inbox copy has the same core text but no repeater: the inbox
+            # line is marked done, not reset to [ ].
+            p = self.put_inbox("- [y] pay rent 2026-10-01 Thu 09:00\n")
+            d = self.put_dedicated(
+                "notes.md", "# notes\n- [y] pay rent 2026-10-01 Thu 09:00 → ++1m\n")
+            self.td("toggle", "x", "--from", str(d), "--line", "2")
+            self.assertEqual(d.read_text(), "# notes\n"
+                             "- [ ] pay rent 2026-11-01 Sun 09:00 → ++1m\n")
+            self.assertEqual(p.read_text(), "- [x] pay rent 2026-10-01 Thu 09:00\n")
+
+        def test_toggle_y_ignores_bad_fake_clock(self):
+            # Only x/X needs the clock (for a bump).
+            p = self.put_inbox("- [ ] alpha\n")
+            self.td("toggle", "y", "--from", str(p), "--line", "1",
+                    now_="2026-10-10T11:00")
+            self.assertEqual(p.read_text(), "- [y] alpha\n")
 
     loader = unittest.defaultTestLoader
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
