@@ -3574,10 +3574,10 @@ def run_tests(verbose=False):
                 else:
                     in_config.add(names.get(k, k))
             in_config |= {k for k in ("+", "-") if k in normal}
-            doc = (here / "keys.md").read_text(encoding="utf-8")
+            doc = (here.parent / "docs" / "keys.md").read_text(encoding="utf-8")
             in_doc = set(re.findall(r"^\| `([^`]+)` \|", doc, re.M))
             self.assertEqual(in_doc, in_config,
-                             "bin/keys.md is out of sync with config.toml")
+                             "docs/keys.md is out of sync with config.toml")
 
     loader = unittest.defaultTestLoader
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)

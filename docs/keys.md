@@ -264,6 +264,6 @@ prompt (`n`), never one or the other depending on where the cursor is.
 Merging them now would make `P` always stop at the prompt: an extra Enter
 on every promote, and a name prompt where none is needed. It becomes simple
 with the `:eval` idea in
-[td-plan.md](../td-plan.md#future-directions--integration-with-helix), if
+[td-plan.md](td-plan.md#future-directions--integration-with-helix), if
 `:eval` can also run a typed sequence: the key asks `td` first, and `td`
 answers "open this file" or "ask for a name".

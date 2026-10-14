@@ -3,7 +3,7 @@
 > **Historical: the original plan, kept for the record. It no longer
 > describes `td`** (lowercase states, `space .` keys, `#tags`,
 > `last-list.md` and more have changed or gone). The current design is in
-> [bin/agenda.md](bin/agenda.md), the keys in [bin/keys.md](bin/keys.md).
+> [agenda.md](agenda.md), the keys in [keys.md](keys.md).
 > The last section, [Future directions](#future-directions--integration-with-helix),
 > is current (2026-10-13).
 
@@ -367,7 +367,7 @@ from a limit of what a key binding can do:
 | A script can only hand back a path, through `%sh{}` | 4 cache files: `stamp-col`, `open`, `tl/from`, `agenda-args` |
 | No prompt for user input | the `$BASH_EXECUTION_STRING` comment trick in `space , o` |
 
-[keys.md](bin/keys.md#how-the-keys-are-built) spends about 80 lines
+[keys.md](keys.md#how-the-keys-are-built) spends about 80 lines
 explaining these workarounds.
 
 ### What moving into Helix would and wouldn't change
@@ -408,7 +408,7 @@ features to the fork:
    If `:eval` can also run a typed key sequence (a macro), a key can stop at
    the command prompt only when it needs input; that would let `space , P`
    and `space , n` become one key (see
-   [keys.md](bin/keys.md#to-do-one-key-for-a-tasks-own-file)).
+   [keys.md](keys.md#to-do-one-key-for-a-tasks-own-file)).
 2. **A save that finishes before the next step.** Scripts would always read
    up-to-date files, removing the buffer visiting in `i`/`I`, the `:write!`
    and most of the ordering rules.

@@ -1,7 +1,7 @@
 # td: exact-time reminders
 
 Status (2026-10-14): **phase 1 built** (`bin/TdAlarm.java`, `bin/td`; the
-user doc is [bin/agenda.md](bin/agenda.md)). Phase 2, the fork's save hook,
+user doc is [agenda.md](agenda.md)). Phase 2, the fork's save hook,
 is dropped: opening the agenda arms a hand edit. `space , Enter` (save and
 tick) is gone too; it was only for testing. Proven
 first in a throwaway `~/alarm-test`: an Android alarm set as com.termux
