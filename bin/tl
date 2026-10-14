@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Time-log helper for Helix (keys: space , i / I / o / r / S; see keys.md).
+"""Time-log helper for Helix (keys: space , i / I / o / r / l; see keys.md).
 
 An entry is any line that starts with a date (optionally after indentation and
 a list bullet), so entries can sit anywhere in a file, in any order:

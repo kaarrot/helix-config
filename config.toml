@@ -109,7 +109,7 @@ o = "@:write-all<ret>:sh ~/.config/helix/bin/tl out \"$BASH_EXECUTION_STRING\" #
 # Recently changed task files, newest first, in a popup
 r = ":sh ~/.config/helix/bin/tl recent"
 # Time per day for all task files (just this file if it is outside ~/tasks)
-S = [":write", "align_view_top", ":sh ~/.config/helix/bin/tl summary --file %{buffer_name}"]
+l = [":write", "align_view_top", ":sh ~/.config/helix/bin/tl summary --file %{buffer_name}"]
 
 ### Todos (td) ###
 

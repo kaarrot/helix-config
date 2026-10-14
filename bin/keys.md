@@ -31,7 +31,7 @@ from the times. todo.md is not a task file for `tl`: its bullets are todos.
 | `I` | **Switch back.** Ends what is running, as `i` does (no heading), and clocks in to the task you worked on before it: opens that task file and adds `YYYY-MM-DD HH:MM - ` at its end, in insert mode. "Before it" means the latest entry in a file other than the running entry's, so pressing `I` again switches back. With nothing running (say after `o`), it resumes the task of the latest entry. If there is no other task, it works like `i` in this buffer. Both files are saved, as with `i` |
 | `o` | **Clock out.** Saves all buffers, then waits at the command prompt `# done: `. Type what you did and press Enter: the latest running entry (in any task file, started in the last 12 hours) gets its end time and duration, and your text becomes the `# heading` line right above it, or is added to the heading already there after ` - `. Enter on an empty prompt ends the entry with no heading; Esc does nothing. The text needs no quoting; only `%` is special (type `%%` for one) |
 | `r` | **Recent files.** A popup with the 9 most recently changed task files, newest first, each with its last entry. Open one with `:o <path>` |
-| `S` | **Summary.** Saves, then shows time per day for the last 14 days in a popup: per task file its total and title, and under it the `# headings` it was worked under. Running entries come first, and problems (overlaps, duplicates, typos, entries over 12 hours) last, as `~/path:line` you can open with `gf`. In a file outside `~/tasks`, only that file is counted |
+| `l` | **Summary** (time log). Saves, then shows time per day for the last 14 days in a popup: per task file its total and title, and under it the `# headings` it was worked under. Running entries come first, and problems (overlaps, duplicates, typos, entries over 12 hours) last, as `~/path:line` you can open with `gf`. In a file outside `~/tasks`, only that file is counted |
 
 ## Todos (`td`)
 
@@ -140,7 +140,7 @@ the next one starts:
   command runs.
 
 So the keys that work on the current line use only the last kind, and
-`td` gets the line from the buffer, never from the file on disk. `S` and
+`td` gets the line from the buffer, never from the file on disk. `l` and
 `Enter` save and then run `:sh`, both in the background; the save is quick
 next to starting Python, so they see the saved file in practice.
 
@@ -223,7 +223,7 @@ next to starting Python, so they see the saved file in practice.
   `$BASH_EXECUTION_STRING` (the whole command line), so it needs no
   quoting. `tl` looks for exactly `"$BASH_EXECUTION_STRING" # done:`
   (`DONE_MARK` in `tl`): change both together.
-- **`S`** runs `align_view_top` first: a popup opens below the cursor's
+- **`l`** runs `align_view_top` first: a popup opens below the cursor's
   screen row when 6 rows fit there, so at the top it gets the full height.
 
 ### Why `p` and `P` are separate
