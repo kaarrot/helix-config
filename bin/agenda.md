@@ -280,7 +280,7 @@ is `++0d` (it would never move), so those lines are just marked done.
 | `td toggle S [--from PATH [--line N]]` | toggle the line's state between `[ ]` and `S` (a name like `waiting` works too); stdin to stdout, or with `--line` the file on disk. On an agenda row, the task it shows changes instead, and the agenda is rebuilt. Keeps the task's other copies in step (see [keys.md](keys.md#status-keys-in-other-files)); moves a repeating date instead of marking done |
 | `td set PATH LINE S` | set the checkbox at `PATH:LINE` to `S` |
 | `td stamp [--restamp] [--col N]` | stdin: a line. Add a stamp, or move its date to today keeping the time; `--restamp`, or `--col N` on the stamp, only fixes the weekday |
-| `td shift +N\|-N [--col N]` | stdin: a line. Move its stamp by the part under column N (the day without `--col`); with `--col`, save the part's new column to `~/.cache/td/stamp-col` |
+| `td shift +N\|-N [--col N]` | stdin: a line. Move its stamp by the part under column N (the day without `--col`); on a time-log line, its date, start or end time, in `tl`'s format, duration redone. With `--col`, save the part's new column to `~/.cache/td/stamp-col` |
 | `td new [--state S]` | print `- [S] ` (`space , q` inserts it) |
 | `td file NAME` | create the file task `~/tasks/<slug>.md` headed `# [ ] NAME` (an existing file is left alone) and print the path to open (`space , n`) |
 | `td next` | print the next time due (for a status line) |

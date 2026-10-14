@@ -102,7 +102,7 @@ fires while its todo.md bullet is open, whatever its heading says.
 `space . x` (not a `td` key) toggles `[ ]` ↔ `[X]` with `sed` in any file:
 no repeaters, and no other copies change.
 
-## Moving a stamp (normal mode, no `space ,`)
+## Moving a stamp or a time-log entry (normal mode, no `space ,`)
 
 `+` moves the stamp (`YYYY-MM-DD Xxx HH:MM`) on the cursor's line later and
 `-` moves it earlier, by the part under the cursor. The cursor stays on that
@@ -110,9 +110,18 @@ part, so pressing again keeps moving it. The weekday follows the date, and
 one undo reverts one press. A line with no stamp is left alone, and so is
 the agenda. These keys don't save.
 
+On a time-log line (`2026-10-13 09:30 - 10:45 = 1h 15min  note`) they amend
+the entry instead: its date, its start time or its end time, whichever the
+cursor is on, and the `= 1h 15min` part is worked out again. On the note,
+the entry's date moves, unless the line also has a reminder stamp, whose
+day moves then. The line keeps `tl`'s shape (no weekday is added), so it
+stays a time-log entry and never becomes a reminder, wherever its date
+goes. A start moved past midnight takes the date with it; the end is just
+a time of day.
+
 | Key | What it does |
 |---|---|
-| `+` | Later by one year, month, day, hour, or 5 minutes, whichever the cursor is on. On the weekday or anywhere else on the line: one day |
+| `+` | Later by one year, month, day, hour, or 5 minutes, whichever the cursor is on. On the weekday or anywhere else on the line: one day. On a time-log line: the same for its date, start or end time |
 | `-` | The same, earlier |
 
 Minutes land on multiples of 5 (`09:32` → `09:35` / `09:30`). Hours past

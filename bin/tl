@@ -120,6 +120,23 @@ def parse(line):
     return Entry(m["prefix"], m["date"], start, end, note), None
 
 
+# An entry's head, in parts, so td's `+`/`-` can move one of them and keep the rest as it is.
+HEAD = re.compile(
+    rf"""^(?P<prefix>{PREFIX})(?P<date>\d{{4}}-\d{{2}}-\d{{2}})(?P<sp>\s+)
+        (?P<start>\d{{1,2}}:\d{{2}})(?P<dash>\s*[-–])
+        (?:(?P<sp2>\s*)(?P<end>\d{{1,2}}:\d{{2}}))?
+        (?P<dur>\s*=\s*(?:\d+h)?\s*(?:\d+min)?)?""",
+    re.X,
+)
+
+
+def entry_head(line):
+    """For td's `+`/`-`: the HEAD match of an entry line (groups prefix, date, sp, start, dash,
+    sp2, end, dur; end and dur None when missing), or None when line is not a valid entry."""
+    e, _ = parse(line)
+    return HEAD.match(line) if e else None
+
+
 def started_at(e):
     return datetime.strptime(f"{e.date} {hhmm(e.start)}", "%Y-%m-%d %H:%M")
 

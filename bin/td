@@ -97,7 +97,11 @@ Commands:
                        or not given. The weekday follows the date; month ends
                        clamp (01-31 +1 month → 02-28). With --col, the
                        part's new column goes to ~/.cache/td/stamp-col.
-                       No stamp: the line comes back unchanged.
+                       On a tl entry line, its head moves instead: the
+                       date, or the start or end time under COL (the date
+                       when COL is elsewhere, unless the line also has a
+                       stamp), in tl's format, with its duration redone.
+                       No stamp or entry: the line comes back unchanged.
   td fire PATH         fire a dedicated file's timestamp now (testing)
   td test [-v]         run tests
 
@@ -894,7 +898,13 @@ def cmd_shift(args):
     body = data[:-1] if trailing_nl else data
     i = col - 1 if col is not None else None
     m = find_stamp(body)
-    if m:
+    # A tl entry line: its head (date, start, end) moves, in tl's format. Off the head, the
+    # day moves: the entry's, unless the line also has a reminder stamp, whose day moves.
+    head = _tl().entry_head(body) if TL_ENTRY.match(body) else None
+    log_part = _log_part(head, i) if head else None
+    if head and (log_part or not m):
+        body, i = _shift_log(body, head, n, log_part or "d", i)
+    elif m:
         try:
             old = datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M")
         except ValueError:
@@ -921,6 +931,68 @@ def cmd_shift(args):
         except OSError:
             pass
     return 0
+
+
+_TL = []  # tl as a module, once loaded
+
+
+def _tl():
+    """tl, next to this file, as a module: td moves a time-log entry with tl's own parsing and
+    formatting, so the two scripts can't disagree on its shape. Loaded only for such lines."""
+    if _TL:
+        return _TL[0]
+    from importlib.machinery import SourceFileLoader
+    from importlib.util import module_from_spec, spec_from_loader
+    loader = SourceFileLoader("tl", str(Path(__file__).resolve().with_name("tl")))
+    module = module_from_spec(spec_from_loader("tl", loader))
+    loader.exec_module(module)
+    _TL.append(module)
+    return module
+
+
+def _log_part(head, i):
+    """Which part of a tl entry's head (see tl's entry_head) holds 0-based index i: "y", "m",
+    "d" of the date, "sh"/"sM" the start's hour or minutes, "eh"/"eM" the end's; "" elsewhere."""
+    if i is None:
+        return ""
+    a, b = head.span("date")
+    if a <= i < b:
+        return "y" if i < a + 5 else "m" if i < a + 8 else "d"
+    for name in ("start", "end"):
+        if head[name] and head.start(name) <= i < head.end(name):
+            return name[0] + ("h" if i <= head.start(name) + head[name].index(":") else "M")
+    return ""
+
+
+def _shift_log(body, head, n, part, i):
+    """body, a tl entry line, moved n steps of part (see _log_part): the date (the times stay),
+    or the start or end time; a start crossing midnight moves the date too. A duration
+    ("= 1h 15min") is written again for the new times. -> (new body, i on the same part)."""
+    tl = _tl()
+    start = datetime.strptime(f"{head['date']} {head['start']}", "%Y-%m-%d %H:%M")
+    date_s, start_s, end_s = head["date"], head["start"], head["end"]
+    moved = None  # the group whose text changed width, and its new text
+    if part in ("y", "m", "d"):
+        date_s = _shift(start, n, part).strftime("%Y-%m-%d")
+    elif part[0] == "s":
+        new = _shift(start, n, part[1])
+        date_s, start_s = new.strftime("%Y-%m-%d"), new.strftime("%H:%M")
+        moved = "start"
+    else:
+        end = datetime.strptime(f"{head['date']} {end_s}", "%Y-%m-%d %H:%M")
+        end_s = _shift(end, n, part[1]).strftime("%H:%M")
+        moved = "end"
+    dur = head["dur"] or ""
+    if dur and end_s:
+        dur = " = " + tl.dur_text(tl.duration(tl.to_min(start_s), tl.to_min(end_s)))
+    new_body = (head["prefix"] + date_s + head["sp"] + start_s + head["dash"]
+                + ((head["sp2"] or "") + end_s if end_s else "") + dur + body[head.end():])
+    if i is not None and moved:
+        # A 1-digit hour ("9:05") is written with 2: the cursor follows its part.
+        i += 2 - head[moved].index(":")
+    elif i is not None and i >= head.end():
+        i += len(new_body) - len(body)
+    return new_body, i
 
 
 def _col_arg(args):
@@ -2049,8 +2121,58 @@ def run_tests(verbose=False):
             self.assertEqual(self.read_cache("stamp-col"), "28\n")
 
         def test_shift_keeps_repeater_and_tl_time(self):
-            out = self.shift("+1", "2026-10-08 19:16 - did it 2026-10-20 09:00 ++1w", 3)
-            self.assertEqual(out, "2026-10-08 19:16 - did it 2026-10-21 Wed 09:00 ++1w")
+            # Off both, on the note: the reminder's day moves, not the entry's.
+            line = "2026-10-08 19:16 - did it 2026-10-20 09:00 ++1w"
+            self.assertEqual(self.shift("+1", line, 21),
+                             "2026-10-08 19:16 - did it 2026-10-21 Wed 09:00 ++1w")
+            # On the entry's head: the entry moves, the reminder stays.
+            self.assertEqual(self.shift("+1", line, 3),
+                             "2027-10-08 19:16 - did it 2026-10-20 09:00 ++1w")
+
+        def test_shift_log_entry_by_cursor_part(self):
+            line = "2026-10-13 09:30 - 10:45 = 1h 15min  fixed the parser\n"
+            # date 1-10, start hour 12-14 (the colon counts), minutes 15-16, end 20-24
+            cases = {(3, "+1"): "2027-10-13 09:30 - 10:45 = 1h 15min",
+                     (6, "+1"): "2026-11-13 09:30 - 10:45 = 1h 15min",
+                     (9, "-1"): "2026-10-12 09:30 - 10:45 = 1h 15min",
+                     (12, "+1"): "2026-10-13 10:30 - 10:45 = 0h 15min",
+                     (15, "+1"): "2026-10-13 09:35 - 10:45 = 1h 10min",
+                     (16, "-1"): "2026-10-13 09:25 - 10:45 = 1h 20min",
+                     (20, "+1"): "2026-10-13 09:30 - 11:45 = 2h 15min",
+                     (24, "-1"): "2026-10-13 09:30 - 10:40 = 1h 10min",
+                     (40, "+1"): "2026-10-14 09:30 - 10:45 = 1h 15min"}  # on the note: the day
+            for (col, n), head in cases.items():
+                with self.subTest(col=col, n=n):
+                    self.assertEqual(self.shift(n, line, col), head + "  fixed the parser\n")
+                    self.assertEqual(self.read_cache("stamp-col"), f"{col}\n")
+            self.assertEqual(self.shift("+1", line), "2026-10-14" + line[10:])  # no --col: the day
+
+        def test_shift_log_entry_shapes(self):
+            # Running; a bullet; no duration (none is added); a 1-digit hour, which the
+            # cursor follows; an en dash, kept.
+            self.assertEqual(self.shift("+1", "2026-10-13 09:30 -", 12), "2026-10-13 10:30 -")
+            self.assertEqual(self.shift("+1", "- [ ] 2026-10-13 09:30 - 10:45", 18),
+                             "- [ ] 2026-10-13 10:30 - 10:45")
+            self.assertEqual(self.shift("+1", "2026-10-13 9:05 – 10:00 note", 12),
+                             "2026-10-13 10:05 – 10:00 note")
+            self.assertEqual(self.read_cache("stamp-col"), "13\n")
+
+        def test_shift_log_entry_across_midnight(self):
+            # The start takes the date with it; the end is a clock time.
+            self.assertEqual(self.shift("-1", "2026-10-14 00:30 - 01:00 = 0h 30min", 12),
+                             "2026-10-13 23:30 - 01:00 = 1h 30min")
+            self.assertEqual(self.shift("+1", "2026-10-13 23:30 - 23:50 = 0h 20min", 20),
+                             "2026-10-13 23:30 - 00:50 = 1h 20min")
+
+        def test_shifted_log_entry_stays_a_log_entry(self):
+            # Still tl's shape (no weekday added), so it never becomes a reminder,
+            # even moved into the future.
+            out = self.shift("+1", "2026-10-10 10:00 - 10:30 = 0h 30min  note\n", 9)
+            self.assertEqual(out, "2026-10-11 10:00 - 10:30 = 0h 30min  note\n")
+            self.assertIsNotNone(_tl().parse(out.strip())[0])
+            self.put_dedicated("log.md", "# log\n" + out)
+            self.td("tick")
+            self.assertNotIn("would fire", self.td("tick", now_="2026-10-11 10:05"))
 
         def test_shift_no_stamp_or_bad_date_unchanged(self):
             for line in ("- [ ] plain\n", "x 2026-02-30 09:00"):
