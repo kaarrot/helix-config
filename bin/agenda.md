@@ -9,6 +9,33 @@ config files (env vars and defaults):
 Every key, and why each is built the way it is, is in [keys.md](keys.md).
 This file is the design.
 
+## Quick start
+
+Tasks, the agenda and `tl` work anywhere. Reminders need Termux on Android.
+The first time:
+
+1. **Termux:API**: install the Termux:API app from the same place as
+   Termux (F-Droid), and its commands: `pkg install termux-api`. Check that
+   `termux-notification -c hello` shows a notification.
+2. **Build tools** for the alarm helper: `pkg install ecj dx` (about 10 MB;
+   both run on Android's own Java runtime, so no JDK).
+3. **Battery**: in Android's settings, set Termux and Termux:API to
+   *Unrestricted* (Apps → Termux → Battery). On Samsung, also add both to
+   *Never sleeping apps* (Battery → Background usage limits) and turn off
+   *Put unused apps to sleep*, which stops a sleeping app's alarms.
+4. **Install**: `~/.config/helix/bin/td install`. It builds
+   `bin/TdAlarm.java` into `~/.cache/td/td-alarm.jar`, writes the `td-tick`
+   shim, cancels the 15-min job older versions used, and arms the next
+   reminder. Re-run it whenever `bin/TdAlarm.java` changes.
+5. **Try it**: add `- [ ] test 2026-10-14 18:05` to todo.md, with a time a
+   few minutes ahead, save, open the agenda (`space , a`, which arms the
+   alarm), and lock the screen. The notification arrives at that minute. If
+   it doesn't, `~/.cache/td/alarm.log` says why the alarm wasn't set, or run
+   `td tick` in a shell to see it.
+
+Off Termux, `td tick`, `install`, `uninstall` and `fire` refuse and say
+so; `TD_TERMUX=1` forces them on (see [Environment](#environment)).
+
 ## Tasks
 
 ### The inbox
@@ -117,9 +144,9 @@ Except the leading time of a time-log entry (above).
 
 ### When it fires
 
-`td tick` runs every 15 minutes. A reminder fires on the first tick at or
-after its time minus the lead time, `TD_LEAD_MIN` (default 15). Ticks are
-15 minutes apart, so it fires 0–15 minutes before it is due.
+At the stamped minute, minus the lead time `TD_LEAD_MIN` (default 0). An
+exact Android alarm wakes `td tick` then (see below), and the notification
+arrives within about a second, with the screen off too.
 
 A time fires once it is due if a tick saw it in the future (it is then in
 `~/.cache/td/scheduled`), **or** if it was still to come at the previous
@@ -134,49 +161,73 @@ tick, that is, it was added since then (the previous tick's time is in
   skips them. Edit the stamp to a later time and it fires as usual.
 - The price: a time typed by hand after it passed, but after the previous
   tick (a note like "called 10:05" written at 10:10), fires once.
-- A tick delayed by Doze or a reboot still fires what came due meanwhile,
-  however late.
+- A reboot clears the alarm. The next tick (opening the agenda is enough)
+  fires what came due meanwhile, late, and arms the alarm again.
 
-Each (file, time) fires once (`~/.cache/td/fired`). Editing the time makes
-it a new reminder.
+Each reminder (its file, time and line text) fires once
+(`~/.cache/td/fired`). Editing the time makes it a new reminder. Two
+reminders at the same minute both fire, even in one file. A state change
+(`[ ]` → `[Y]`) or a repeater bump keeps the text, so a reminder that has
+fired doesn't fire again. A notification that fails isn't counted as
+fired: it is retried a minute later.
 
 ### How it runs
 
 ```
-  file edit (helix)         Android JobScheduler (every 15m)
-         │                           │
-         ▼                           ▼
-  ~/tasks/*.md ◀──────────── td-tick ──▶ td tick
-                                           │
-                     ┌─ scan + regex ──────┤
-                     │                     │
-                     ▼                     ▼
-                scheduled           fired (dedup)
-              (future gate)              │
-                     │                   ▼
-                     └────────▶ termux-notification + Nudge.wav
+  td list, td edits                Android alarm (exact, owned by Termux)
+  (in the background)                     │
+         │                                ▼
+         └──────────────▶ td tick ◀── td-tick --alarm
+                             │
+              scan ~/tasks/*.md, fire what is due ──▶ termux-notification
+                             │
+                             ▼
+              arm the alarm for the next reminder
 ```
 
-`td install` registers one periodic job with Android's JobScheduler:
-`termux-job-scheduler --job-id 7421 --period-ms 900000 --persisted true`.
-Android owns the timer, so the tick runs with Termux in the background, and
-`--persisted` keeps the job across reboots. 15 minutes is Android's
-minimum. The fixed job id means re-running `td install` replaces the job
-rather than adding one.
+There is one alarm, set for the earliest reminder still to come (its time
+minus the lead) that hasn't fired. Every tick works it out again from the
+files, so adding, moving or closing a reminder just moves the alarm, and
+td keeps no list of alarms to keep in step. When the alarm goes off, its
+tick fires what is due and arms the next one, so the chain walks through
+every reminder in order.
 
-The job runs `~/.config/helix/bin/td-tick`, a two-line shim that
-`td install` writes:
+The alarm comes from `bin/TdAlarm.java`, which `td install` builds into
+`~/.cache/td/td-alarm.jar` (see [Quick start](#quick-start)). td runs it
+under `/system/bin/app_process` as Termux, the way Termux's own `am`
+command runs, and it asks Android's alarm service for a
+`setExactAndAllowWhileIdle` alarm owned by Termux: exact to the second,
+allowed while the phone sleeps, and with no status-bar icon. Termux targets
+an old Android version (SDK 28), so Android 12 asks for no exact-alarm
+permission. When the alarm goes off, Termux runs the shim in the background
+with `--alarm`. 15 s before that, a second alarm makes Termux take its wake
+lock, so the phone can't fall asleep while the tick posts the notification.
+The tick then releases it with `termux-wake-unlock`, which also releases a
+wake lock you took yourself.
+
+A tick also runs in the background, 2 s after `td list` (the agenda keys)
+and the commands that edit tasks: `stamp`, `shift`, `toggle`, `set`,
+`rename`, `file`, `promote` and `new`. So the alarm follows every change
+made with td's keys, and opening the agenda re-arms it after a reboot. The
+2 s let a key's trailing `:update` save the buffer first, and running in
+the background hides the helper's ~1.3 s start-up.
+
+A plain `:w` after a hand edit runs no tick: open the agenda to arm it (or
+run `td tick`). Ticks take `~/.cache/td/tick.lock`, so two at once never
+fire a reminder twice.
+
+The shim is `~/.config/helix/bin/td-tick`, which `td install` writes:
 
 ```sh
 #!/bin/sh
-exec /data/data/com.termux/files/usr/bin/python3 /data/data/com.termux/files/home/.config/helix/bin/td tick
+exec /data/data/com.termux/files/usr/bin/python3 /data/data/com.termux/files/home/.config/helix/bin/td tick "$@"
 ```
 
-It holds no settings (the job doesn't see `.bashrc` exports): the defaults
-live in `td`, so re-running `td install` changes nothing else.
-`space , Enter` runs the same shim, so manual and scheduled ticks behave
-alike. Check the job with `termux-job-scheduler --pending` (expect job
-7421); remove it with `td uninstall`.
+It holds no settings (a tick from the alarm doesn't see `.bashrc`
+exports): the defaults live in `td`, so re-running `td install` changes
+nothing else. Older versions ran it from a 15-min JobScheduler job (id
+7421); `td install` cancels that job. `td uninstall` cancels the alarm and
+removes the shim.
 
 Each tick:
 
@@ -186,11 +237,14 @@ Each tick:
 3. **Fires** each time that is due (minus the lead), not yet in `fired`,
    and in `scheduled` or added since the previous tick, then adds it to
    `fired` and saves this tick's time in `last-tick`.
+4. **Arms** the alarm for the earliest time still to come, or a minute from
+   now when a notification failed, or cancels it when nothing is left. A
+   failure to arm goes to `alarm.log`, and `td tick` in a shell prints it.
 
 The notification is titled `TODO`. Its text is the bullet's text, or the
-task file's first heading (its name if it has none). Tapping it opens the
-file (needs the Termux:API app), and `~/dotemacs/Nudge.wav` plays if it
-exists.
+task file's first heading (its name if it has none). It plays the
+notification sound, and tapping it opens the file (needs the Termux:API
+app).
 
 ## The agenda
 
@@ -273,9 +327,9 @@ is `++0d` (it would never move), so those lines are just marked done.
 
 | command | does |
 |---------|------|
-| `td install` | write the `td-tick` shim, register job 7421 (every 15 min) |
-| `td uninstall` | cancel the job, remove the shim |
-| `td tick` | what the job runs: scan, record future times, fire due ones |
+| `td install` | build the alarm helper, write the `td-tick` shim, cancel the old job 7421, arm the next reminder |
+| `td uninstall` | cancel the alarm (and the old job), remove the shim |
+| `td tick` | scan, record future times, fire due ones, arm the alarm for the next one; `--alarm` (from the alarm) also releases the wake lock |
 | `td list [--state todo\|today\|active\|waiting\|all] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout, and the options to `~/.cache/td/agenda-args` |
 | `td promote [--from PATH:LINE]` | stdin: a line. Create or reuse the bullet's task file (not from the agenda), then print where `space , P` goes and write it to `~/.cache/td/open` |
 | `td jump [--from PATH:LINE]` | stdin: a line. Print where `space , p` goes and write it to `~/.cache/td/open` |
@@ -293,8 +347,15 @@ is `++0d` (it would never move), so those lines are just marked done.
 ## Cache files
 
 Under `~/.cache/td/`. The task files are the source of truth; these only
-remember what `td` has seen. Reminders are keyed by (file, time), tasks by
-(file, text without its stamp).
+remember what `td` has seen. Reminders are keyed by (file, time, line text
+without its checkbox or stamp), tasks by (file, text without its stamp).
+
+None of them grows for ever. The first tick of each day drops the
+`fired`, `scheduled` and `stamped-now` rows (and `alarm.log` lines) more
+than 7 days past. A tick has run after those times, so they can't fire
+again, even if the reminder is still in a file. Building the agenda keeps
+one `added` and one `changed` row per task that still exists. The other
+files are rewritten each time.
 
 | file | holds |
 |------|-------|
@@ -308,6 +369,9 @@ remember what `td` has seen. Reminders are keyed by (file, time), tasks by
 | `agenda-args` | the `td list` options the agenda was built with, reused when a change rebuilds it |
 | `stamp-col` | the cursor column for `space , s`, `+` and `-` |
 | `open` | where `space , p` / `P` go next |
+| `td-alarm.jar` | the alarm helper `td install` builds from `bin/TdAlarm.java` |
+| `alarm.log` | failures to arm the alarm: `when  could not arm TIME: why` |
+| `tick.lock` | held while a tick runs |
 
 ## Environment
 
@@ -315,17 +379,24 @@ remember what `td` has seen. Reminders are keyed by (file, time), tasks by
 |-----|---------|--------|
 | `TL_DIR` | `~/tasks` | the task folder |
 | `TD_FILE` | `$TL_DIR/todo.md` | the inbox |
-| `TD_LEAD_MIN` | `15` | fire this many minutes before the stamped time; 15 is one tick, so a reminder fires on the last tick before it is due. `0` fires 0–15 minutes after |
+| `TD_LEAD_MIN` | `0` | fire this many minutes before the stamped time |
 | `TL_NOW` | (unset) | fake clock, `YYYY-MM-DD HH:MM`, for tests |
-| `TD_DRY_RUN` | (unset) | `1` prints `would fire: …` instead of notifying |
+| `TD_DRY_RUN` | (unset) | `1` prints `would fire: …` and `would arm: …` instead of notifying and arming |
+| `TD_TERMUX` | detected | `1` on Termux (its Python lives under `com.termux`), else `0`. Reminders (`tick`, `install`, `uninstall`, `fire`) need it; elsewhere they refuse and only the reminders are off |
 
 ## Failure modes
 
-- **Doze, airplane mode, reboot** — the tick runs late but fires everything
-  that came due meanwhile. To keep delays short, set Termux to
-  *unrestricted* in Android's battery settings.
-- **DST spring-forward (02:30 skipped)** — fires on the next tick after
-  03:00.
+- **Reboot, or Termux force-stopped** — the alarm is gone until the next
+  tick (open the agenda), which fires what came due meanwhile, late, and
+  arms it again.
+- **Termux put to sleep** — Android, and Samsung especially, can stop a
+  sleeping app's alarms. Keep Termux and Termux:API unrestricted (see
+  [Quick start](#quick-start)).
+- **A failed arm** (helper missing, Android refused): logged in
+  `~/.cache/td/alarm.log`, and the chain stops until the next tick
+  arms it. `td tick` in a shell prints the error.
+- **DST spring-forward (02:30 skipped)** — fires at 03:30, when the
+  alarm's absolute time comes round.
 - **DST fall-back (02:30 twice)** — `fired` makes it fire once.
 - **A renamed bullet** — its task file becomes a file task or an orphan;
   rename the file to the new slug (or the bullet back) to relink.

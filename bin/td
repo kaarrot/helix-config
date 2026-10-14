@@ -26,11 +26,16 @@ Two tiers of tasks:
       notes/subtasks...
 
 Commands:
-  td install           register a 15-min termux-job-scheduler job that runs `td tick`
-  td uninstall         cancel it
+  td install           build the alarm helper (bin/TdAlarm.java, needs
+                       `pkg install ecj dx`), write the `td-tick` shim, drop
+                       the old 15-min job, and arm the first reminder
+  td uninstall         cancel the alarm (and any old job), remove the shim
   td tick              scan files, record future timestamps, fire due ones
                        (also ones added since the previous tick, unless
-                       `td stamp` wrote them as "now")
+                       `td stamp` wrote them as "now"), then arm one exact
+                       Android alarm for the next one. `td list` and the
+                       commands that edit tasks start a tick in the
+                       background when they finish, so the alarm follows.
   td list [--state todo|today|active|waiting|all] [--sort added|modified]
                        build the agenda from $TD_FILE bullets; write to
                        ~/.cache/td/agenda.md (read-only: it is a view) and
@@ -115,15 +120,23 @@ Commands:
 
 Env: $TL_DIR (default ~/tasks), $TD_FILE (default $TL_DIR/todo.md),
      $TL_NOW="YYYY-MM-DD HH:MM" fakes the clock,
-     $TD_LEAD_MIN (default 15: one tick, so reminders fire before they are due),
-     $TD_DRY_RUN=1 skips notifications and prints "would fire: ..." instead.
+     $TD_LEAD_MIN (default 0) fires that many minutes early,
+     $TD_DRY_RUN=1 skips notifications and alarms and prints "would fire: ..."
+     and "would arm: ..." instead,
+     $TD_TERMUX=1/0 says whether this is Termux (default: detected).
+     Reminders (tick, install, fire) need Termux; elsewhere they refuse.
 """
+import atexit
 import calendar
+import fcntl
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -189,6 +202,18 @@ COL_PATH = CACHE / "stamp-col"
 # Where `space , p` / `P` go: td jump/promote write it, the key :opens it.
 OPEN_PATH = CACHE / "open"
 TICK_SHIM = Path("~/.config/helix/bin/td-tick").expanduser()
+TICK_LOCK = CACHE / "tick.lock"
+# The reminder alarm (see bin/TdAlarm.java): built by `td install`, run
+# under app_process. Arming failures go to the log, since they stop the
+# chain of alarms until the next tick.
+ALARM_SRC = Path(__file__).resolve().parent / "TdAlarm.java"
+ALARM_JAR = CACHE / "td-alarm.jar"
+ALARM_LOG = CACHE / "alarm.log"
+# Reminders use Termux:API notifications and Android alarms, so they only
+# run on Termux (Termux's Python lives under com.termux). TD_TERMUX
+# overrides the check.
+TERMUX = os.environ.get(
+    "TD_TERMUX", "1" if "com.termux" in sys.prefix else "0") == "1"
 
 LEGEND = ("# td VIEW ONLY (status keys change the task itself; space , p "
           "goes there): [ ] todo  [Y] today  [A] active  [W] waiting")
@@ -267,9 +292,20 @@ def bullet_hash(path, text):
     return h.hexdigest()[:16]
 
 
-def schedule_hash(path, due_iso):
-    h = hashlib.sha1(f"{path}\t{due_iso}".encode("utf-8", "surrogateescape"))
+def schedule_hash(path, due_iso, text):
+    """A reminder's key: its file, due time, and line (see stamp_text), so
+    two reminders at the same minute in one file are two reminders."""
+    h = hashlib.sha1(f"{path}\t{due_iso}\t{text}".encode(
+        "utf-8", "surrogateescape"))
     return h.hexdigest()[:16]
+
+
+def stamp_text(path, lineno, raw):
+    """The line a reminder's key holds: a bullet's text without its
+    checkbox, link, marker or trailing stamp (as bullet_hash), else the line
+    itself. So toggling a state or a repeater bump keeps the text."""
+    b = parse_bullet(path, lineno, raw)
+    return _identity_text(b.text if b else raw)
 
 
 def _add_period(d, n, unit):
@@ -415,7 +451,8 @@ def scan_schedules():
                 continue
             iso = due.isoformat(timespec="minutes")
             out.append(Scheduled(f, i, due, line_title,
-                                 schedule_hash(str(f), iso)))
+                                 schedule_hash(str(f), iso,
+                                               stamp_text(f, i, raw))))
     return out
 
 
@@ -432,6 +469,54 @@ def _append_sidecar(path, rows):
     with path.open("a", encoding="utf-8", errors="surrogateescape") as f:
         for row in rows:
             f.write("\t".join(str(x) for x in row) + "\n")
+
+
+def _rewrite_sidecar(path, lines):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("".join(line + "\n" for line in lines),
+                   encoding="utf-8", errors="surrogateescape")
+    os.replace(tmp, path)
+
+
+def _drop_lines(path, old):
+    """Rewrite sidecar `path` without the lines old(line) is true for."""
+    lines = _read_sidecar(path)
+    keep = [line for line in lines if not old(line)]
+    if len(keep) != len(lines):
+        _rewrite_sidecar(path, keep)
+
+
+# Reminder rows are kept this long after they were due. By then a tick has
+# run after their time, so they can't fire again (see _tick), and dropping
+# them keeps the sidecars from growing forever.
+KEEP_DAYS = 7
+
+
+def prune_reminders(t):
+    """Drop `fired`, `scheduled` and `stamped-now` rows due over KEEP_DAYS
+    before t, and alarm.log lines older than that. Run by the first tick
+    of a day, after it has fired what is due."""
+    cutoff = (t - timedelta(days=KEEP_DAYS)).isoformat(timespec="minutes")
+    for path, col in ((FIRED_PATH, 0), (SCHEDULED_PATH, 2),
+                      (STAMPED_NOW_PATH, 1)):
+        _drop_lines(path, lambda line, col=col: (
+            len(line.split("\t")) > col and line.split("\t")[col] < cutoff))
+    _drop_lines(ALARM_LOG, lambda line: line[:16] < cutoff)
+
+
+def compact_task_rows(live):
+    """Keep one row per task hash in `added` and `changed`: the last, which
+    the loaders read, and only for the hashes in `live` (the tasks the
+    agenda found). Deleted tasks and old edits drop out."""
+    for path in (ADDED_PATH, CHANGED_PATH):
+        lines = _read_sidecar(path)
+        last = {}
+        for line in lines:
+            parts = line.split("\t")
+            if len(parts) >= 2 and parts[1] in live:
+                last[parts[1]] = line
+        if len(last) != len(lines):
+            _rewrite_sidecar(path, list(last.values()))
 
 
 def load_fired():
@@ -540,25 +625,117 @@ def load_stamped_now():
 # ---------------------------------------------------------------- fire
 
 def fire_notification(title, body, open_path):
+    """-> True when the notification was posted."""
     if os.environ.get("TD_DRY_RUN") == "1":
         print(f"would fire: {tilde(open_path)}  {title}: {body}")
+        return True
+    try:
+        r = subprocess.run(["termux-notification",
+                            "--title", title,
+                            "--content", body,
+                            "--sound",
+                            "--action", f"termux-open {open_path}"],
+                           check=False)
+    except OSError:
+        return False
+    return r.returncode == 0
+
+
+def _need_termux(cmd):
+    if not TERMUX:
+        sys.exit(f"td {cmd}: reminders need Termux (Termux:API notifications"
+                 " and Android alarms); TD_TERMUX=1 forces it")
+
+
+def _log_alarm(msg):
+    try:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        with ALARM_LOG.open("a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat(timespec='seconds')}  {msg}\n")
+    except OSError:
+        pass
+
+
+def _run_alarm(*args):
+    """Run TdAlarm under app_process (as $PREFIX/bin/am does). -> error
+    text, or None when it worked."""
+    if not ALARM_JAR.is_file():
+        return f"{tilde(ALARM_JAR)} missing: run td install"
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("LD_PRELOAD", "LD_LIBRARY_PATH")}
+    env["CLASSPATH"] = str(ALARM_JAR)
+    try:
+        r = subprocess.run(["/system/bin/app_process", "-Xnoimage-dex2oat",
+                            "/", "TdAlarm", *args],
+                           env=env, capture_output=True, text=True)
+    except OSError as e:
+        return str(e)
+    if r.returncode != 0:
+        return (r.stderr.strip() or f"exit {r.returncode}").splitlines()[-1]
+    return None
+
+
+def arm(at):
+    """Point the one reminder alarm at datetime `at`, or cancel it (None).
+    -> error text, or None."""
+    when = at.strftime("%Y-%m-%d %H:%M:%S") if at else None
+    if os.environ.get("TD_DRY_RUN") == "1":
+        print(f"would arm: {when}" if at else "would arm: nothing")
+        return None
+    if at:
+        err = _run_alarm("set", str(TICK_SHIM), str(int(at.timestamp() * 1000)))
+    else:
+        err = _run_alarm("cancel", str(TICK_SHIM))
+    if err:
+        _log_alarm(f"could not arm {when or 'nothing'}: {err}")
+    return err
+
+
+def _tick_later():
+    """Start a detached `td tick --later` (see main): stdio to /dev/null
+    and a new session, so a :pipe key doesn't wait for it."""
+    if not TERMUX or os.environ.get("TD_DRY_RUN") == "1":
         return
-    subprocess.run(["termux-notification",
-                    "--title", title,
-                    "--content", body,
-                    "--sound",
-                    "--action", f"termux-open {open_path}"], check=False)
-    nudge = Path("~/dotemacs/Nudge.wav").expanduser()
-    if nudge.exists():
-        subprocess.run(["termux-media-player", "play", str(nudge)],
-                       check=False, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
+    try:
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
+                          "tick", "--later"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- commands
 
-def cmd_tick():
-    """Fire scheduled items.
+def cmd_tick(args=()):
+    """Fire scheduled items (see _tick), then arm the alarm for the next.
+
+    A tick runs from that alarm (`--alarm`: then it releases the wake lock
+    the alarm took), and in the background after `td list` and the
+    commands that edit tasks (`--later`: it waits 2 s, so
+    a key's trailing :update has saved the buffer). Ticks take a lock, so
+    two at once never fire a reminder twice."""
+    _need_termux("tick")
+    try:
+        if "--later" in args:
+            time.sleep(2)
+        CACHE.mkdir(parents=True, exist_ok=True)
+        with TICK_LOCK.open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            err = _tick()
+    finally:
+        if "--alarm" in args and os.environ.get("TD_DRY_RUN") != "1":
+            subprocess.run(["termux-wake-unlock"], check=False,
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+    if err:
+        print(f"td tick: could not arm the alarm: {err}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _tick():
+    """Fire scheduled items, and arm the alarm for the next one.
 
     An item fires once it is due or past-due, if either:
       • it was observed as future on a prior tick (recorded in the
@@ -574,19 +751,21 @@ def cmd_tick():
     `tl` log entries are excluded by find_stamp(). Old past-date mentions
     never fire: they were already past at the previous tick. The cost of
     catching late additions: a time typed by hand after it passed, within
-    one tick interval, fires once. Missed fires across Doze / reboots still
-    fire on the next tick, however late."""
+    one tick interval, fires once. Missed fires across reboots still fire
+    on the next tick, however late. A notification that fails is not
+    recorded as fired: it is kept in `scheduled` and retried a minute later.
+
+    Then the one exact alarm (see arm) is pointed at the earliest future
+    `due − lead` not yet fired, or cancelled when nothing is left."""
     t = now()
-    # Default one tick period (15 min), so a reminder fires on the last tick
-    # before it is due rather than up to 15 min after.
-    lead = timedelta(minutes=int(os.environ.get("TD_LEAD_MIN", "15")))
+    lead = timedelta(minutes=int(os.environ.get("TD_LEAD_MIN", "0")))
     items = scan_schedules()
-    update_added([(s.hash, s.title) for s in items], t.isoformat(timespec="minutes"))
     scheduled = load_scheduled()
     fired = load_fired()
     last_tick = load_last_tick()
     stamped_now = load_stamped_now()
     new_scheduled = []
+    failed = False
     for s in items:
         due_iso = s.due.isoformat(timespec="minutes")
         fire_at = s.due - lead
@@ -606,13 +785,27 @@ def cmd_tick():
                 continue
         if key in fired:
             continue
-        fire_notification("TODO", s.title, s.path)
-        _append_sidecar(FIRED_PATH, [(due_iso, s.hash, s.title[:80])])
-        fired.add(key)
+        if fire_notification("TODO", s.title, s.path):
+            _append_sidecar(FIRED_PATH, [(due_iso, s.hash, s.title[:80])])
+            fired.add(key)
+        else:
+            failed = True
+            if key not in scheduled:
+                # Past due by the next tick: only `scheduled` lets it retry.
+                new_scheduled.append((t.isoformat(timespec="minutes"),
+                                      s.hash, due_iso, s.title[:80]))
+                scheduled.add(key)
     if new_scheduled:
         _append_sidecar(SCHEDULED_PATH, new_scheduled)
+    if last_tick is None or last_tick.date() != t.date():
+        prune_reminders(t)
     save_last_tick(t)
-    return 0
+    upcoming = [s.due - lead for s in items
+                if s.due - lead > t
+                and (s.hash, s.due.isoformat(timespec="minutes")) not in fired]
+    if failed:
+        upcoming.append(t + timedelta(minutes=1))
+    return arm(min(upcoming) if upcoming else None)
 
 
 def _parse_list_args(args):
@@ -709,6 +902,9 @@ def build_list(args):
     update_added([(b.hash, b.text) for b in bullets], when)
     added = load_added()
     changed = update_changed(bullets, when, added)
+    if inbox.is_file():
+        # Not when the inbox is missing (mid-sync, say): every row would go.
+        compact_task_rows({b.hash for b in bullets})
     kept = [b for b in bullets if b.state in VISIBLE
             and (state == "all" or STATE_NAMES[b.state] == state)]
     if sort == "modified":
@@ -1593,10 +1789,12 @@ def cmd_fire(args):
     if not path.is_file():
         sys.exit(f"no such file: {path}")
     lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines()
+    _need_termux("fire")
     title = path.stem
     title_found = False
     due = None
-    for raw in lines:
+    text = ""
+    for i, raw in enumerate(lines, 1):
         hm = H1.match(raw)
         if hm and not title_found:
             title = hm[1]; title_found = True
@@ -1605,55 +1803,88 @@ def cmd_fire(args):
             if ts:
                 try:
                     due = datetime.strptime(f"{ts[1]} {ts[2]}", "%Y-%m-%d %H:%M")
+                    text = stamp_text(path, i, raw)
                 except ValueError:
                     pass
-    fire_notification("TODO", title, path)
+    if not fire_notification("TODO", title, path):
+        sys.exit("td fire: termux-notification failed")
     due_iso = (due or now()).isoformat(timespec="minutes")
-    _append_sidecar(FIRED_PATH,
-                    [(due_iso, schedule_hash(str(path), due_iso), title[:80])])
+    _append_sidecar(FIRED_PATH, [(due_iso, schedule_hash(str(path), due_iso, text),
+                                  title[:80])])
     return 0
 
 
-def cmd_install():
-    TICK_SHIM.parent.mkdir(parents=True, exist_ok=True)
-    TICK_SHIM.write_text(
-        f"#!/bin/sh\nexec {sys.executable} {Path(__file__).resolve()} tick\n")
-    TICK_SHIM.chmod(0o755)
-    subprocess.run(["termux-job-scheduler", "--cancel", str(JOB_ID)],
+def build_alarm():
+    """Compile bin/TdAlarm.java into ALARM_JAR with ecj and dx (both run on
+    Android's own runtime: no JDK). -> error text, or None."""
+    missing = [t for t in ("ecj", "dx") if not shutil.which(t)]
+    if missing:
+        return f"needs {' and '.join(missing)}: pkg install ecj dx"
+    CACHE.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as out:
+        for step in (["ecj", "-nowarn", "-d", out, str(ALARM_SRC)],
+                     ["dx", "--dex", f"--output={ALARM_JAR}", out]):
+            r = subprocess.run(step, capture_output=True, text=True)
+            if r.returncode != 0:
+                return f"{step[0]} failed:\n{r.stdout}{r.stderr}".rstrip()
+    return None
+
+
+def _cancel_job():
+    """Drop the 15-min job older td versions registered."""
+    subprocess.run(["termux-job-scheduler", "--cancel", "--job-id", str(JOB_ID)],
                    check=False, stdout=subprocess.DEVNULL,
                    stderr=subprocess.DEVNULL)
-    r = subprocess.run([
-        "termux-job-scheduler",
-        "--job-id", str(JOB_ID),
-        "--script", str(TICK_SHIM),
-        "--period-ms", "900000",
-        "--persisted", "true",
-    ])
-    if r.returncode != 0:
-        return r.returncode
-    print(f"td: installed, job-id {JOB_ID}, every 15 min, shim at {tilde(TICK_SHIM)}")
+
+
+def cmd_install():
+    _need_termux("install")
+    err = build_alarm()
+    if err:
+        sys.exit(f"td install: {err}")
+    TICK_SHIM.parent.mkdir(parents=True, exist_ok=True)
+    TICK_SHIM.write_text(f"#!/bin/sh\nexec {sys.executable} "
+                         f"{Path(__file__).resolve()} tick \"$@\"\n")
+    TICK_SHIM.chmod(0o755)
+    _cancel_job()
+    if cmd_tick() != 0:
+        sys.exit(f"td install: see {tilde(ALARM_LOG)}")
+    print(f"td: installed: alarm helper {tilde(ALARM_JAR)}, shim "
+          f"{tilde(TICK_SHIM)}; the next reminder is armed (td next)")
     return 0
 
 
 def cmd_uninstall():
-    subprocess.run(["termux-job-scheduler", "--cancel", str(JOB_ID)],
-                   check=False, stdout=subprocess.DEVNULL,
-                   stderr=subprocess.DEVNULL)
+    _need_termux("uninstall")
+    _cancel_job()
+    if ALARM_JAR.is_file():
+        err = _run_alarm("cancel", str(TICK_SHIM))
+        if err:
+            print(f"td: could not cancel the alarm: {err}", file=sys.stderr)
     if TICK_SHIM.exists():
         TICK_SHIM.unlink()
-    print(f"td: uninstalled, job-id {JOB_ID}")
+    print("td: uninstalled: alarm cancelled, shim removed")
     return 0
+
+
+# After these, a background tick re-arms the alarm: they may have moved,
+# added or closed a reminder, and opening the agenda (`list`) re-arms it
+# after a reboot.
+RETICK = {"list", "new", "file", "rename", "stamp", "shift", "promote", "set",
+          "toggle"}
 
 
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
     rest = argv[2:]
+    if cmd in RETICK:
+        atexit.register(_tick_later)
     if cmd == "install":
         return cmd_install()
     if cmd == "uninstall":
         return cmd_uninstall()
     if cmd == "tick":
-        return cmd_tick()
+        return cmd_tick(rest)
     if cmd == "list":
         return cmd_list(rest)
     if cmd == "next":
@@ -1716,12 +1947,19 @@ def run_tests(verbose=False):
 
         def td(self, *args, stdin="", now_=NOW, **env):
             """Run td. Lead time 0 unless given; an env value None unsets it."""
+            return self.td_run(*args, stdin=stdin, now_=now_, check=True,
+                               **env).stdout.decode("utf-8", "surrogateescape")
+
+        def td_run(self, *args, stdin="", now_=NOW, check=False, **env):
+            """Run td -> CompletedProcess. As if on Termux unless TD_TERMUX
+            is given."""
             e = {**os.environ, "HOME": str(self.home), "TL_DIR": str(self.tasks),
-                 "TL_NOW": now_, "TD_DRY_RUN": "1", "TD_LEAD_MIN": "0", **env}
+                 "TL_NOW": now_, "TD_DRY_RUN": "1", "TD_LEAD_MIN": "0",
+                 "TD_TERMUX": "1", **env}
             e = {k: v for k, v in e.items() if v is not None}
-            r = sp.run([sys.executable, TD, *args], env=e, capture_output=True,
-                       input=stdin.encode("utf-8", "surrogateescape"), check=True)
-            return r.stdout.decode("utf-8", "surrogateescape")
+            return sp.run([sys.executable, TD, *args], env=e, capture_output=True,
+                          input=stdin.encode("utf-8", "surrogateescape"),
+                          check=check)
 
         def read_cache(self, name):
             p = self.cache / name
@@ -1875,6 +2113,20 @@ def run_tests(verbose=False):
             self.touch(notes, "2026-10-10 10:00")
             out = self.td("list", "--sort", "modified", now_="2026-10-10 11:25")
             self.assertLess(out.index("bravo"), out.index("alpha"))
+
+        def test_added_and_changed_keep_one_row_per_task(self):
+            # Edits and deleted tasks don't pile up rows; order survives.
+            p = self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
+            self.td("list")
+            p.write_text("- [Y] alpha\n- [ ] bravo\n")
+            self.td("list", now_="2026-10-10 11:10")
+            p.write_text("- [ ] charlie\n- [ ] alpha\n")
+            out = self.td("list", now_="2026-10-10 11:20")
+            self.assertLess(out.index("charlie"), out.index("alpha"))
+            for name in ("added", "changed"):
+                rows = self.read_cache(name).splitlines()
+                self.assertEqual(len(rows), 2, name)
+                self.assertFalse(any("bravo" in r for r in rows), name)
 
         def test_changed_sidecar_steady_with_duplicate_bullets(self):
             # Same identity, different states: recorded once, not on every run.
@@ -2065,14 +2317,137 @@ def run_tests(verbose=False):
             out = self.td("tick", now_="2026-10-10 12:00")
             self.assertIn("renew passport", out)
 
-        def test_lead_defaults_to_one_tick(self):
-            # TD_LEAD_MIN unset: 15 min, so due 11:10 fires at 11:00 (10:55).
+        def test_lead_defaults_to_zero(self):
+            # TD_LEAD_MIN unset: the alarm fires at the stamped minute.
             self.put_dedicated("rent.md", "# rent\n2026-10-10 11:10\n")
-            self.td("tick", now_="2026-10-10 10:00", TD_LEAD_MIN=None)
-            out = self.td("tick", now_="2026-10-10 10:50", TD_LEAD_MIN=None)
+            out = self.td("tick", now_="2026-10-10 10:00", TD_LEAD_MIN=None)
+            self.assertIn("would arm: 2026-10-10 11:10:00", out)
+            out = self.td("tick", now_="2026-10-10 11:09", TD_LEAD_MIN=None)
             self.assertNotIn("would fire", out)
-            out = self.td("tick", TD_LEAD_MIN=None)
+            out = self.td("tick", now_="2026-10-10 11:10", TD_LEAD_MIN=None)
             self.assertIn("would fire", out)
+
+        def test_arms_the_nearest_unfired(self):
+            self.put_dedicated("a.md", "# a\n2026-10-10 12:00\n")
+            self.put_dedicated("b.md", "# b\n2026-10-10 13:00\n")
+            self.assertIn("would arm: 2026-10-10 12:00:00", self.td("tick"))
+            out = self.td("tick", now_="2026-10-10 12:00")
+            self.assertIn("would fire", out)
+            self.assertIn("would arm: 2026-10-10 13:00:00", out)
+            out = self.td("tick", now_="2026-10-10 13:00")
+            self.assertIn("would arm: nothing", out)
+
+        def test_arms_lead_minutes_early(self):
+            self.put_dedicated("a.md", "# a\n2026-10-10 12:00\n")
+            out = self.td("tick", TD_LEAD_MIN="15")
+            self.assertIn("would arm: 2026-10-10 11:45:00", out)
+
+        def test_new_earlier_reminder_moves_the_alarm(self):
+            p = self.put_inbox("- [ ] late 2026-10-10 14:00\n")
+            self.assertIn("would arm: 2026-10-10 14:00:00", self.td("tick"))
+            p.write_text("- [ ] late 2026-10-10 14:00\n"
+                         "- [ ] soon 2026-10-10 11:30\n")
+            self.assertIn("would arm: 2026-10-10 11:30:00",
+                          self.td("tick", now_="2026-10-10 11:05"))
+            # Marked done: the alarm moves back to the one left.
+            p.write_text("- [ ] late 2026-10-10 14:00\n"
+                         "- [x] soon 2026-10-10 11:30\n")
+            self.assertIn("would arm: 2026-10-10 14:00:00",
+                          self.td("tick", now_="2026-10-10 11:10"))
+
+        def test_same_minute_in_one_file_both_fire(self):
+            self.put_inbox("- [ ] call mum 2026-10-10 18:00\n"
+                           "- [ ] water plants 2026-10-10 18:00\n")
+            self.put_dedicated("trip.md", "# trip\npack 2026-10-10 18:00\n"
+                               "book taxi 2026-10-10 18:00\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 18:00")
+            self.assertEqual(out.count("would fire"), 4)
+            self.assertIn("call mum", out)
+            self.assertIn("water plants", out)
+            again = self.td("tick", now_="2026-10-10 18:05")
+            self.assertNotIn("would fire", again)
+
+        def test_state_change_keeps_the_key(self):
+            # [ ] → [Y] after firing: the same reminder, not a new one.
+            p = self.put_inbox("- [ ] pay rent 2026-10-10 12:00\n")
+            self.td("tick")
+            self.td("tick", now_="2026-10-10 12:00")
+            p.write_text("- [Y] pay rent 2026-10-10 12:00\n")
+            out = self.td("tick", now_="2026-10-10 12:00")
+            self.assertNotIn("would fire", out)
+
+        def test_recurring_fires_each_time(self):
+            # Fires, is marked done (bumps a day), fires again the next day.
+            p = self.put_inbox("- [ ] pills 2026-10-10 Sat 12:00 ++1d\n"
+                               "- [ ] plants 2026-10-10 Sat 12:00 ++1d\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 12:00")
+            self.assertEqual(out.count("would fire"), 2)
+            for line in (1, 2):
+                self.td("toggle", "x", "--from", str(p), "--line", str(line),
+                        now_="2026-10-10 12:30")
+            self.assertEqual(p.read_text(),
+                             "- [ ] pills 2026-10-11 Sun 12:00 ++1d\n"
+                             "- [ ] plants 2026-10-11 Sun 12:00 ++1d\n")
+            out = self.td("tick", now_="2026-10-10 12:35")
+            self.assertNotIn("would fire", out)
+            self.assertIn("would arm: 2026-10-11 12:00:00", out)
+            out = self.td("tick", now_="2026-10-11 12:00")
+            self.assertEqual(out.count("would fire"), 2)
+
+        def test_failed_notification_retries(self):
+            # termux-notification fails: not recorded as fired, the alarm
+            # retries a minute later, and the retry fires it.
+            fake = self.home / "bin"
+            fake.mkdir()
+            notify = fake / "termux-notification"
+            notify.write_text("#!/bin/sh\nexit 1\n")
+            notify.chmod(0o755)
+            path = f"{fake}:{os.environ['PATH']}"
+            self.put_inbox("- [ ] call back 2026-10-10 11:05\n")
+            self.td("tick")
+            self.td_run("tick", now_="2026-10-10 11:05", TD_DRY_RUN=None,
+                        PATH=path)
+            self.assertEqual(self.read_cache("fired"), "")
+            # No helper in this HOME, so the arm is logged as failed.
+            self.assertIn("could not arm 2026-10-10 11:06:00",
+                          self.read_cache("alarm.log"))
+            notify.write_text("#!/bin/sh\nexit 0\n")
+            self.td_run("tick", now_="2026-10-10 11:06", TD_DRY_RUN=None,
+                        PATH=path)
+            self.assertIn("call back", self.read_cache("fired"))
+
+        def test_prunes_reminder_rows_a_week_after_due(self):
+            # The first tick of a day drops rows due over 7 days earlier;
+            # the old reminder, still in the file, doesn't fire again.
+            self.put_inbox("- [ ] old 2026-10-01 12:00\n"
+                           "- [ ] recent 2026-10-08 12:00\n")
+            self.td("tick", now_="2026-10-01 11:00")
+            self.td("stamp", stdin="- [ ] did\n", now_="2026-10-01 11:07")
+            self.td("tick", now_="2026-10-01 12:00")
+            self.td("tick", now_="2026-10-08 12:00")
+            self.cache.joinpath("alarm.log").write_text(
+                "2026-10-01T09:00:00  could not arm old\n"
+                "2026-10-08T09:00:00  could not arm recent\n")
+            self.td("tick", now_="2026-10-09 09:00")
+            for name in ("fired", "scheduled"):
+                self.assertNotIn("old", self.read_cache(name), name)
+                self.assertIn("recent", self.read_cache(name), name)
+            self.assertEqual(self.read_cache("stamped-now"), "")
+            self.assertEqual(self.read_cache("alarm.log"),
+                             "2026-10-08T09:00:00  could not arm recent\n")
+            self.assertNotIn("would fire",
+                             self.td("tick", now_="2026-10-09 10:00"))
+            # Ticks don't write `added` (it orders the agenda's tasks).
+            self.assertEqual(self.read_cache("added"), "")
+
+        def test_reminders_need_termux(self):
+            self.put_inbox("- [ ] call 2026-10-10 12:00\n")
+            r = self.td_run("tick", TD_TERMUX="0")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn(b"need Termux", r.stderr)
+            self.assertIn("call", self.td("list", TD_TERMUX="0"))
 
         def test_active_dedicated_file_fires(self):
             self.put_dedicated("renew-passport.md",

@@ -64,7 +64,6 @@ left out). Renaming the bullet unlinks it from its file.
 | `P` | **Give the task a file.** Saves, then creates `~/tasks/<slug>.md` for the bullet, with a heading `# [S] title` that carries the bullet's state, and opens it. An existing file is reused and its heading's state updated. On an agenda row it only opens the row's file, if any. Works on a bullet you have just typed, saved or not |
 | `x` | **Done.** Toggles `[ ]` ↔ `[x]`. If the line has a repeater after its stamp, `++Nu` or `.+Nu` (N a number, u = `d`/`w`/`m`/`y`), the date moves instead and the bullet stays `[ ]`: `++1m` moves it a month at a time until it is in the future (rent on the 1st), `.+2w` sets it to today + 2 weeks (water the plants). See [Status keys in other files](#status-keys-in-other-files) |
 | `s` | **Stamp.** On a line with no date, adds today's date and the current time at the end: `2026-10-13 Tue 09:30`. On a line with one, changes its date to today and keeps the time. With the cursor on the date (after editing it by hand), keeps the date and only fixes the weekday. A time-log entry's leading time is history, so a fresh stamp is added at the end. A stamp of "now" never fires a reminder; edit it to a later time and it will |
-| `Enter` | **Check reminders now.** Saves, then runs the same check as the 15-minute job (`td-tick`) |
 | `, y` | Toggle `[ ]` ↔ `[Y]` (today) |
 | `, a` | Toggle `[ ]` ↔ `[A]` (active) |
 | `, w` | Toggle `[ ]` ↔ `[W]` (waiting) |
@@ -144,9 +143,9 @@ the next one starts:
   command runs.
 
 So the keys that work on the current line use only the last kind, and
-`td` gets the line from the buffer, never from the file on disk. `l` and
-`Enter` save and then run `:sh`, both in the background; the save is quick
-next to starting Python, so they see the saved file in practice.
+`td` gets the line from the buffer, never from the file on disk. `l` saves
+and then runs `:sh`, both in the background; the save is quick next to
+starting Python, so it sees the saved file in practice.
 
 - **Status keys, `x`, `s`, `+`, `-`:** `extend_to_line_bounds` selects the
   line, and `:pipe` sends it through `td` and puts the result in its place,

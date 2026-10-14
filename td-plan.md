@@ -139,8 +139,9 @@ No catchup window — the `scheduled` sidecar is the whole story. A missed fire 
 ```
 termux-notification --title "TODO" --content "<task text>" --sound \
     --action "termux-open <file>"
-termux-media-player play ~/dotemacs/Nudge.wav   # only if the file exists
 ```
+
+Only the notification sound plays (no extra `Nudge.wav`).
 
 Tapping the notification opens the task file in your default viewer.
 
@@ -288,7 +289,7 @@ EOF
 
 # 3. Dry-fire the scheduler
 ~/.config/helix/bin/td tick
-# → notification "test ping" fires (closest timed), Nudge.wav plays
+# → notification "test ping" fires (closest timed)
 # → ~/.cache/td/fired gains a row for it
 # → ~/.cache/td/added gains rows for all four tasks (first-seen)
 
@@ -379,7 +380,8 @@ keys, view-only by design rather than by file permissions.
 
 It would not help with the rest:
 
-- **Reminders stay a script.** The 15-minute check runs while Helix is
+- **Reminders stay a script.** The reminder check (now an exact Android
+  alarm, see [exact-alarm-plan.md](exact-alarm-plan.md)) runs while Helix is
   closed. If the task rules also lived in Rust, they would exist twice and
   could drift apart, the problem the shared `tl`/`td` time-log pattern test
   was added to prevent.
@@ -394,7 +396,7 @@ It would not help with the rest:
 ### Recommended direction, if pursued
 
 A hybrid: keep `td`/`tl` as the single source of truth for the file format
-and rules (shared with the reminder job), and add two small, general
+and rules (shared with the reminder alarm), and add two small, general
 features to the fork:
 
 1. **A command that runs a command line a script prints**, e.g.
