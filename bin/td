@@ -77,6 +77,12 @@ Commands:
                        1st); .+ sets it to today + N units (floating).
   td new [--state todo|today|active|waiting]
                        print "- [S] " for pipe/insert (space , q)
+  td file NAME...      a file task with no todo.md bullet: create
+                       ~/tasks/<slug of NAME>.md with `# [ ] NAME` on its
+                       first line (an existing file is left as it is) and
+                       print the path to open (PATH:2, the blank line
+                       under the heading, when it is new). For space , n, NAME may follow
+                       `"$BASH_EXECUTION_STRING" # name:` (see NAME_MARK).
   td stamp [--restamp] [--col N]
                        stdin: a line. If it contains a date, replace (default)
                        with today's date (preserving the time) or recompute
@@ -797,6 +803,35 @@ def cmd_next():
     return 0
 
 
+# Ends the prompt `space , n` leaves open: what you type after it is a shell comment, which td
+# reads back from $BASH_EXECUTION_STRING, so the name needs no quoting.
+NAME_MARK = '"$BASH_EXECUTION_STRING" # name:'
+
+
+def cmd_file(args):
+    """td file NAME...: a file task, for a task clear enough to skip todo.md. Create
+    ~/tasks/<slug>.md (the slug as for a bullet's own file) with `# [ ] NAME` on its first line,
+    so the agenda lists it under TODO, and print where to open it: PATH:2, the blank line under
+    the heading. An existing file is left alone and printed as PATH. No usable name: exit 1."""
+    name = " ".join(args)
+    if NAME_MARK in name:
+        name = name.split(NAME_MARK, 1)[1]
+    name = re.sub(r"\s+", " ", name).strip()
+    slug = slugify(name)
+    if not name or slug == "untitled":
+        sys.exit("td: no task name (type it after # name:)")
+    folder = task_folder()
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{slug}.md"
+    if path.exists():
+        print(path)
+        return 0
+    path.write_text(f"# [ ] {name}\n\n", encoding="utf-8", errors="surrogateescape")
+    refresh_list()
+    print(f"{path}:2")
+    return 0
+
+
 def cmd_new(args):
     state_name = "todo"
     i = 0
@@ -1411,6 +1446,8 @@ def main(argv):
         return cmd_next()
     if cmd == "new":
         return cmd_new(rest)
+    if cmd == "file":
+        return cmd_file(rest)
     if cmd == "stamp":
         return cmd_stamp(rest)
     if cmd == "shift":
@@ -2525,6 +2562,39 @@ def run_tests(verbose=False):
             agenda = self.toggle_row("A", "charlie")
             self.assertLess(agenda.index("bravo"), agenda.index("alpha"))
 
+    class File(Case):
+        def test_creates_a_file_task(self):
+            self.put_inbox("- [ ] alpha\n")
+            out = self.td("file", "Buy a car!")
+            path = self.tasks / "buy-a-car.md"
+            self.assertEqual(out.strip(), f"{path}:2")
+            self.assertEqual(path.read_text(), "# [ ] Buy a car!\n\n")
+            self.assertEqual(self.inbox.read_text(), "- [ ] alpha\n")  # todo.md untouched
+            self.assertIn("# TODO\n\n- [ ] alpha\n- [ ] Buy a car!  ~/tasks/buy-a-car.md:1:1",
+                          self.read_cache("agenda.md"))
+
+        def test_name_from_the_prompt_needs_no_quoting(self):
+            import shlex
+            name = "it's (part 2) \"q\" $HOME `id` & ; | done"
+            line = (f'{shlex.quote(sys.executable)} {shlex.quote(TD)} file '
+                    f'"$BASH_EXECUTION_STRING" # name: {name}')
+            e = {**os.environ, "HOME": str(self.home), "TL_DIR": str(self.tasks)}
+            out = sp.run(["bash", "-c", line], env=e, capture_output=True, check=True).stdout.decode()
+            path = self.tasks / "it-s-part-2-q-home-id-done.md"
+            self.assertEqual(out.strip(), f"{path}:2")
+            self.assertEqual(path.read_text(), f"# [ ] {name}\n\n")
+
+        def test_existing_file_is_left_alone(self):
+            path = self.put_dedicated("buy-a-car.md", "# [A] buy a car\n\nnotes\n")
+            self.assertEqual(self.td("file", "Buy a CAR").strip(), str(path))
+            self.assertEqual(path.read_text(), "# [A] buy a car\n\nnotes\n")
+
+        def test_no_usable_name(self):
+            for args in ([], ["!!"], ['"$BASH_EXECUTION_STRING" # name:   ']):
+                with self.assertRaises(sp.CalledProcessError, msg=args):
+                    self.td("file", *args)
+            self.assertEqual(list(self.tasks.iterdir()), [])
+
     class Fire(Case):
         def test_fire_by_file(self):
             p = self.put_dedicated("ping.md", "# ping\n2026-10-10 09:00\n")
@@ -2740,7 +2810,7 @@ def run_tests(verbose=False):
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
                                for c in (Parse, List, Tick, New, Stamp, Next,
                                          Promote, Marker, Jump, SetToggle,
-                                         AgendaToggle, Fire, Recurring, TlAgrees,
+                                         AgendaToggle, File, Fire, Recurring, TlAgrees,
                                          KeysDoc))
     ok = unittest.TextTestRunner(verbosity=2 if verbose else 1).run(suite).wasSuccessful()
     return 0 if ok else 1

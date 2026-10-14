@@ -55,7 +55,8 @@ left out). Renaming the bullet unlinks it from its file.
 |---|---|
 | `t` | Open the inbox, `~/tasks/todo.md` |
 | `q` | **New todo.** Opens todo.md and adds `- [ ] ` on a new line at its end, in insert mode: type the task, then save. Works from anywhere, the agenda too; the agenda shows the task after the next `a` |
-| `a` | **Agenda.** Opens a snapshot of todo.md grouped TODAY, ACTIVE, TODO, WAITING, newest-added first; done and ignored bullets are hidden. A bullet with its own file shows ` (*)`. Files without a bullet are listed by the status on their first line (`# [W] renew passport`), or under ORPHANS if they have none. View only: Helix shows `[readonly]`, and anything typed there is thrown away by the next `a`. But `x` and the status keys work on its rows: they change the task itself (see below), and the agenda reloads. `q` adds a new task. For anything else, `p` takes you to the task |
+| `n` | **New file task**, for a task clear enough to skip todo.md. Opens the command prompt at `# name: `; type the task's name and press Enter (Esc does nothing). Creates `~/tasks/<slug>.md`, named like a bullet's own file (`Buy a car!` → `buy-a-car.md`), with `# [ ] Buy a car!` on its first line, and opens it on the blank line under the heading. It is a file task: the agenda lists it under TODO, and the status keys on its heading set its state. If the file exists, it just opens it. The name needs no quoting; only `%` is special (`%%` for one), and it can't contain `}` |
+| `a` | **Agenda.** Opens a snapshot of todo.md grouped TODAY, ACTIVE, TODO, WAITING, newest-added first; done and ignored bullets are hidden. A bullet with its own file shows ` (*)`. Files without a bullet are listed by the status on their first line (`# [W] renew passport`), or under ORPHANS if they have none. View only: Helix shows `[readonly]`, and anything typed there is thrown away by the next `a`. But `x` and the status keys work on its rows: they change the task itself (see below), and the agenda reloads. `q` adds a new task, `n` a new file task. For anything else, `p` takes you to the task |
 | `A` | The same agenda, most recently changed first: a bullet's line (state, text, stamp) or its own file. Edits by hand count from the next `a`, `A` or status key |
 | `p` | **Go to the task.** On a bullet: open its own file, if it has one; otherwise stay. On an agenda row: go to that bullet's line in todo.md; a row for a file goes to the file. Never creates anything. Uses the line as it is in the buffer, saved or not |
 | `P` | **Give the task a file.** Saves, then creates `~/tasks/<slug>.md` for the bullet, with a heading `# [S] title` that carries the bullet's state, and opens it. An existing file is reused and its heading's state updated. On an agenda row it only opens the row's file, if any. Works on a bullet you have just typed, saved or not |
@@ -188,6 +189,13 @@ next to starting Python, so they see the saved file in practice.
      external process", since Helix hasn't recorded the first one yet.
 - **`q`** opens todo.md and builds its new line the way `i` does, with
   `td new` printing `- [ ] ` in place of `tl start`'s time.
+- **`n`** is a macro too, ending at the prompt
+  `:open %sh{td file "$BASH_EXECUTION_STRING" # name: }` with the cursor
+  moved before the `}` (`<left>`), so your text goes inside `%sh{}`. On
+  Enter, `td file` creates the file and prints `PATH:2`, which `:open`
+  opens. The name is a shell comment read back from
+  `$BASH_EXECUTION_STRING`, as `o` does it; a `}` in it would end `%sh{}`
+  early.
 - **`o`** is a macro, so the command prompt stays open for you to type.
   The prompt holds `:sh tl out "$BASH_EXECUTION_STRING" # done: `, so what
   you type is a shell comment, which bash ignores. `tl` reads it back from
@@ -204,3 +212,21 @@ one key both jumped and created, a typo would make a stray file
 (`refacror td parser` → `refacror-td-parser.md`). So `p` only goes where
 something exists, and `P` (capital: more deliberate) is the one that
 creates.
+
+### To do: one key for a task's own file
+
+`P` and `n` both end in a task's own file: `P` gives the bullet under the
+cursor its file (on an agenda row, it opens the row's file), and `n` asks
+for a name and makes a new file task. They should become one key that acts
+by context: on a bullet or an agenda row, open or create its file;
+anywhere else, ask for a name.
+
+Helix keys can't do that yet. A binding is either a list of commands that
+always all run (`P`) or a typed sequence that can stop at the command
+prompt (`n`), never one or the other depending on where the cursor is.
+Merging them now would make `P` always stop at the prompt: an extra Enter
+on every promote, and a name prompt where none is needed. It becomes simple
+with the `:eval` idea in
+[td-plan.md](../td-plan.md#future-directions--integration-with-helix), if
+`:eval` can also run a typed sequence: the key asks `td` first, and `td`
+answers "open this file" or "ask for a name".
