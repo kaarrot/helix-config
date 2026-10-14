@@ -4,6 +4,8 @@
 > describes `td`** (lowercase states, `space .` keys, `#tags`,
 > `last-list.md` and more have changed or gone). The current design is in
 > [bin/agenda.md](bin/agenda.md), the keys in [bin/keys.md](bin/keys.md).
+> The last section, [Future directions](#future-directions--integration-with-helix),
+> is current (2026-10-13).
 
 ## Context
 
@@ -332,3 +334,100 @@ Helix side:
 - Move the cursor to any `path:line:` row, press `gf`, confirm you land on that line in the source file.
 - Edit a task in the source, save, press `space . l` again — the same buffer refreshes (no new window).
 - Press `space . L` → same buffer, now sorted by file mtime.
+
+## Future directions — integration with Helix
+
+*Added 2026-10-13. Exploratory: an evaluation, not a plan to act on yet.*
+
+The question: would `td` and `tl` be simpler as part of Helix itself, rather
+than Python scripts driven by key bindings? The `hx` in use is a personal fork
+(`~/SRC/helix`, `kaarrot/helix`: 504 commits and about 57,700 added lines on
+top of Helix 25.07, mostly the review, diff and debugger features), built
+without a plugin system (no Steel). So "part of Helix" means Rust in that
+fork, which is already being maintained.
+
+### Where the friction is
+
+The task rules have been stable: parsing entries and stamps, repeaters, the
+bullet-to-file link, when reminders fire, summaries. That is most of the
+code (about 1,900 lines of Python, with 1,600 lines of tests). Nearly every
+bug found in October 2026 was instead in the glue between the scripts and
+Helix: `P` opening its file depended on which of two steps finished first,
+`i`/`I` couldn't see an unsaved running entry, saving one buffer twice in one
+key failed, and the agenda needed an undo trick to stay clean. Each comes
+from a limit of what a key binding can do:
+
+| Helix limit | Workaround it forced |
+|---|---|
+| A key's commands can't branch | `:earlier %sh{…}` undo trick on the agenda; near-duplicate `i`/`I` bindings |
+| Scripts see files on disk, not unsaved buffers | `i`/`I` visit the running entry's buffer first; saving at clock-in |
+| Saves land after the key, shell steps during it | strict ordering, `:write!`, the old `P` race |
+| `:pipe` always marks the buffer modified, and puts errors in the line | `td` silent on stderr; the undo trick |
+| A script can only hand back a path, through `%sh{}` | 4 cache files: `stamp-col`, `open`, `tl/from`, `agenda-args` |
+| No prompt for user input | the `$BASH_EXECUTION_STRING` comment trick in `space , o` |
+
+[keys.md](bin/keys.md#how-the-keys-are-built) spends about 80 lines
+explaining these workarounds.
+
+### What moving into Helix would and wouldn't change
+
+Code inside Helix can read and edit any open buffer, unsaved edits included,
+and decide what to do next. That would remove the cache files, the undo
+trick, the buffer visiting and the double save; the `# done:` comment would
+be a real prompt; and the agenda could be a picker, or a buffer with its own
+keys, view-only by design rather than by file permissions.
+
+It would not help with the rest:
+
+- **Reminders stay a script.** The 15-minute check runs while Helix is
+  closed. If the task rules also lived in Rust, they would exist twice and
+  could drift apart, the problem the shared `tl`/`td` time-log pattern test
+  was added to prevent.
+- **The rules gain nothing from a rewrite.** Porting 1,900 lines of logic
+  and 1,600 lines of tests changes no behaviour.
+- **Changes get slower.** A script edit is tested in seconds; the fork means
+  rebuilding a 42,000-line crate on the phone.
+- **It stays fork-only.** Upstream Helix won't take todo or time-log
+  features, so it adds to the patches carried forward, mostly in
+  `commands.rs` and `editor.rs`, which the fork already changes heavily.
+
+### Recommended direction, if pursued
+
+A hybrid: keep `td`/`tl` as the single source of truth for the file format
+and rules (shared with the reminder job), and add two small, general
+features to the fork:
+
+1. **A command that runs a command line a script prints**, e.g.
+   `:eval %sh{td …}`. `td` could answer `:update` in a normal file, `:reload`
+   on the agenda, or `:open file:3:5`. This removes the undo trick, the cache
+   files and the duplicated `i`/`I` sequences. The fork already has the
+   internal `execute_command_line` the command prompt uses, so the command
+   is mostly a wrapper around it.
+   If `:eval` can also run a typed key sequence (a macro), a key can stop at
+   the command prompt only when it needs input; that would let `space , P`
+   and `space , n` become one key (see
+   [keys.md](bin/keys.md#to-do-one-key-for-a-tasks-own-file)).
+2. **A save that finishes before the next step.** Scripts would always read
+   up-to-date files, removing the buffer visiting in `i`/`I`, the `:write!`
+   and most of the ordering rules.
+
+That is likely a few hundred lines of Rust, against deleting most of the
+workaround layer. Both features are generic, so they might even be worth
+offering upstream.
+
+Not recommended:
+
+- **A full port to Rust:** the most work for the least gain, since the
+  reminder side and its rules stay in Python anyway.
+- **A Steel (Scheme) plugin:** the fork has no plugin system, and merging
+  one in would be a larger change than the hybrid.
+
+### Steps, if it is ever taken up
+
+1. Add `:eval` to the fork, with Helix integration tests like the review
+   feature's (`helix-term/tests/test/review.rs`).
+2. Move one key to it first, say a status key on the agenda, and check
+   that the `td` tests and the Helix behaviour are unchanged.
+3. Move the remaining keys, then delete the cache files and the workaround
+   notes in keys.md.
+4. Add the synchronous save, then simplify `i`/`I`.
