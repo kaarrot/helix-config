@@ -33,8 +33,10 @@ the start/end times.
     tl recent [N]       numbered list of the N (default 9) most recently modified task files
     tl recent --nth K [ELSE]
                         path of the Kth most recently modified task file (ELSE if none)
-    tl summary [--file F] [N|all]
-                        per-day totals for the last N days (default 14) over the task folder.
+    tl summary [--file F] [--week] [--view] [N|all]
+                        per-day totals for the last N days (default 14) over the task folder;
+                        with --week, this week's, Monday to Sunday. With --view, written to
+                        ~/.cache/tl/summary.txt (read-only) instead, and its path printed (space , L).
                         With --file F, if F is not a .txt/.md directly in the task folder,
                         summarize just F instead. Entries with no end time, of any date, are
                         listed first. Locations print as ~/path:line, for gf. Under each day, a
@@ -46,6 +48,8 @@ Task files: $TL_DIR (default ~/tasks), *.txt and *.md. stop (also stop - --file)
 ($TD_FILE, default $TL_DIR/todo.md): a `- [ ] 2026-10-12 09:00 - prep slides` there is a todo,
 not a running entry. $TL_NOW="YYYY-MM-DD HH:MM" fakes the clock.
 """
+import contextlib
+import io
 import os
 import re
 import sys
@@ -365,7 +369,7 @@ def cmd_recent(args):
     return 0
 
 
-def cmd_summary(arg, current=None):
+def cmd_summary(arg, current=None, week=False):
     folder = Path(os.environ.get("TL_DIR", "~/tasks")).expanduser()
     single = None  # current file when it lives outside the task folder
     if current and Path(current).expanduser().is_file():
@@ -379,8 +383,16 @@ def cmd_summary(arg, current=None):
     today = now().date()
     if arg not in (None, "all") and not arg.isdigit():
         sys.exit(__doc__)
-    days = None if arg == "all" else int(arg or 14)
-    first = None if days is None else (today - timedelta(days=days - 1)).isoformat()
+    if week:  # Monday to Sunday of this week
+        monday = today - timedelta(days=today.weekday())
+        sunday = monday + timedelta(days=6)
+        first, last = monday.isoformat(), sunday.isoformat()
+        scope = f"week {monday:%Y-%m-%d %a} to {sunday:%Y-%m-%d %a}"
+    else:
+        days = None if arg == "all" else int(arg or 14)
+        first = None if days is None else (today - timedelta(days=days - 1)).isoformat()
+        last = None
+        scope = "all days" if days is None else f"last {days} day{'s' * (days != 1)}"
 
     totals = defaultdict(lambda: defaultdict(int))  # date -> task -> minutes
     done = defaultdict(lambda: defaultdict(dict))   # date -> task -> heading -> earliest start
@@ -411,7 +423,7 @@ def cmd_summary(arg, current=None):
                 running.append((where, n, e, heading))
                 continue
             day = e.date if e else ATTEMPT.match(line).group(1)
-            if first and day < first:
+            if (first and day < first) or (last and day > last):
                 continue
             if err:
                 warns.append((where, n, f'{err}: "{line.strip()}"'))
@@ -449,7 +461,6 @@ def cmd_summary(arg, current=None):
             label = " - ".join(s for s in (heading, e.note) if s)
             print(f"  {f + ':' + str(n):<{loc}}  {e.date} {hhmm(e.start)}  {dur_text(so_far):>9}  {label}".rstrip())
         print()
-    scope = "all days" if days is None else f"last {days} day{'s' * (days != 1)}"
     print(f"Time summary, {scope} ({single or folder})\n")
     if not totals:
         print("No complete entries found.")
@@ -477,6 +488,22 @@ def cmd_summary(arg, current=None):
     return 0
 
 
+# The summary view `space , L` opens: a file of its own, read-only like td's agenda.
+VIEW_PATH = Path("~/.cache/tl/summary.txt").expanduser()
+
+
+def write_view(text):
+    """Write text to VIEW_PATH, read-only (0444: it is a view, and Helix won't save over it), by
+    a rename, which needs no write permission on the old file -> the path."""
+    VIEW_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = VIEW_PATH.with_name(VIEW_PATH.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    tmp.write_text(text, encoding="utf-8", errors="surrogateescape")
+    os.chmod(tmp, 0o444)
+    os.replace(tmp, VIEW_PATH)
+    return VIEW_PATH
+
+
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
     if cmd == "start":
@@ -501,7 +528,14 @@ def main(argv):
             i = args.index("--file")
             current = args[i + 1] if i + 1 < len(args) else None
             del args[i:i + 2]
-        return cmd_summary(args[0] if args else None, current)
+        week, view = "--week" in args, "--view" in args
+        args = [a for a in args if a not in ("--week", "--view")]
+        if not view:
+            return cmd_summary(args[0] if args else None, current, week)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cmd_summary(args[0] if args else None, current, week)
+        print(write_view(out.getvalue()), end="")  # no newline: for :open %sh{}
     else:
         sys.exit(__doc__)
     return 0
@@ -786,6 +820,25 @@ def run_tests(verbose=False):
                 out = self.tl("summary", arg)
                 self.assertIn("2026-10-01 Thu   1h 00min\n", out)
                 self.assertIn("Total (2 days)  1h 30min\n", out)
+
+        def test_this_week(self):
+            # NOW is Friday 2026-10-09: the week is Monday 10-05 to Sunday 10-11.
+            self.put("A.md", "# Alpha\n2026-10-04 09:00 - 10:00\n2026-10-05 09:00 - 10:30\n"
+                             "# Fixing\n2026-10-09 13:00 - 14:00\n2026-10-12 09:00 - 10:00\n")
+            self.assertEqual(self.tl("summary", "--week"),
+                             f"Time summary, week 2026-10-05 Mon to 2026-10-11 Sun ({self.tasks})\n\n"
+                             "2026-10-09 Fri   1h 00min\n    A   1h 00min  Alpha\n      - Fixing\n"
+                             "2026-10-05 Mon   1h 30min\n    A   1h 30min  Alpha\n"
+                             "-----\nTotal (2 days)  2h 30min\n")  # 10-04 and 10-12: other weeks
+
+        def test_view_file(self):
+            # space , L: the same text in a read-only file, its path printed for :open.
+            self.put("A.md", "2026-10-09 09:00 - 10:00\n")
+            view = self.home / ".cache" / "tl" / "summary.txt"
+            for _ in range(2):  # the second run replaces the read-only file
+                self.assertEqual(self.tl("summary", "--week", "--view"), str(view))
+            self.assertEqual(view.read_text(), self.tl("summary", "--week"))
+            self.assertEqual(view.stat().st_mode & 0o777, 0o444)
 
         def test_single_file_outside_the_task_folder(self):
             notes = self.put("notes.md", "# One\n2026-10-09 09:00 - 10:00\n# Two\n2026-10-09 10:00 - 10:30\n",

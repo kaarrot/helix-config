@@ -110,6 +110,8 @@ o = "@:write-all<ret>:sh ~/.config/helix/bin/tl out \"$BASH_EXECUTION_STRING\" #
 r = ":sh ~/.config/helix/bin/tl recent"
 # Time per day for all task files (just this file if it is outside ~/tasks)
 l = [":write", "align_view_top", ":sh ~/.config/helix/bin/tl summary --file %{buffer_name}"]
+# This week's time summary in a read-only buffer (~/.cache/tl/summary.txt), to copy from
+L = [":write", ":open %sh{~/.config/helix/bin/tl summary --week --view}", ":reload"]
 
 ### Todos (td) ###
 

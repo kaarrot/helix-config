@@ -29,6 +29,7 @@ from the times. todo.md is not a task file for `tl`: its bullets are todos.
 |---|---|
 | `i` | **Clock in.** First ends what is running (every entry that started less than 12 hours ago and has no end), in whichever task file it is, keeping a note you typed there and haven't saved; that file is saved. Then adds `YYYY-MM-DD HH:MM - ` on a new line at the end of this buffer, saves it so the next clock-in can find the entry, and leaves you in insert mode to type the note. In todo.md the new line is not an entry: `tl` skips todo.md, so it is never stopped or counted |
 | `I` | **Switch back.** Ends what is running, as `i` does (no heading), and clocks in to the task you worked on before it: opens that task file and adds `YYYY-MM-DD HH:MM - ` at its end, in insert mode. "Before it" means the latest entry in a file other than the running entry's, so pressing `I` again switches back. With nothing running (say after `o`), it resumes the task of the latest entry. If there is no other task, it works like `i` in this buffer. Both files are saved, as with `i` |
+| `L` | **Week summary in a buffer**, to copy from. Saves, then opens `~/.cache/tl/summary.txt` with the same report as `l`, for this week, Monday to Sunday, over all task files (wherever you press it). The file is rewritten each time and read-only, like the agenda; anything typed there is thrown away by the next `L` |
 | `o` | **Clock out.** Saves all buffers, then waits at the command prompt `# done: `. Type what you did and press Enter: the latest running entry (in any task file, started in the last 12 hours) gets its end time and duration, and your text becomes the `# heading` line right above it, or is added to the heading already there after ` - `. Enter on an empty prompt ends the entry with no heading; Esc does nothing. The text needs no quoting; only `%` is special (type `%%` for one) |
 | `r` | **Recent files.** A popup with the 9 most recently changed task files, newest first, each with its last entry. Open one with `:o <path>` |
 | `l` | **Summary** (time log). Saves, then shows time per day for the last 14 days in a popup: per task file its total and title, and under it the `# headings` it was worked under. Running entries come first, and problems (overlaps, duplicates, typos, entries over 12 hours) last, as `~/path:line` you can open with `gf`. In a file outside `~/tasks`, only that file is counted |
@@ -225,6 +226,14 @@ next to starting Python, so they see the saved file in practice.
   (`DONE_MARK` in `tl`): change both together.
 - **`l`** runs `align_view_top` first: a popup opens below the cursor's
   screen row when 6 rows fit there, so at the top it gets the full height.
+
+### To do: step the week summary back and forth
+
+`L` shows only this week. It should step to the previous or next week as
+quickly as `+`/`-` move a stamp, pressed again and again. One way: the view
+names its week in its first line, and `+`/`-` on the view rebuild it for
+the week before or after, the way the status keys rebuild the agenda
+(`tl summary --week` would take a date to pick the week). Not decided yet.
 
 ### Why `p` and `P` are separate
 
