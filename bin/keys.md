@@ -56,7 +56,8 @@ left out). Renaming the bullet unlinks it from its file.
 | `t` | Open the inbox, `~/tasks/todo.md` |
 | `q` | **New todo.** Opens todo.md and adds `- [ ] ` on a new line at its end, in insert mode: type the task, then save. Works from anywhere, the agenda too; the agenda shows the task after the next `a` |
 | `n` | **New file task**, for a task clear enough to skip todo.md. Opens the command prompt at `# name: `; type the task's name and press Enter (Esc does nothing). Creates `~/tasks/<slug>.md`, named like a bullet's own file (`Buy a car!` → `buy-a-car.md`), with `# [ ] Buy a car!` on its first line, and opens it on the blank line under the heading. It is a file task: the agenda lists it under TODO, and the status keys on its heading set its state. If the file exists, it just opens it. The name needs no quoting; only `%` is special (`%%` for one), and it can't contain `}` |
-| `a` | **Agenda.** Opens a snapshot of todo.md grouped TODAY, ACTIVE, TODO, WAITING, newest-added first; done and ignored bullets are hidden. A bullet with its own file shows ` (*)`. Files without a bullet are listed by the status on their first line (`# [W] renew passport`), or under ORPHANS if they have none. View only: Helix shows `[readonly]`, and anything typed there is thrown away by the next `a`. But `x` and the status keys work on its rows: they change the task itself (see below), and the agenda reloads. `q` adds a new task, `n` a new file task. For anything else, `p` takes you to the task |
+| `N` | **Rename a task**, from its agenda row. Opens the command prompt at `# name: ` with the task's current name filled in; edit it, or delete it and type a new one, then press Enter (Esc does nothing). The new name goes through the same check as `n`'s, and the task changes where it lives: a file task's (or orphan's) file is renamed to the new name's slug and its first-line heading gets the name, keeping its `[S]`; a bullet row's todo.md bullet gets the name as its text, and its own file, if any, is renamed and retitled with it, so the two stay linked. The agenda reloads, and the task keeps its place in it. Refused, changing nothing, when a file already has the new name, the name has no letter or digit, or the row shows no task. As with `n`, `%` is typed `%%`, and the name can't contain `}`. Don't rename a file you have open in another buffer: that buffer keeps the old name |
+| `a` | **Agenda.** Opens a snapshot of todo.md grouped TODAY, ACTIVE, TODO, WAITING, newest-added first; done and ignored bullets are hidden. A bullet with its own file shows ` (*)`. Files without a bullet are listed by the status on their first line (`# [W] renew passport`), or under ORPHANS if they have none. View only: Helix shows `[readonly]`, and anything typed there is thrown away by the next `a`. But `x` and the status keys work on its rows: they change the task itself (see below), and the agenda reloads. `q` adds a new task, `n` a new file task, and `N` renames the task on a row. For anything else, `p` takes you to the task |
 | `A` | The same agenda, most recently changed first: a bullet's line (state, text, stamp) or its own file. Edits by hand count from the next `a`, `A` or status key |
 | `p` | **Go to the task.** On a bullet: open its own file, if it has one; otherwise stay. On an agenda row: go to that bullet's line in todo.md; a row for a file goes to the file. Never creates anything. Uses the line as it is in the buffer, saved or not |
 | `P` | **Give the task a file.** Saves, then creates `~/tasks/<slug>.md` for the bullet, with a heading `# [S] title` that carries the bullet's state, and opens it. An existing file is reused and its heading's state updated. On an agenda row it only opens the row's file, if any. Works on a bullet you have just typed, saved or not |
@@ -205,6 +206,17 @@ next to starting Python, so they see the saved file in practice.
   opens. The name is a shell comment read back from
   `$BASH_EXECUTION_STRING`, as `o` does it; a `}` in it would end `%sh{}`
   early.
+- **`N`** is a macro that copies the name from the row: `x` selects the
+  line, `S` splits it on the parts around the name (the leading `- [S] `,
+  a trailing `  ~/tasks/f.md:1:1` or ` (*)`, and the newline), `)` and `,`
+  keep just the name, and `"ty` copies it into register `t`. Then `;`, the
+  prompt `:open %sh{td rename --from … "$BASH_EXECUTION_STRING" # name: }`,
+  `<left>` and `Ctrl-r t` paste it before the `}`. On Enter, `td rename`
+  reads the row from `agenda.md` on disk (never edited, so it matches),
+  renames, rebuilds the agenda and prints `AGENDA:LINE` to stay on.
+  Getting the name another way doesn't work: switching buffers inside the
+  key (a scratch buffer, or a file holding the name) closes the prompt as
+  soon as the key ends.
 - **`o`** is a macro, so the command prompt stays open for you to type.
   The prompt holds `:sh tl out "$BASH_EXECUTION_STRING" # done: `, so what
   you type is a shell comment, which bash ignores. `tl` reads it back from

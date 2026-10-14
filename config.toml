@@ -119,6 +119,8 @@ t = ":open ~/tasks/todo.md"
 q = [":open ~/tasks/todo.md", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/td new", "insert_at_line_end"]
 # New file task, no todo.md bullet: type its name at the prompt; opens ~/tasks/<name>.md headed "# [ ] name"
 n = "@:open %sh{~/.config/helix/bin/td file \"$BASH_EXECUTION_STRING\" # name: }<left>"
+# Rename the task on an agenda row: its name comes up in the prompt to edit (file and heading, or bullet and file)
+N = '@xS^- (?:\[.\] )?|(?:  \S+:\d+:\d+| \(\*\))?\n<ret>),"ty;:open %sh{~/.config/helix/bin/td rename --from %{buffer_name}:%{cursor_line} "$BASH_EXECUTION_STRING" # name: }<left><C-r>t'
 # Stamp the line: add today's date and time, or move its date to today; on the date: fix the weekday
 s = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td stamp --col $(cat ~/.cache/td/stamp-col) --from %{buffer_name}"]
 # Agenda of todo.md, newest added first (view only; the status keys work on its rows)
