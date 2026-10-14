@@ -285,6 +285,10 @@ app).
   saw the task, in `~/.cache/td/added`), or most recently changed first
   (`space , A`; the bullet's line in `~/.cache/td/changed`, or its file's
   modification time).
+- `space , D` lists the done tasks instead, under `# DONE`: `[x]` bullets
+  and file tasks whose heading is `# [x] title`, most recently changed
+  first. The keys work on its rows as on the agenda's: `space , x` takes a
+  task back to todo.
 
 The agenda is a view: it is always built from todo.md and the task
 files, never edited. `td` writes it read-only (0444), replacing it by a
@@ -330,7 +334,7 @@ is `++0d` (it would never move), so those lines are just marked done.
 | `td install` | build the alarm helper, write the `td-tick` shim, cancel the old job 7421, arm the next reminder |
 | `td uninstall` | cancel the alarm (and the old job), remove the shim |
 | `td tick` | scan, record future times, fire due ones, arm the alarm for the next one; `--alarm` (from the alarm) also releases the wake lock |
-| `td list [--state todo\|today\|active\|waiting\|all] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout, and the options to `~/.cache/td/agenda-args` |
+| `td list [--state todo\|today\|active\|waiting\|done\|all] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout, and the options to `~/.cache/td/agenda-args` |
 | `td promote [--from PATH:LINE]` | stdin: a line. Create or reuse the bullet's task file (not from the agenda), then print where `space , P` goes and write it to `~/.cache/td/open` |
 | `td jump [--from PATH:LINE]` | stdin: a line. Print where `space , p` goes and write it to `~/.cache/td/open` |
 | `td toggle S [--from PATH [--line N]]` | toggle the line's state between `[ ]` and `S` (a name like `waiting` works too); stdin to stdout, or with `--line` the file on disk. On an agenda row, the task it shows changes instead, and the agenda is rebuilt. Keeps the task's other copies in step (see [keys.md](keys.md#status-keys-in-other-files)); moves a repeating date instead of marking done |

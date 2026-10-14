@@ -36,7 +36,7 @@ Commands:
                        Android alarm for the next one. `td list` and the
                        commands that edit tasks start a tick in the
                        background when they finish, so the alarm follows.
-  td list [--state todo|today|active|waiting|all] [--sort added|modified]
+  td list [--state todo|today|active|waiting|done|all] [--sort added|modified]
                        build the agenda from $TD_FILE bullets; write to
                        ~/.cache/td/agenda.md (read-only: it is a view) and
                        stdout. Appends " (*)" to
@@ -49,6 +49,8 @@ Commands:
                        added: newest first-seen first. modified: most
                        recently changed first (its line, or its dedicated
                        file; hand edits count from the next td run).
+                       all shows the open states; done lists the [x]/[X]
+                       bullets and file tasks (space , D, with modified).
   td promote [--from PATH:LINE]
                        stdin: a line, at PATH:LINE. A bullet gets its file
                        ~/tasks/<slug>.md: created with a `# [S] title`
@@ -819,7 +821,7 @@ def _parse_list_args(args):
             sort = args[i + 1]; i += 2
         else:
             i += 1
-    if state not in ("todo", "today", "active", "waiting", "all"):
+    if state not in ("todo", "today", "active", "waiting", "done", "all"):
         sys.exit(f"bad --state: {state}")
     if sort not in ("added", "modified"):
         sys.exit(f"bad --sort: {sort}")
@@ -905,8 +907,8 @@ def build_list(args):
     if inbox.is_file():
         # Not when the inbox is missing (mid-sync, say): every row would go.
         compact_task_rows({b.hash for b in bullets})
-    kept = [b for b in bullets if b.state in VISIBLE
-            and (state == "all" or STATE_NAMES[b.state] == state)]
+    kept = [b for b in bullets if (b.state in VISIBLE if state == "all"
+                                   else STATE_NAMES[b.state] == state)]
     if sort == "modified":
         kept.sort(key=lambda b: _modified_iso(b, changed), reverse=True)
     else:
@@ -2046,6 +2048,25 @@ def run_tests(verbose=False):
             out = self.td("list")
             self.assertIn("visible", out)
             for word in ("done", "also done", "ignore"):
+                self.assertNotIn(word, out)
+
+        def test_done_view(self):
+            # space , D: done bullets and file tasks, most recently changed
+            # first; nothing open, no orphans.
+            p = self.put_inbox("- [x] alpha\n- [X] bravo\n- [ ] open\n- [!] ignored\n")
+            passport = self.put_dedicated("passport.md", "# [x] renew passport\n")
+            self.touch(passport, "2026-10-10 10:00")
+            self.put_dedicated("old-task.md", "# old\n")
+            self.td("list", now_="2026-10-10 11:00")
+            p.write_text("- [ ] alpha\n- [X] bravo\n- [ ] open\n- [!] ignored\n")
+            self.td("list", now_="2026-10-10 11:05")
+            p.write_text("- [x] alpha\n- [X] bravo\n- [ ] open\n- [!] ignored\n")
+            out = self.td("list", "--state", "done", "--sort", "modified",
+                          now_="2026-10-10 11:10")
+            self.assertIn("# DONE\n\n- [x] alpha\n", out)
+            self.assertIn("- [X] bravo", out)
+            self.assertIn("- [x] renew passport  ~/tasks/passport.md:1:1", out)
+            for word in ("open", "ignored", "ORPHANS", "TODO"):
                 self.assertNotIn(word, out)
 
         def test_bullet_rows_have_no_path(self):
@@ -3212,6 +3233,14 @@ def run_tests(verbose=False):
             self.td("list")  # space , a: back to newest added first
             agenda = self.toggle_row("A", "charlie")
             self.assertLess(agenda.index("bravo"), agenda.index("alpha"))
+
+        def test_done_view_row_back_to_todo(self):
+            p = self.put_inbox("- [x] alpha\n- [x] bravo\n")
+            self.td("list", "--state", "done", "--sort", "modified")
+            agenda = self.toggle_row("x", "alpha")  # space , x undoes it
+            self.assertEqual(p.read_text(), "- [ ] alpha\n- [x] bravo\n")
+            self.assertIn("# DONE\n\n- [x] bravo\n", agenda)
+            self.assertNotIn("alpha", agenda)
 
     class File(Case):
         def test_creates_a_file_task(self):

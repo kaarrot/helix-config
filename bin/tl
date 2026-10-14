@@ -33,13 +33,12 @@ the start/end times.
     tl recent [N]       numbered list of the N (default 9) most recently modified task files
     tl recent --nth K [ELSE]
                         path of the Kth most recently modified task file (ELSE if none)
-    tl summary [--file F] [--week [DATE]] [--view] [N|all]
+    tl summary [--week [DATE]] [--view] [N|all]
                         per-day totals for the last N days (default 14) over the task folder;
                         with --week, this week's (or DATE's week), Monday to Sunday. With --view,
                         written to ~/.cache/tl/summary.txt (read-only) instead, and its path
                         printed (space , L); `+`/`-` there step it a week (view_step).
-                        With --file F, if F is not a .txt/.md directly in the task folder,
-                        summarize just F instead. Entries with no end time, of any date, are
+                        Entries with no end time, of any date, are
                         listed first. Locations print as ~/path:line, for gf. Under each day, a
                         line per task (total and title: its file's first line), then the nearest
                         markdown "# heading" above its entries, as bullets (but the title).
@@ -370,14 +369,9 @@ def cmd_recent(args):
     return 0
 
 
-def cmd_summary(arg, current=None, week=None):
+def cmd_summary(arg, week=None):
     folder = Path(os.environ.get("TL_DIR", "~/tasks")).expanduser()
-    single = None  # current file when it lives outside the task folder
-    if current and Path(current).expanduser().is_file():
-        f = Path(current).expanduser().resolve()
-        if not (f.parent == folder.resolve() and f.suffix in (".txt", ".md")):
-            single = f
-    if single is None and not folder.is_dir():
+    if not folder.is_dir():
         # exit 0: Helix discards stdout of a failed command and only shows "status 1"
         print(f"Task folder not found: {folder}\n(create it or set TL_DIR)")
         return 0
@@ -403,8 +397,7 @@ def cmd_summary(arg, current=None, week=None):
     running = []                                    # (file, line, entry, heading), whatever the date
     titles = {}                                     # task -> its first line, "# " dropped, unless an entry
 
-    files = [single] if single else sorted(f for f in [*folder.glob("*.txt"), *folder.glob("*.md")]
-                                           if not is_td_inbox(f))
+    files = sorted(f for f in [*folder.glob("*.txt"), *folder.glob("*.md")] if not is_td_inbox(f))
     for path in files:
         where = tilde(path)
         heading, fenced = "", False
@@ -462,7 +455,7 @@ def cmd_summary(arg, current=None, week=None):
             label = " - ".join(s for s in (heading, e.note) if s)
             print(f"  {f + ':' + str(n):<{loc}}  {e.date} {hhmm(e.start)}  {dur_text(so_far):>9}  {label}".rstrip())
         print()
-    print(f"Time summary, {scope} ({single or folder})\n")
+    print(f"Time summary, {scope} ({folder})\n")
     if not totals:
         print("No complete entries found.")
     width = max((len(t) for d in totals.values() for t in d), default=0)
@@ -473,12 +466,11 @@ def cmd_summary(arg, current=None, week=None):
         wd = date.fromisoformat(day).strftime("%a")
         print(f"{day} {wd}  {dur_text(day_total):>9}")
         for task, minutes in sorted(totals[day].items()):
-            if not single:
-                print(f"    {task:<{width}}  {dur_text(minutes):>9}  {titles[task]}".rstrip())
+            print(f"    {task:<{width}}  {dur_text(minutes):>9}  {titles[task]}".rstrip())
             headings = done[day][task]  # what was done, in time order; the title is on the task line already
             for heading in sorted(headings, key=headings.get):
-                if single or heading != titles[task]:
-                    print(f"{'    ' if single else '      '}- {heading}")
+                if heading != titles[task]:
+                    print(f"      - {heading}")
     if totals:
         print(f"{'-' * 5}\nTotal ({len(totals)} day{'s' * (len(totals) != 1)})  {dur_text(grand)}")
     if warns:
@@ -514,7 +506,7 @@ def view_step(n):
         shown = date.fromisoformat(m[1]) if m else None
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        cmd_summary(None, None, (shown or now().date()) + timedelta(weeks=n))
+        cmd_summary(None, (shown or now().date()) + timedelta(weeks=n))
     write_view(out.getvalue())
 
 
@@ -537,11 +529,7 @@ def main(argv):
     elif cmd == "test":
         return run_tests("-v" in argv[2:])
     elif cmd == "summary":
-        args, current = argv[2:], None
-        if "--file" in args:
-            i = args.index("--file")
-            current = args[i + 1] if i + 1 < len(args) else None
-            del args[i:i + 2]
+        args = argv[2:]
         week, view = None, "--view" in args
         if "--week" in args:
             i = args.index("--week")
@@ -550,10 +538,10 @@ def main(argv):
                 week = date.fromisoformat(args.pop(i + 1))
         args = [a for a in args if a not in ("--week", "--view")]
         if not view:
-            return cmd_summary(args[0] if args else None, current, week)
+            return cmd_summary(args[0] if args else None, week)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            cmd_summary(args[0] if args else None, current, week)
+            cmd_summary(args[0] if args else None, week)
         print(write_view(out.getvalue()), end="")  # no newline: for :open %sh{}
     else:
         sys.exit(__doc__)
@@ -858,15 +846,6 @@ def run_tests(verbose=False):
                 self.assertEqual(self.tl("summary", "--week", "--view"), str(view))
             self.assertEqual(view.read_text(), self.tl("summary", "--week"))
             self.assertEqual(view.stat().st_mode & 0o777, 0o444)
-
-        def test_single_file_outside_the_task_folder(self):
-            notes = self.put("notes.md", "# One\n2026-10-09 09:00 - 10:00\n# Two\n2026-10-09 10:00 - 10:30\n",
-                             folder=self.home)
-            self.put("A.md", "2026-10-09 11:00 - 12:00\n")  # not counted
-            self.assertEqual(self.tl("summary", "--file", str(notes), "1"),
-                             f"Time summary, last 1 day ({notes.resolve()})\n\n"
-                             "2026-10-09 Fri   1h 30min\n    - One\n    - Two\n"
-                             "-----\nTotal (1 day)  1h 30min\n")
 
         def test_missing_task_folder(self):
             missing = self.home / "nope"

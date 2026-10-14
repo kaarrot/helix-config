@@ -109,8 +109,8 @@ I = [":open %sh{~/.config/helix/bin/tl running --from %{buffer_name}}", "select_
 o = "@:write-all<ret>:sh ~/.config/helix/bin/tl out \"$BASH_EXECUTION_STRING\" # done: "
 # Recently changed task files, newest first, in a popup
 r = ":sh ~/.config/helix/bin/tl recent"
-# Time per day for all task files (just this file if it is outside ~/tasks)
-l = [":write", "align_view_top", ":sh ~/.config/helix/bin/tl summary --file %{buffer_name}"]
+# Time per day for all task files, from any buffer (the agenda too)
+l = [":write", "align_view_top", ":sh ~/.config/helix/bin/tl summary"]
 # This week's time summary in a read-only buffer (~/.cache/tl/summary.txt), to copy from
 L = [":write", ":open %sh{~/.config/helix/bin/tl summary --week --view}", ":reload"]
 
@@ -130,6 +130,8 @@ s = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-c
 a = [":open %sh{~/.config/helix/bin/td list >/dev/null; echo ~/.cache/td/agenda.md}", ":reload"]
 # Agenda, most recently changed first
 A = [":open %sh{~/.config/helix/bin/td list --sort modified >/dev/null; echo ~/.cache/td/agenda.md}", ":reload"]
+# Done tasks in the agenda, most recently changed first
+D = [":open %sh{~/.config/helix/bin/td list --state done --sort modified >/dev/null; echo ~/.cache/td/agenda.md}", ":reload"]
 # Give the bullet its own file ~/tasks/<slug>.md, and open it
 P = [":update", "extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td promote --from %{buffer_name}:%{cursor_line}", "collapse_selection", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
 # Open the bullet's own file; on the agenda, its line in todo.md
