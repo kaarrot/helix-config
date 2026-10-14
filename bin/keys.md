@@ -29,7 +29,7 @@ from the times. todo.md is not a task file for `tl`: its bullets are todos.
 |---|---|
 | `i` | **Clock in.** First ends what is running (every entry that started less than 12 hours ago and has no end), in whichever task file it is, keeping a note you typed there and haven't saved; that file is saved. Then adds `YYYY-MM-DD HH:MM - ` on a new line at the end of this buffer, saves it so the next clock-in can find the entry, and leaves you in insert mode to type the note. In todo.md the new line is not an entry: `tl` skips todo.md, so it is never stopped or counted |
 | `I` | **Switch back.** Ends what is running, as `i` does (no heading), and clocks in to the task you worked on before it: opens that task file and adds `YYYY-MM-DD HH:MM - ` at its end, in insert mode. "Before it" means the latest entry in a file other than the running entry's, so pressing `I` again switches back. With nothing running (say after `o`), it resumes the task of the latest entry. If there is no other task, it works like `i` in this buffer. Both files are saved, as with `i` |
-| `L` | **Week summary in a buffer**, to copy from. Saves, then opens `~/.cache/tl/summary.txt` with the same report as `l`, for this week, Monday to Sunday, over all task files (wherever you press it). The file is rewritten each time and read-only, like the agenda; anything typed there is thrown away by the next `L` |
+| `L` | **Week summary in a buffer**, to copy from. Saves, then opens `~/.cache/tl/summary.txt` with the same report as `l`, for this week, Monday to Sunday, over all task files (wherever you press it). The file is rewritten each time and read-only, like the agenda; anything typed there is thrown away by the next `L`. In it, `-` and `+` show the previous and next week, as often as you press them; `L` goes back to this week |
 | `o` | **Clock out.** Saves all buffers, then waits at the command prompt `# done: `. Type what you did and press Enter: the latest running entry (in any task file, started in the last 12 hours) gets its end time and duration, and your text becomes the `# heading` line right above it, or is added to the heading already there after ` - `. Enter on an empty prompt ends the entry with no heading; Esc does nothing. The text needs no quoting; only `%` is special (type `%%` for one) |
 | `r` | **Recent files.** A popup with the 9 most recently changed task files, newest first, each with its last entry. Open one with `:o <path>` |
 | `l` | **Summary** (time log). Saves, then shows time per day for the last 14 days in a popup: per task file its total and title, and under it the `# headings` it was worked under. Running entries come first, and problems (overlaps, duplicates, typos, entries over 12 hours) last, as `~/path:line` you can open with `gf`. In a file outside `~/tasks`, only that file is counted |
@@ -112,6 +112,9 @@ part, so pressing again keeps moving it. The weekday follows the date, and
 one undo reverts one press. A line with no stamp is left alone, and so is
 the agenda. These keys don't save.
 
+On the week summary view (`space , L`), `-` shows the previous week and `+`
+the next one, wherever the cursor is.
+
 On a time-log line (`2026-10-13 09:30 - 10:45 = 1h 15min  note`) they amend
 the entry instead: its date, its start time or its end time, whichever the
 cursor is on, and the `= 1h 15min` part is worked out again. On the note,
@@ -124,7 +127,7 @@ a time of day.
 | Key | What it does |
 |---|---|
 | `+` | Later by one year, month, day, hour, or 5 minutes, whichever the cursor is on. On the weekday or anywhere else on the line: one day. On a time-log line: the same for its date, start or end time |
-| `-` | The same, earlier |
+| `-` | The same, earlier. On the week summary view: the previous week (`+`: the next) |
 
 Minutes land on multiples of 5 (`09:32` → `09:35` / `09:30`). Hours past
 midnight change the day; a month from the 31st lands on the month's last day.
@@ -157,7 +160,12 @@ next to starting Python, so they see the saved file in practice.
   back the pipe's edit, `:update` has nothing to save (the read-only file
   is never written), and Helix's auto-reload shows the rebuilt agenda. In
   any other file `:earlier 0` changes nothing (it says "Already at oldest
-  change" until the save's "written" replaces it) and `:update` saves. `:pipe` puts anything printed on stderr in place of the
+  change" until the save's "written" replaces it) and `:update` saves.
+  On the agenda `td` gives the line back with a space added before its
+  newline, so the pipe always makes exactly one edit for `:earlier 1` to
+  take back: a line given back as it was can make none (the empty last
+  line does), and the undo would then take back the agenda's last reload,
+  leaving it stale and modified. `:pipe` puts anything printed on stderr in place of the
   line, so `td` prints nothing there. Two earlier designs failed: `:write`
   then `:sh td … --line N` showed the change only on the next keypress, so
   pressing again toggled it back; `:write` then `%sh{td … --line N}` and
@@ -176,6 +184,13 @@ next to starting Python, so they see the saved file in practice.
   `%{cursor_column}` to `~/.cache/td/stamp-col`, and `td` reads it. `+`/`-`
   get back the column where the moved part now is, and
   `:open FILE:LINE:COL` puts the cursor there.
+- **`+`, `-`** also run the conditional undo, for the agenda and the week
+  view: `:earlier 1` there (with the same one-edit rule as the status
+  keys), `:earlier 0` anywhere else. On the week view `td` has `tl` rewrite
+  it for the week before or after (the week is read from its first line),
+  and auto-reload shows it. They don't save, so nothing replaces
+  "Already at oldest change": a final `:echo ''` clears it (a bare `:echo`
+  is an error).
 - **`a`, `A`:** `td list` runs inside `%sh{}`, so the agenda is rebuilt
   before `:open`, and `:reload` drops anything typed into the read-only
   buffer.
@@ -226,14 +241,6 @@ next to starting Python, so they see the saved file in practice.
   (`DONE_MARK` in `tl`): change both together.
 - **`l`** runs `align_view_top` first: a popup opens below the cursor's
   screen row when 6 rows fit there, so at the top it gets the full height.
-
-### To do: step the week summary back and forth
-
-`L` shows only this week. It should step to the previous or next week as
-quickly as `+`/`-` move a stamp, pressed again and again. One way: the view
-names its week in its first line, and `+`/`-` on the view rebuild it for
-the week before or after, the way the status keys rebuild the agenda
-(`tl summary --week` would take a date to pick the week). Not decided yet.
 
 ### Why `p` and `P` are separate
 

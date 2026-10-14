@@ -49,9 +49,10 @@ C-4 = ":run-shell-command echo -n \"%(buffer_name)\" | xclip -selection clipboar
 # free because speak uses --send, not one-shot ryk. See kukuryku docs/rewind-plan.md.
 A-r = ":sh ryk-rewind"
 
-# td stamp keys (bin/keys.md): move the line's stamp, or a time-log entry's date/start/end, later / earlier by the part under the cursor
-"+" = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td shift +1 --col $(cat ~/.cache/td/stamp-col) --from %{buffer_name}", "collapse_selection", ":open %sh{echo %{buffer_name}:%{cursor_line}:$(cat ~/.cache/td/stamp-col)}"]
-"-" = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td shift -1 --col $(cat ~/.cache/td/stamp-col) --from %{buffer_name}", "collapse_selection", ":open %sh{echo %{buffer_name}:%{cursor_line}:$(cat ~/.cache/td/stamp-col)}"]
+# td stamp keys (bin/keys.md): move the line's stamp, or a time-log entry's date/start/end, later / earlier by the part under
+# the cursor; on the week summary view (space , L), show the next / previous week
+"+" = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td shift +1 --col $(cat ~/.cache/td/stamp-col) --from %{buffer_name}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/tl/summary.txt ] || [ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", "collapse_selection", ":open %sh{echo %{buffer_name}:%{cursor_line}:$(cat ~/.cache/td/stamp-col)}", ":echo ''"]
+"-" = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td shift -1 --col $(cat ~/.cache/td/stamp-col) --from %{buffer_name}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/tl/summary.txt ] || [ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", "collapse_selection", ":open %sh{echo %{buffer_name}:%{cursor_line}:$(cat ~/.cache/td/stamp-col)}", ":echo ''"]
 
 [keys.normal.g]
     "\\" = ":sh echo 'https://...myaddress.../-/blob/master/%{buffer_name}#L%{cursor_line}' | xclip -selection clipboard"

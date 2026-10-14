@@ -106,7 +106,10 @@ Commands:
                        date, or the start or end time under COL (the date
                        when COL is elsewhere, unless the line also has a
                        stamp), in tl's format, with its duration redone.
-                       No stamp or entry: the line comes back unchanged.
+                       On tl's week summary view (~/.cache/tl/summary.txt),
+                       the view moves N weeks instead and the line comes
+                       back unchanged. No stamp or entry: the line comes
+                       back unchanged.
   td fire PATH         fire a dedicated file's timestamp now (testing)
   td test [-v]         run tests
 
@@ -792,6 +795,14 @@ def _from_arg(args):
     return Path(args[i + 1]).expanduser() if i + 1 < len(args) else None
 
 
+def _changed(data):
+    """data with a space before its newline, for the agenda and the week view: there the keys take
+    back the pipe's edit with `:earlier 1`, so the pipe must make exactly one edit. A line given
+    back as it was can make none (an empty one does), and the undo would take back the reload
+    before it instead, leaving the buffer stale and modified."""
+    return data[:-1] + " \n" if data.endswith("\n") else data + " "
+
+
 def _echo_if_agenda(args, data):
     """The agenda is view only: when --from is the agenda, write data back
     unchanged and return True."""
@@ -1013,7 +1024,15 @@ def cmd_shift(args):
     n = int(args[0])
     col = _col_arg(args)
     data = sys.stdin.read()
-    if _echo_if_agenda(args, data):
+    from_path = _from_arg(args)
+    if _same_file(from_path, LIST_PATH):
+        sys.stdout.write(_changed(data))  # the agenda is view only; the keys undo this
+        return 0
+    if from_path and from_path.name == "summary.txt" and _same_file(from_path, _tl().VIEW_PATH):
+        # tl's week summary view: step it n weeks. The keys undo the pipe's edit there, so
+        # Helix reloads the rewritten view.
+        _tl().view_step(n)
+        sys.stdout.write(_changed(data))
         return 0
     trailing_nl = data.endswith("\n")
     body = data[:-1] if trailing_nl else data
@@ -1385,7 +1404,8 @@ def cmd_toggle(args):
         # agenda is rebuilt. The row itself comes back unchanged (the keys
         # undo it with :earlier, so Helix reloads the rebuilt agenda).
         _toggle_agenda_row(raw, state)
-        emit(raw)
+        if not use_file:
+            sys.stdout.write(_changed(raw + nl))  # the keys undo this edit
         return 0
 
     from_inbox = _same_file(from_path, inbox)
@@ -2541,9 +2561,10 @@ def run_tests(verbose=False):
             before = agenda.read_text()
             row = "- [ ] alpha 2026-10-20 Tue 09:00 (*)\n"
             lineno = before.splitlines().index(row.strip()) + 1
-            for args in (["shift", "+1", "--col", "20"], ["stamp", "--col", "3"]):
-                out = self.td(*args, "--from", str(agenda), stdin=row)
-                self.assertEqual(out, row, args)
+            # +/- give the row back with one edit, which the keys undo (see _changed).
+            out = self.td("shift", "+1", "--col", "20", "--from", str(agenda), stdin=row)
+            self.assertEqual(out, row[:-1] + " \n")
+            self.assertEqual(self.td("stamp", "--col", "3", "--from", str(agenda), stdin=row), row)
             self.td("promote", "--from", f"{agenda}:{lineno}", stdin=row)
             self.assertEqual(p.read_text(), "- [ ] alpha 2026-10-20 Tue 09:00\n")
             self.assertEqual((self.tasks / "alpha.md").read_text(), "# [ ] alpha\n")
@@ -2732,8 +2753,17 @@ def run_tests(verbose=False):
             row = next(line for line in agenda.read_text().splitlines(keepends=True)
                        if text in line)
             out = self.td("toggle", state, "--from", str(agenda), *args, stdin=row)
-            self.assertEqual(out, row)  # the row itself is left alone
+            self.assertEqual(out, row[:-1] + " \n")  # one edit, which the keys undo
             return self.read_cache("agenda.md")
+
+        def test_empty_line_still_makes_an_edit(self):
+            # On the agenda's last, empty line the pipe gets "": giving "" back would make no
+            # edit, and the keys' :earlier 1 would undo the agenda's last reload instead.
+            self.put_inbox("- [ ] alpha\n")
+            self.td("list")
+            agenda = str(self.cache / "agenda.md")
+            self.assertEqual(self.td("toggle", "Y", "--from", agenda, stdin=""), " ")
+            self.assertEqual(self.td("shift", "+1", "--from", agenda, stdin=""), " ")
 
         def test_bullet_row_sets_todo_md(self):
             p = self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
@@ -2840,6 +2870,25 @@ def run_tests(verbose=False):
                 with self.assertRaises(sp.CalledProcessError, msg=args):
                     self.td("file", *args)
             self.assertEqual(list(self.tasks.iterdir()), [])
+
+    class WeekView(Case):
+        def test_plus_minus_step_the_week(self):
+            # +/- on tl's week summary view step it; NOW is Saturday 2026-10-10.
+            self.put_dedicated("a.md", "# A\n2026-10-01 09:00 - 10:00\n2026-10-06 09:00 - 10:30\n")
+            view = Path(self.td_tl("summary", "--week", "--view"))
+            weeks = []
+            for n in ("-1", "+1", "+1"):
+                out = self.td("shift", n, "--col", "3", "--from", str(view), stdin="Time summary\n")
+                self.assertEqual(out, "Time summary \n")
+                weeks.append(view.read_text().split("\n")[0][19:29])
+            self.assertEqual(weeks, ["2026-09-28", "2026-10-05", "2026-10-12"])
+            self.assertEqual(self.td("shift", "+1", "--from", str(view), stdin=""), " ")
+
+        def td_tl(self, *args):
+            e = {**os.environ, "HOME": str(self.home), "TL_DIR": str(self.tasks), "TL_NOW": NOW}
+            tl = str(Path(TD).with_name("tl"))
+            return sp.run([sys.executable, tl, *args], env=e, capture_output=True,
+                          check=True).stdout.decode()
 
     class Rename(Case):
         """td rename, as space , N runs it: the row's line in the agenda, then the new name."""
@@ -3130,7 +3179,7 @@ def run_tests(verbose=False):
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
                                for c in (Parse, List, Tick, New, Stamp, Next,
                                          Promote, Marker, Jump, SetToggle,
-                                         AgendaToggle, File, Rename, Fire, Recurring,
+                                         AgendaToggle, File, WeekView, Rename, Fire, Recurring,
                                          TlAgrees,
                                          KeysDoc))
     ok = unittest.TextTestRunner(verbosity=2 if verbose else 1).run(suite).wasSuccessful()
