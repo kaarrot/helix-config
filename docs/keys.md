@@ -55,7 +55,8 @@ left out). Renaming the bullet unlinks it from its file.
 | Key | What it does |
 |---|---|
 | `t` | Open the inbox, `~/tasks/todo.md` |
-| `q` | **New todo.** Opens todo.md and adds `- [ ] ` on a new line at its end, in insert mode: type the task, then save. Works from anywhere, the agenda too; the agenda shows the task after the next `a` |
+| `q` | **New todo.** Opens todo.md and adds `- [ ] ` on a new line at its end, in insert mode: type the task, then save. If the last line already is an empty `- [ ] ` (say a `q` you left without typing), it goes there instead of adding a second one. Works from anywhere, the agenda too; the agenda shows the task after the next `a` |
+| `Q` | **New todo at the top.** The same as `q`, at the first line of todo.md: an empty `- [ ] ` already first is used, anything else moves down a line |
 | `n` | **New file task**, for a task clear enough to skip todo.md. Opens the command prompt at `# name: `; type the task's name and press Enter (Esc does nothing). Creates `~/tasks/<slug>.md`, named like a bullet's own file (`Buy a car!` → `buy-a-car.md`), with `# [ ] Buy a car!` on its first line, and opens it on the blank line under the heading. It is a file task: the agenda lists it under TODO, and the status keys on its heading set its state. If the file exists, it just opens it. The name needs no quoting; only `%` is special (`%%` for one), and it can't contain `}` |
 | `N` | **Rename a task**, from its agenda row. Opens the command prompt at `# name: ` with the task's current name filled in; edit it, or delete it and type a new one, then press Enter (Esc does nothing). The new name goes through the same check as `n`'s, and the task changes where it lives: a file task's (or orphan's) file is renamed to the new name's slug and its first-line heading gets the name, keeping its `[S]`; a bullet row's todo.md bullet gets the name as its text, and its own file, if any, is renamed and retitled with it, so the two stay linked. The agenda reloads, and the task keeps its place in it. Refused, changing nothing, when a file already has the new name, the name has no letter or digit, or the row shows no task. As with `n`, `%` is typed `%%`, and the name can't contain `}`. Don't rename a file you have open in another buffer: that buffer keeps the old name |
 | `a` | **Agenda.** Opens a snapshot of todo.md grouped TODAY, ACTIVE, TODO, WAITING, newest-added first; done and ignored bullets are hidden. A bullet with its own file shows ` (*)`. Files without a bullet are listed by the status on their first line (`# [W] renew passport`), or under ORPHANS if they have none. View only: Helix shows `[readonly]`, and anything typed there is thrown away by the next `a`. But `x` and the status keys work on its rows: they change the task itself (see below), and the agenda reloads. `q` adds a new task, `n` a new file task, and `N` renames the task on a row. For anything else, `p` takes you to the task |
@@ -213,8 +214,19 @@ starting Python, so it sees the saved file in practice.
      The `!` is needed when this is the buffer step 2 saved: a second save
      of one buffer in one key otherwise fails with "file modified by an
      external process", since Helix hasn't recorded the first one yet.
-- **`q`** opens todo.md and builds its new line the way `i` does, with
-  `td new` printing `- [ ] ` in place of `tl start`'s time.
+- **`q`** opens todo.md and pipes its last line through `td new -`, which
+  prints that line back with `- [ ] ` on a line under it, or just
+  `- [ ] ` when the line already is that empty bullet. `goto_last_line`
+  then lands on the bullet either way, and `insert_at_line_end` types
+  after it. It can't add the line with `open_below` and
+  `:insert-output td new`, as `i` does with `tl start`: languages.toml
+  makes `- [ ]` a markdown comment token, so `open_below` under a
+  `- [ ] …` line already starts the new one with `- [ ] `, and the key
+  gave `- [ ] - [ ] `. Enter continues a bullet the same way, which is
+  how an empty `- [ ] ` gets left last. A Helix key has no if, so the
+  check has to be in a command that gets the line.
+- **`Q`** does the same with the first line: `goto_file_start` and
+  `td new - --above`, which puts the bullet above the line instead.
 - **`n`** is a macro too, ending at the prompt
   `:open %sh{td file "$BASH_EXECUTION_STRING" # name: }` with the cursor
   moved before the `}` (`<left>`), so your text goes inside `%sh{}`. On

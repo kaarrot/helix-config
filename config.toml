@@ -118,8 +118,10 @@ L = [":write", ":open %sh{~/.config/helix/bin/tl summary --week --view}", ":relo
 
 # Open the inbox, ~/tasks/todo.md
 t = ":open ~/tasks/todo.md"
-# New todo: a "- [ ] " line at the end of todo.md, in insert mode (from anywhere, the agenda too)
-q = [":open ~/tasks/todo.md", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/td new", "insert_at_line_end"]
+# New todo: a "- [ ] " line at the end of todo.md, in insert mode (from anywhere, the agenda too); an empty one already last is reused
+q = [":open ~/tasks/todo.md", "goto_last_line", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td new -", "collapse_selection", "goto_last_line", "insert_at_line_end"]
+# The same at the top of todo.md
+Q = [":open ~/tasks/todo.md", "goto_file_start", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td new - --above", "collapse_selection", "goto_file_start", "insert_at_line_end"]
 # New file task, no todo.md bullet: type its name at the prompt; opens ~/tasks/<name>.md headed "# [ ] name"
 n = "@:open %sh{~/.config/helix/bin/td file \"$BASH_EXECUTION_STRING\" # name: }<left>"
 # Rename the task on an agenda row: its name comes up in the prompt to edit (file and heading, or bullet and file)

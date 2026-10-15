@@ -82,8 +82,13 @@ Commands:
                        stays [ ]: ++ advances the stamped date by N units
                        until it is in the future (anchored, e.g. rent on the
                        1st); .+ sets it to today + N units (floating).
-  td new [--state todo|today|active|waiting]
-                       print "- [S] " for pipe/insert (space , q)
+  td new [--state todo|today|active|waiting] [- [--above]]
+                       print "- [S] " for pipe/insert. With -, for space , q:
+                       read the buffer's last line on stdin and print it
+                       back with "- [S] " on a line under it, or just
+                       "- [S] " when that line already is that empty bullet.
+                       --above, for space , Q: the first line, and the
+                       bullet goes on a line above it
   td file NAME...      a file task with no todo.md bullet: create
                        ~/tasks/<slug of NAME>.md with `# [ ] NAME` on its
                        first line (an existing file is left as it is) and
@@ -1168,15 +1173,36 @@ def cmd_rename(args):
 
 def cmd_new(args):
     state_name = "todo"
+    after_stdin = above = False
     i = 0
     while i < len(args):
         if args[i] == "--state" and i + 1 < len(args):
             state_name = args[i + 1]; i += 2
+        elif args[i] == "-":
+            after_stdin = True; i += 1
+        elif args[i] == "--above":
+            above = True; i += 1
         else:
             i += 1
     if state_name not in STATE_FROM_NAME:
         sys.exit(f"bad --state: {state_name}")
-    sys.stdout.write(f"- [{STATE_FROM_NAME[state_name]}] ")
+    bullet = f"- [{STATE_FROM_NAME[state_name]}] "
+    if not after_stdin:
+        sys.stdout.write(bullet)
+        return 0
+    # space , q pipes the last line through here (space , Q the first): an
+    # empty bullet left by an earlier one is reused, not joined by a second.
+    piped = sys.stdin.read()
+    nl = "\n" if piped.endswith("\n") else ""
+    raw = piped.rstrip("\n")
+    if raw.rstrip() == bullet.rstrip():
+        sys.stdout.write(bullet + nl)
+    elif not piped:
+        sys.stdout.write(bullet)
+    elif above:
+        sys.stdout.write(bullet + "\n" + raw + nl)
+    else:
+        sys.stdout.write(raw + "\n" + bullet + nl)
     return 0
 
 
@@ -2542,6 +2568,32 @@ def run_tests(verbose=False):
         def test_states(self):
             self.assertEqual(self.td("new", "--state", "today"), "- [Y] ")
             self.assertEqual(self.td("new", "--state", "active"), "- [A] ")
+
+        def test_after_line(self):
+            self.assertEqual(self.td("new", "-", stdin="- [ ] call jon\n"),
+                             "- [ ] call jon\n- [ ] \n")
+            self.assertEqual(self.td("new", "-", stdin="# inbox"),
+                             "# inbox\n- [ ] ")
+            self.assertEqual(self.td("new", "-", stdin="\n"), "\n- [ ] \n")
+
+        def test_reuses_empty_bullet(self):
+            self.assertEqual(self.td("new", "-", stdin="- [ ] \n"), "- [ ] \n")
+            self.assertEqual(self.td("new", "-", stdin="- [ ]"), "- [ ] ")
+            self.assertEqual(self.td("new", "-", stdin="- [ ]   \n"), "- [ ] \n")
+            # Another state's empty bullet is a line like any other.
+            self.assertEqual(self.td("new", "-", stdin="- [Y] \n"),
+                             "- [Y] \n- [ ] \n")
+
+        def test_empty_buffer(self):
+            self.assertEqual(self.td("new", "-", stdin=""), "- [ ] ")
+            self.assertEqual(self.td("new", "-", "--above", stdin=""), "- [ ] ")
+
+        def test_above_line(self):
+            self.assertEqual(self.td("new", "-", "--above", stdin="- [ ] call jon\n"),
+                             "- [ ] \n- [ ] call jon\n")
+            self.assertEqual(self.td("new", "-", "--above", stdin="# inbox"),
+                             "- [ ] \n# inbox")
+            self.assertEqual(self.td("new", "-", "--above", stdin="- [ ]\n"), "- [ ] \n")
 
     class Stamp(Case):
         # NOW = "2026-10-10 11:00"  → %a = "Sat"
