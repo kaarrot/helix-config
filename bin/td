@@ -87,12 +87,12 @@ Commands:
                        until it is in the future (anchored, e.g. rent on the
                        1st); .+ sets it to today + N units (floating).
   td new [--state todo|today|active|waiting] [- [--above]]
-                       print "- [S] " for pipe/insert. With -, for space , q:
+                       print "- [S] " for pipe/insert. With -, for space , Q:
                        read the buffer's last line on stdin and print it
                        back with "- [S] " on a line under it, or just
                        "- [S] " when that line already is that empty bullet.
-                       --above, for space , Q: the first line, and the
-                       bullet goes on a line above it
+                       --above, for space , q and space , space: the first
+                       line, and the bullet goes on a line above it
   td file NAME...      a file task with no todo.md bullet: create
                        ~/tasks/<slug of NAME>.md with `# [ ] NAME` on its
                        first line (an existing file is left as it is) and
@@ -1233,7 +1233,7 @@ def cmd_new(args):
     if not after_stdin:
         sys.stdout.write(bullet)
         return 0
-    # space , q pipes the last line through here (space , Q the first): an
+    # space , Q pipes the last line through here (space , q the first): an
     # empty bullet left by an earlier one is reused, not joined by a second.
     piped = sys.stdin.read()
     raw, eol = _split_eol(piped)

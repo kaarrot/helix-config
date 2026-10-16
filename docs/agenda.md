@@ -305,8 +305,8 @@ file's heading follows), a file-task row sets that file's `# [S] title`
 heading. Then `td` rebuilds the agenda with the options it was opened
 with (`~/.cache/td/agenda-args`, so `space , A`'s order stays), and Helix
 reloads it; the row itself is never written. `+`, `-`, `space , s` and
-`space , P` leave rows and tasks alone. `space , q` adds a new task at
-the end of todo.md. For anything else, `space , p` to the task. How the keys manage this is in
+`space , P` leave rows and tasks alone. `space , q` (or `space , space`)
+adds a new task at the top of todo.md, `space , Q` at the end. For anything else, `space , p` to the task. How the keys manage this is in
 [keys.md](keys.md#how-the-keys-are-built).
 
 ## Recurring tasks
