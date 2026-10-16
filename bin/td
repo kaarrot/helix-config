@@ -110,7 +110,7 @@ Commands:
                        with today's date (preserving the time) or recompute
                        the weekday only (--restamp, or --col N with column N,
                        1-based, on the stamp). If no date, append a
-                       fresh "YYYY-MM-DD Xxx HH:MM" to the end of the line.
+                       fresh "[YYYY-MM-DD Xxx HH:MM]" to the end of the line.
                        The weekday is always kept in sync with the date.
   td shift +N|-N [--col COL]
                        stdin: a line. Move its stamp (the one at COL when it
@@ -313,7 +313,11 @@ def _identity_text(text):
     stamps = find_stamps(s)
     if stamps:
         for m in reversed(stamps):
-            s = s[:m.start()] + " " + s[m.end():]
+            start, end = m.start(), m.end()
+            # the brackets `td stamp` writes go with the stamp
+            if s[start - 1:start] == "[" and s[end:end + 1] == "]":
+                start, end = start - 1, end + 1
+            s = s[:start] + " " + s[end:]
         s = REPEATER.sub(" ", s)
     return re.sub(r"\s+", " ", s).strip()
 
@@ -1439,7 +1443,9 @@ def cmd_stamp(args):
         if restamp:
             rewritten = body
         else:
-            stamp = t.strftime("%Y-%m-%d %a %H:%M")
+            # In brackets, so the date is a markdown node of its own and the
+            # td highlight can keep it out of an open task's bold
+            stamp = t.strftime("[%Y-%m-%d %a %H:%M]")
             rewritten = f"{body} {stamp}" if body else stamp
             stamped = t.strftime("%Y-%m-%d %H:%M")
 
@@ -2153,6 +2159,14 @@ def run_tests(verbose=False):
                 self.assertEqual(bullet_hash(p, a), bullet_hash(p, b), a)
                 self.assertEqual(slugify(a), slugify(b), a)
             self.assertEqual(slugify("call bank 2026-10-12 10:00 - bring docs"), "call-bank-bring-docs")
+            # The brackets `td stamp` writes go with the stamp, so stamping
+            # a task keeps it the same task; other brackets stay text.
+            for stamped in ("pay rent [2026-11-01 Sun 09:00]",
+                            "pay rent [2026-12-01 Tue 09:00] ++1m"):
+                self.assertEqual(bullet_hash(p, stamped), bullet_hash(p, "pay rent"), stamped)
+                self.assertEqual(_identity_text(stamped), "pay rent", stamped)
+            self.assertEqual(_identity_text("# [ ] haircut [2026-12-15 Tue 11:50]"),
+                             "# [ ] haircut")
             # A repeater goes with a stamp; on a line with none it is text.
             self.assertEqual(slugify("learn C ++1d"), "learn-c-1d")
 
@@ -2760,10 +2774,10 @@ def run_tests(verbose=False):
         # NOW = "2026-10-10 11:00"  → %a = "Sat"
         def test_append_when_no_date(self):
             out = self.td("stamp", stdin="- [Y] call jon")
-            self.assertEqual(out, "- [Y] call jon 2026-10-10 Sat 11:00")
+            self.assertEqual(out, "- [Y] call jon [2026-10-10 Sat 11:00]")
 
         def test_append_when_empty_line(self):
-            self.assertEqual(self.td("stamp", stdin=""), "2026-10-10 Sat 11:00")
+            self.assertEqual(self.td("stamp", stdin=""), "[2026-10-10 Sat 11:00]")
 
         def test_replace_existing_date_with_today(self):
             out = self.td("stamp",
@@ -2779,7 +2793,7 @@ def run_tests(verbose=False):
             # SCHEDULE_TS requires a time, so a bare date is not recognised
             # as a stamp → treated as "no date", fresh stamp appended.
             out = self.td("stamp", stdin="meeting 2025-12-25")
-            self.assertTrue(out.endswith("2026-10-10 Sat 11:00"))
+            self.assertTrue(out.endswith(" [2026-10-10 Sat 11:00]"))
             self.assertIn("2025-12-25", out)
 
         def test_restamp_fixes_weekday_only(self):
@@ -2799,14 +2813,14 @@ def run_tests(verbose=False):
 
         def test_preserves_trailing_newline(self):
             self.assertEqual(self.td("stamp", stdin="x\n"),
-                             "x 2026-10-10 Sat 11:00\n")
+                             "x [2026-10-10 Sat 11:00]\n")
 
         def test_tl_log_entry_not_touched(self):
             # A tl entry's leading time is not a schedule → `stamp` leaves it
             # alone and appends a fresh stamp at end
             out = self.td("stamp",
                           stdin="2026-10-08 19:16 - 19:17 = 0h 01min")
-            self.assertTrue(out.endswith("2026-10-10 Sat 11:00"))
+            self.assertTrue(out.endswith(" [2026-10-10 Sat 11:00]"))
             self.assertTrue(out.startswith("2026-10-08 19:16 - 19:17"))
 
         def test_col_on_stamp_fixes_weekday_only(self):
@@ -2822,7 +2836,7 @@ def run_tests(verbose=False):
 
         def test_col_without_stamp_appends(self):
             out = self.td("stamp", "--col", "3", stdin="- [Y] call jon")
-            self.assertEqual(out, "- [Y] call jon 2026-10-10 Sat 11:00")
+            self.assertEqual(out, "- [Y] call jon [2026-10-10 Sat 11:00]")
 
         def test_col_bad_value_ignored(self):
             out = self.td("stamp", "--col", stdin="meeting 2025-12-25 09:00")
@@ -2869,7 +2883,7 @@ def run_tests(verbose=False):
             self.assertEqual(self.shift("+1", "- [ ] rent 2026-10-20 Tue 09:30\r\n"),
                              "- [ ] rent 2026-10-21 Wed 09:30\r\n")
             self.assertEqual(self.td("stamp", stdin="- [ ] call jon\r\n"),
-                             "- [ ] call jon 2026-10-10 Sat 11:00\r\n")
+                             "- [ ] call jon [2026-10-10 Sat 11:00]\r\n")
             self.assertEqual(self.td("new", "-", stdin="- [ ] call jon\r\n"),
                              "- [ ] call jon\r\n- [ ] \r\n")
             self.assertEqual(self.td("new", "-", "--above", stdin="- [ ] call jon\r\n"),
