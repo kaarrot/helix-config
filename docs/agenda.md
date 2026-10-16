@@ -165,6 +165,8 @@ tick, that is, it was added since then (the previous tick's time is in
   tick (a note like "called 10:05" written at 10:10), fires once.
 - A reboot clears the alarm. The next tick (opening the agenda is enough)
   fires what came due meanwhile, late, and arms the alarm again.
+- A stamp with a `++`/`.+` repeater fires again every N units while its
+  task is open (see [Recurring tasks](#recurring-tasks)).
 
 Each reminder (its file, time and line text) fires once
 (`~/.cache/td/fired`). Editing the time makes it a new reminder. Two
@@ -173,7 +175,8 @@ reminders at the same minute both fire, even in one file. A state change
 fired doesn't fire again. A notification that fails isn't counted as
 fired: it is retried a minute later. A reminder that fired stays on the
 agenda, under RESCHEDULE, until you move its date or finish the task,
-unless its line has a `++`/`.+` repeater.
+unless its line has a `++`/`.+` repeater: that one reminds you again at
+its next time instead.
 
 ### How it runs
 
@@ -286,7 +289,7 @@ app).
 
 - RESCHEDULE rows, after TODAY, are reminders that went off and still
   wait: the task is open and the date unchanged. A line with a `++`/`.+`
-  repeater isn't listed: its date moves when you mark the task done. A
+  repeater isn't listed: it reminds you again at its next time. A
   row is the reminder's line (`trip: book taxi 2026-10-20 10:00` for one in a task file), oldest
   first, ending in `path:line:col` with the column on the date's day. So
   `space , p` puts the cursor there, for `+`/`-` to move the date (or
@@ -329,7 +332,7 @@ adds a new task at the top of todo.md, `space , Q` at the end. For anything else
 
 ## Recurring tasks
 
-A repeater after the stamp, `++Nu` or `.+Nu` (N ≥ 1, u = `d`|`w`|`m`|`y`),
+A repeater after the stamp, `++Nu` or `.+Nu` (N ≥ 1, u = `h`|`d`|`w`|`m`|`y`),
 makes a bullet repeat. Marking it done (`space , x`) moves the date instead
 and keeps it `[ ]`; the rest of the line is kept.
 
@@ -343,6 +346,23 @@ and keeps it `[ ]`; the rest of the line is kept.
 |----------|----------|
 | `++Nu` | **anchored**: old date + N units, repeated until it is after now. Missed cycles don't pile up, and "rent on the 1st" stays on the 1st however late you tick it |
 | `.+Nu` | **floating**: today + N units, at the stamp's time. "Water the plants about 2 weeks after I last did" |
+
+Until you mark it done, it reminds you again at each of its times: the
+date, the date + N units, + 2N, and so on.
+`pills 2026-10-10 Sat 12:00 ++1d` left open fires again on the 11th at
+12:00, and every day after.
+`td` never writes the file for this (it works the times out on each tick),
+so a buffer with unsaved changes is safe. After the phone has been off
+for a while, you get one notification for the latest time it missed, not
+one for each.
+
+Hours (`h`) are different: `++Nh` is a reminder that repeats every N hours
+until done, not a task that comes back, so `space , x` marks it `[x]`
+and the date stays.
+
+```
+- [ ] stretch 2026-10-16 Fri 09:50 ++1h         # 09:50, 10:50, 11:50... until [x]
+```
 
 A task file with no todo.md bullet (a file task) repeats by its own date:
 the date and repeater on a line that isn't a bullet, or on the heading.

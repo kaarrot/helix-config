@@ -142,7 +142,7 @@ D = [":open %sh{~/.config/helix/bin/td list --state done --sort modified >/dev/n
 P = [":update", "extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td promote --from %{buffer_name}:%{cursor_line}", "collapse_selection", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
 # Open the bullet's own file; on the agenda, its line in todo.md
 p = ["extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}", "collapse_selection", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
-# Mark done (a ++/.+ repeater moves the date instead); on the agenda, in todo.md
+# Mark done (a ++/.+ repeater moves the date instead, but an hourly one); on the agenda, in todo.md
 x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{buffer_name}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
 
 # Status keys, `space , ,` then the checkbox letter: toggle the line's state

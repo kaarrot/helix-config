@@ -18,7 +18,9 @@ Two tiers of tasks:
   Inbox bullets fire while they are open: [ ]/[Y]/[A]/[W]. A dedicated
   file fires while its bullet is open; a file with no bullet, unless its
   first H1 is `# [x]`/`# [X]`/`# [!]`. A done or ignored subtask bullet in
-  a file doesn't fire. The agenda marks a bullet with
+  a file doesn't fire. A timestamp with a ++/.+ repeater fires again every
+  N units (date + N, + 2N, ...) for as long as its task stays open; the
+  file isn't touched. The agenda marks a bullet with
   " (*)" when a dedicated file with the same slug exists.
 
       # refactor td parser
@@ -86,11 +88,13 @@ Commands:
                        in a dedicated file the `# [S] title` heading toggles
                        too and sets the file's bullet. If S is "x"
                        and the line carries an org-style ++Nu/.+Nu repeater
-                       as its own token (u = d|w|m|y, N ≥ 1; `C++1d` does not
-                       count), the date is bumped instead and state
+                       as its own token (u = h|d|w|m|y, N ≥ 1; `C++1d` does
+                       not count), the date is bumped instead and state
                        stays [ ]: ++ advances the stamped date by N units
                        until it is in the future (anchored, e.g. rent on the
-                       1st); .+ sets it to today + N units (floating).
+                       1st); .+ sets it to today + N units (floating). An
+                       hourly one (++Nh) is a reminder that repeats until
+                       done, not a recurring task: x marks it done.
   td new [--state todo|today|active|waiting] [- [--above]]
                        print "- [S] " for pipe/insert. With -, for space , Q:
                        read the buffer's last line on stdin and print it
@@ -176,11 +180,13 @@ SCHEDULE_TS = re.compile(
 TL_ENTRY = re.compile(
     r"^\s*(?:[-*]\s+(?:\[[ xXyYaAwW!]\]\s+)?)?(\d{4}-\d{2}-\d{2})\s+\d{1,2}:\d{2}\s*[-–]")
 # org-mode-style repeater, as its own token: ++2w bumps the old date by
-# N units until >today; .+2w bumps to today + N units. Units: d/w/m/y.
-# Whitespace (or start) before the sigil, and a non-word after the unit,
-# so `C++1d` and `++1days` are not repeaters. See _bump_recurring.
+# N units until >today; .+2w bumps to today + N units. Units: h/d/w/m/y,
+# but done never moves an hourly one: it just reminds every N hours until
+# done. Whitespace (or start) before the sigil, and a non-word after the unit,
+# so `C++1d` and `++1days` are not repeaters. See _bump_recurring, and
+# _tick for the reminders.
 # N must be at least 1: `++0d` would never move the date, so it is plain text.
-REPEATER = re.compile(r"(?<!\S)(\+\+|\.\+)(0*[1-9]\d*)([dwmy])(?!\w)")
+REPEATER = re.compile(r"(?<!\S)(\+\+|\.\+)(0*[1-9]\d*)([hdwmy])(?!\w)")
 LINK = re.compile(r"\s*→\s*\S+\s*$")
 MARKER = re.compile(r"\s*\(\*\)\s*$")
 AGENDA_ROW = re.compile(
@@ -370,15 +376,10 @@ def _add_period(d, n, unit):
     raise ValueError(f"bad unit: {unit}")
 
 
-def _bump_recurring(raw, today):
-    """If raw has both a SCHEDULE_TS and a ++/.+ repeater token, return
-    raw with the date advanced. Otherwise return None.
-
-    ++Nu: new = old + N*unit, repeated until >today (anchored).
-    .+Nu: new = today + N*unit (floating).
-    The stamp is the one the repeater follows (the nearest before it), else
-    the first, so a second date on the line stays put.
-    """
+def _repeat_stamp(raw):
+    """-> (stamp, repeater) matches when raw has both, else None. The stamp
+    is the one the repeater follows (the nearest before it), else the
+    first, so a second date on the line stays put."""
     m_rep = REPEATER.search(raw)
     if not m_rep:
         return None
@@ -386,7 +387,39 @@ def _bump_recurring(raw, today):
     if not stamps:
         return None
     before = [m for m in stamps if m.start() < m_rep.start()]
-    m_ts = before[-1] if before else stamps[0]
+    return (before[-1] if before else stamps[0]), m_rep
+
+
+def _repeat_around(due, n, unit, t):
+    """A repeating date's times, due + k·N units (k ≥ 0, counted from due,
+    so a month end clamps afresh each time), around t -> (the last at or
+    before t, or None; the first after t)."""
+    if due > t:
+        return None, due
+    if unit in ("m", "y"):
+        months = (t.year - due.year) * 12 + t.month - due.month
+        k = months // (n * 12 if unit == "y" else n)
+        if _add_period(due, k * n, unit) > t:
+            k -= 1
+    else:
+        k = (t - due) // (_add_period(due, n, unit) - due)
+    return _add_period(due, k * n, unit), _add_period(due, (k + 1) * n, unit)
+
+
+def _bump_recurring(raw, today):
+    """If raw has both a SCHEDULE_TS and a ++/.+ repeater token, return
+    raw with the date advanced. Otherwise return None.
+
+    ++Nu: new = old + N*unit, repeated until >today (anchored).
+    .+Nu: new = today + N*unit (floating).
+    The stamp is the one the repeater follows (see _repeat_stamp).
+    An hourly repeater is None too: it reminds every N hours until done
+    (see _tick), so done marks it done instead of moving it.
+    """
+    found = _repeat_stamp(raw)
+    if not found or found[1].group(3) == "h":
+        return None
+    m_ts, m_rep = found
     try:
         old = datetime.strptime(f"{m_ts.group(1)} {m_ts.group(2)}",
                                 "%Y-%m-%d %H:%M")
@@ -822,6 +855,13 @@ def _tick():
     on the next tick, however late. A notification that fails is not
     recorded as fired: it is kept in `scheduled` and retried a minute later.
 
+    A stamp with a ++/.+ repeater is a reminder at each of its times, due,
+    due + N units, due + 2N... (see _repeat_around), each its own
+    (hash, iso) under the rule above, for as long as its task is open: the
+    file isn't touched, so a buffer's unsaved edits are safe. Only the last
+    time passed can fire, so after a long sleep one notification comes, not
+    one per missed time.
+
     Then the one exact alarm (see arm) is pointed at the earliest future
     `due − lead` not yet fired, or cancelled when nothing is left."""
     t = now()
@@ -832,23 +872,36 @@ def _tick():
     last_tick = load_last_tick()
     stamped_now = load_stamped_now()
     new_scheduled = []
+    upcoming = []
     failed = False
     for s in items:
-        due_iso = s.due.isoformat(timespec="minutes")
-        fire_at = s.due - lead
-        key = (s.hash, due_iso)
-        if fire_at > t:
+        # past: the time that may fire now; future: the next one to come.
+        found = _repeat_stamp(s.raw)
+        if found and found[0].start() == s.col:
+            past, future = _repeat_around(s.due, int(found[1].group(2)),
+                                          found[1].group(3), t + lead)
+        elif s.due - lead > t:
+            past, future = None, s.due
+        else:
+            past, future = s.due, None
+        if future is not None:
+            key = (s.hash, future.isoformat(timespec="minutes"))
             if key not in scheduled:
                 new_scheduled.append((t.isoformat(timespec="minutes"),
-                                      s.hash, due_iso, s.title[:80]))
+                                      s.hash, key[1], s.title[:80]))
                 scheduled.add(key)
+            if key not in fired:
+                upcoming.append(future - lead)
+        if past is None:
             continue
+        due_iso = past.isoformat(timespec="minutes")
+        key = (s.hash, due_iso)
         if key not in scheduled:
             # Not seen as future: fire only if it was still to come at the
             # previous tick (an old date was already past then) and is not
             # a stamp of "now" from `td stamp`.
-            if (last_tick is None or s.due <= last_tick
-                    or due_iso in stamped_now):
+            if (last_tick is None or past <= last_tick
+                    or (past == s.due and due_iso in stamped_now)):
                 continue
         if key in fired:
             continue
@@ -868,9 +921,6 @@ def _tick():
         prune_reminders(t, {(s.hash, s.due.isoformat(timespec="minutes"))
                             for s in items})
     save_last_tick(t)
-    upcoming = [s.due - lead for s in items
-                if s.due - lead > t
-                and (s.hash, s.due.isoformat(timespec="minutes")) not in fired]
     if failed:
         upcoming.append(t + timedelta(minutes=1))
     return arm(min(upcoming) if upcoming else None)
@@ -961,7 +1011,8 @@ def _modified_iso(b, changed):
 def _fired_reminders(t):
     """One-off reminders that went off and still wait, for the agenda's
     RESCHEDULE: open (scan_schedules), due by t, with a `fired` row, on a
-    line with no ++/.+ repeater (its date moves on done). Oldest first."""
+    line with no ++/.+ repeater (that one reminds again, see _tick).
+    Oldest first."""
     fired = load_fired()
     return sorted((s for s in scan_schedules()
                    if s.due <= t and not REPEATER.search(s.raw)
@@ -1838,7 +1889,7 @@ def _set_state(raw, new_state):
 
     Recurring: marking done (x/X) a line that carries a ++/.+ repeater bumps
     its date and keeps it todo instead — org-style anchored (++) or
-    floating (.+) rescheduling.
+    floating (.+) rescheduling. Not an hourly one: that is marked done.
     """
     if new_state in ("x", "X"):
         bumped = _bump_recurring(raw, now())
@@ -2682,6 +2733,60 @@ def run_tests(verbose=False):
             self.assertIn("would arm: 2026-10-11 12:00:00", out)
             out = self.td("tick", now_="2026-10-11 12:00")
             self.assertEqual(out.count("would fire"), 2)
+
+        def test_repeater_reminds_until_done(self):
+            text = "- [ ] stretch 2026-10-10 Sat 11:30 ++1h\n"
+            p = self.put_inbox(text)
+            self.assertIn("would arm: 2026-10-10 11:30:00", self.td("tick"))
+            for at, then in (("11:30", "12:30"), ("12:30", "13:30")):
+                out = self.td("tick", now_=f"2026-10-10 {at}")
+                self.assertEqual(out.count("would fire"), 1)
+                self.assertIn(f"would arm: 2026-10-10 {then}:00", out)
+            self.assertNotIn("would fire", self.td("tick", now_="2026-10-10 12:40"))
+            self.assertEqual(p.read_text(), text)
+            # Done ends it: an hourly repeater doesn't move.
+            self.td("toggle", "x", "--from", str(p), "--line", "1",
+                    now_="2026-10-10 12:45")
+            self.assertEqual(p.read_text(), text.replace("[ ]", "[x]"))
+            out = self.td("tick", now_="2026-10-10 13:30")
+            self.assertNotIn("would fire", out)
+            self.assertIn("would arm: nothing", out)
+
+        def test_repeater_fires_once_after_a_long_sleep(self):
+            self.put_inbox("- [ ] stretch 2026-10-10 Sat 11:30 ++1h\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 15:10")
+            self.assertEqual(out.count("would fire"), 1)
+            self.assertIn("would arm: 2026-10-10 15:30:00", out)
+
+        def test_daily_repeater_not_done_reminds_next_day(self):
+            text = "- [ ] pills 2026-10-10 Sat 12:00 ++1d\n"
+            p = self.put_inbox(text)
+            self.td("tick")
+            self.assertEqual(self.td("tick", now_="2026-10-10 12:00").count("would fire"), 1)
+            out = self.td("tick", now_="2026-10-10 18:00")
+            self.assertNotIn("would fire", out)
+            self.assertIn("would arm: 2026-10-11 12:00:00", out)
+            self.assertEqual(self.td("tick", now_="2026-10-11 12:00").count("would fire"), 1)
+            self.assertEqual(p.read_text(), text)
+
+        def test_repeater_typed_in_late_skips_its_past_times(self):
+            # Its times before the previous tick were already past then.
+            p = self.put_inbox("- [ ] other\n")
+            self.td("tick", now_="2026-10-10 10:00")
+            p.write_text("- [ ] pills 2026-10-01 Thu 09:00 ++1d\n")
+            out = self.td("tick")
+            self.assertNotIn("would fire", out)
+            self.assertIn("would arm: 2026-10-11 09:00:00", out)
+
+        def test_only_the_repeating_stamp_repeats(self):
+            self.put_inbox("- [ ] rent 2026-10-10 12:00 ++1d, ask 2026-10-10 12:10\n")
+            self.td("tick")
+            self.assertEqual(self.td("tick", now_="2026-10-10 12:00").count("would fire"), 1)
+            self.assertEqual(self.td("tick", now_="2026-10-10 12:10").count("would fire"), 1)
+            out = self.td("tick", now_="2026-10-11 12:10")
+            self.assertEqual(out.count("would fire"), 1)
+            self.assertIn("would arm: 2026-10-12 12:00:00", out)
 
         def test_failed_notification_retries(self):
             # termux-notification fails: not recorded as fired, the alarm
@@ -3923,6 +4028,43 @@ def run_tests(verbose=False):
             self.assertIsNone(_bump_recurring(
                 "- [ ] standup 2026-10-01 Thu 09:00 ++0d",
                 datetime(2026, 10, 10, 11, 0)))
+
+        def test_repeat_around(self):
+            d = datetime(2026, 10, 10, 9, 50)
+            self.assertEqual(_repeat_around(d, 1, "h", datetime(2026, 10, 10, 9, 0)),
+                             (None, d))
+            self.assertEqual(_repeat_around(d, 1, "h", d), (d, datetime(2026, 10, 10, 10, 50)))
+            self.assertEqual(_repeat_around(d, 2, "h", datetime(2026, 10, 10, 13, 0)),
+                             (datetime(2026, 10, 10, 11, 50), datetime(2026, 10, 10, 13, 50)))
+            self.assertEqual(_repeat_around(d, 2, "w", datetime(2026, 11, 7, 9, 50)),
+                             (datetime(2026, 11, 7, 9, 50), datetime(2026, 11, 21, 9, 50)))
+            # Months count from the date, so the 31st comes back.
+            jan31 = datetime(2027, 1, 31, 9, 0)
+            self.assertEqual(_repeat_around(jan31, 1, "m", datetime(2027, 3, 15)),
+                             (datetime(2027, 2, 28, 9, 0), datetime(2027, 3, 31, 9, 0)))
+            self.assertEqual(_repeat_around(jan31, 1, "m", datetime(2027, 3, 31, 8, 0)),
+                             (datetime(2027, 2, 28, 9, 0), datetime(2027, 3, 31, 9, 0)))
+            self.assertEqual(_repeat_around(jan31, 2, "m", datetime(2027, 6, 1)),
+                             (datetime(2027, 5, 31, 9, 0), datetime(2027, 7, 31, 9, 0)))
+            self.assertEqual(_repeat_around(datetime(2024, 2, 29, 9, 0), 1, "y",
+                                            datetime(2028, 2, 29, 8, 0)),
+                             (datetime(2027, 2, 28, 9, 0), datetime(2028, 2, 29, 9, 0)))
+
+        def test_hourly_repeater_is_marked_done(self):
+            # ++Nh reminds every N hours until done (see Tick); done is done.
+            self.assertIsNotNone(REPEATER.search("- [ ] stretch [2026-10-10 Sat 09:50 ++1h]"))
+            self.assertIsNone(REPEATER.search("- [ ] stretch 2026-10-10 Sat 09:50 ++1hr"))
+            line = "- [ ] stretch 2026-10-10 Sat 09:50 ++1h"
+            self.assertIsNone(_bump_recurring(line, datetime(2026, 10, 10, 11, 0)))
+            self.assertEqual(self.td("toggle", "x", stdin=line + "\n").strip(),
+                             "- [x] stretch 2026-10-10 Sat 09:50 ++1h")
+            # A file task's heading too, from its buffer or on disk.
+            text = "# [ ] stretch\n2026-10-10 Sat 09:50 .+2h\n"
+            p = self.put_dedicated("stretch.md", text)
+            self.assertEqual(self.td("toggle", "x", "--from", str(p), stdin="# [ ] stretch\n"),
+                             "# [x] stretch\n")
+            self.td("toggle", "x", "--from", str(p), "--line", "1")
+            self.assertEqual(p.read_text(), text.replace("[ ]", "[x]"))
 
         def test_toggle_x_zero_count_marks_done(self):
             out = self.td("toggle", "x",
