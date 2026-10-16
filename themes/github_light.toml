@@ -1,0 +1,5 @@
+# github_light with one change: greyed text (td's dates, done tasks) drops the
+# bold of the open-task text it sits in. `-bold` needs the fork's theme patch.
+inherits = "github_light"
+
+"ui.text.inactive" = { fg = "fg.subtle", modifiers = ["-bold"] }

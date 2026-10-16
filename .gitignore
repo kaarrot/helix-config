@@ -1,5 +1,4 @@
 command-history
 .claude/
-runtime
 __pycache__/
 bin/td-tick

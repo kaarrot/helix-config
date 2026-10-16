@@ -117,3 +117,39 @@ language-servers = ["polski-ls"]
 name = "markdown"
 language-servers = ["harper-ls"]
 comment-token = ["-", "+", "*", "- [ ]", ">"]
+
+# td task files: markdown plus td's task colours (runtime/queries/td, td.inline).
+# A language of its own keeps those colours out of other markdown (READMEs, PR
+# messages, Rust doc comments) and lets its queries inherit upstream's instead of
+# copying them. The globs follow td's defaults: $TL_DIR = ~/tasks, the agenda in
+# ~/.cache/td. The rest mirrors markdown, so keep the two in step.
+[[language]]
+name = "td"
+scope = "source.td"
+grammar = "markdown"
+language-id = "markdown"
+file-types = [{ glob = "tasks/*.md" }, { glob = ".cache/td/agenda.md" }]
+language-servers = ["harper-ls"]
+comment-token = ["-", "+", "*", "- [ ]", ">"]
+block-comment-tokens = { start = "<!--", end = "-->" }
+indent = { tab-width = 2, unit = "  " }
+word-completion.trigger-length = 4
+
+[language.auto-pairs]
+'(' = ')'
+'{' = '}'
+'[' = ']'
+'"' = '"'
+"'" = "'"
+'`' = '`'
+'‘' = '’'
+'«' = '»'
+'“' = '”'
+
+# td's inline layer (markdown.inline plus the [Y]/[A]/[W]/[!] markers), injected
+# by runtime/queries/td/injections.scm
+[[language]]
+name = "td.inline"
+scope = "source.td.inline"
+grammar = "markdown_inline"
+file-types = []
