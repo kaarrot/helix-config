@@ -82,8 +82,11 @@ created by `space , P`:
 The heading carries the task's state, kept in step by the status keys (see
 [keys.md](keys.md#status-keys-in-other-files)). There is no link in the
 bullet: the file is named after the bullet's text, its *slug*: lowercase,
-every run of other characters turned into one `-`, and a trailing stamp and
-repeater left out.
+every run of other characters turned into one `-`. A stamp and its repeater
+are left out of the heading and the file name, and so are the brackets
+around them (`stretch [2026-10-16 Fri 09:50 ++1h]` is the file `stretch.md`
+with the heading `stretch`), so a leftover `[ ]` never becomes part of
+either.
 
 - `Costco run!` → `costco-run.md`
 - `costCo RUN` → `costco-run.md` (the same file)

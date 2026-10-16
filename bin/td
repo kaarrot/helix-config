@@ -187,6 +187,9 @@ TL_ENTRY = re.compile(
 # _tick for the reminders.
 # N must be at least 1: `++0d` would never move the date, so it is plain text.
 REPEATER = re.compile(r"(?<!\S)(\+\+|\.\+)(0*[1-9]\d*)([hdwmy])(?!\w)")
+# The `]` of a bracketed stamp, when the brackets hold only the stamp and
+# an optional repeater (`[… 09:50 ++1h]`). Anything else is text.
+STAMP_BRACKET_TAIL = re.compile(r"\s*(?:" + REPEATER.pattern + r")?\s*\]")
 LINK = re.compile(r"\s*→\s*\S+\s*$")
 MARKER = re.compile(r"\s*\(\*\)\s*$")
 AGENDA_ROW = re.compile(
@@ -310,6 +313,21 @@ def _split_eol(s):
     return body, s[len(body):]
 
 
+def _with_stamp_brackets(s, start, end):
+    """Widen a stamp's span to brackets that hold only it and an optional
+    repeater. `[2026-10-16 Fri 09:50]` and `[… 09:50 ++1h]` both go, so a
+    leftover `[ ]` never stays in the task name; `[bank]` and a `# [ ]`
+    checkbox are text and stay. A repeater after the `]` is left for
+    REPEATER."""
+    i = start
+    while i > 0 and s[i - 1] in " \t":
+        i -= 1
+    if i == 0 or s[i - 1] != "[":
+        return start, end
+    tail = STAMP_BRACKET_TAIL.match(s, end)
+    return (i - 1, tail.end()) if tail else (start, end)
+
+
 def _identity_text(text):
     """Task text with link, (*), and its stamps and repeaters removed.
 
@@ -318,17 +336,16 @@ def _identity_text(text):
     Leaving it in the slug or the added-hash orphans the dedicated file and
     jumps the row to the top of the agenda every time `td stamp`, `+`/`-` or
     a repeater bump moves the date. A repeater goes with the stamps: on a
-    line with none, `++1d` is text.
+    line with none, `++1d` is text. Brackets around the stamp go too, a
+    repeater written inside them included, so neither the task name nor
+    the file name keeps them. Other brackets stay text.
     """
     s = MARKER.sub("", text).strip()
     s = LINK.sub("", s).strip()
     stamps = find_stamps(s)
     if stamps:
         for m in reversed(stamps):
-            start, end = m.start(), m.end()
-            # the brackets `td stamp` writes go with the stamp
-            if s[start - 1:start] == "[" and s[end:end + 1] == "]":
-                start, end = start - 1, end + 1
+            start, end = _with_stamp_brackets(s, m.start(), m.end())
             s = s[:start] + " " + s[end:]
         s = REPEATER.sub(" ", s)
     return re.sub(r"\s+", " ", s).strip()
@@ -1648,11 +1665,11 @@ def cmd_promote(args):
     A bullet gets its dedicated file ~/tasks/<slug>.md: written with a
     `# [S] title` heading if missing, else its heading is retagged with
     the bullet's state, and the agenda is refreshed for the new ` (*)`.
-    The title leaves out the bullet's stamps and repeater: they stay the
-    bullet's, and in the heading they would fire a second time and never
-    move with a repeater bump. From the agenda nothing is written (it is a
-    view). Then prints where P goes (see _goto): the dedicated file, or the
-    line itself."""
+    The title leaves out the bullet's stamps and repeater, and the brackets
+    around them: they stay the bullet's, and in the heading they would fire
+    a second time and never move with a repeater bump. From the agenda
+    nothing is written (it is a view). Then prints where P goes (see _goto):
+    the dedicated file, or the line itself."""
     source, lineno = _from_spec(args)
     raw = sys.stdin.read().rstrip("\r\n")
     m = TASK.match(raw)
@@ -2283,6 +2300,23 @@ def run_tests(verbose=False):
                 self.assertEqual(_identity_text(stamped), "pay rent", stamped)
             self.assertEqual(_identity_text("# [ ] haircut [2026-12-15 Tue 11:50]"),
                              "# [ ] haircut")
+            # A repeater inside the stamp's brackets is the same annotation.
+            # The brackets go with it, so the name keeps no leftover [ ],
+            # and the file name is the task's, not the repeater's.
+            for inside, name in (
+                    ("THis is a 1hr test [2026-10-16 Fri 09:50 ++1h]", "THis is a 1hr test"),
+                    ("THis is a 1hr test [2026-10-16 Fri 09:50 .+1h]", "THis is a 1hr test"),
+                    ("THis is a 1hr test [ 2026-10-16 Fri 09:50 ++1h ]", "THis is a 1hr test"),
+                    ("pay rent [2026-11-01 Sun 09:00 ++1m]", "pay rent")):
+                self.assertEqual(_identity_text(inside), name, inside)
+                self.assertEqual(slugify(inside), slugify(name), inside)
+                self.assertEqual(bullet_hash(p, inside), bullet_hash(p, name), inside)
+            self.assertEqual(
+                _identity_text("# [ ] haircut [2026-12-15 Tue 11:50 ++2m]"),
+                "# [ ] haircut")
+            self.assertEqual(
+                _identity_text("call [bank] [2026-10-12 Mon 10:00 ++1d]"),
+                "call [bank]")
             # A repeater goes with a stamp; on a line with none it is text.
             self.assertEqual(slugify("learn C ++1d"), "learn-c-1d")
 
@@ -3225,6 +3259,16 @@ def run_tests(verbose=False):
             # The stamp stays the bullet's: in the heading it would fire twice.
             self.td("promote", stdin="- [ ] pay rent 2026-11-01 Sun 09:00 ++1m #home\n")
             self.assertEqual((self.tasks / "pay-rent-home.md").read_text(), "# [ ] pay rent #home\n\n")
+
+        def test_heading_leaves_out_a_bracketed_repeater(self):
+            # Repeater inside the stamp's brackets: neither the heading nor
+            # the file name keeps the brackets or the ++1h.
+            self.td("promote",
+                    stdin="- [ ] THis is a 1hr test [2026-10-16 Fri 09:50 ++1h]\n")
+            p = self.tasks / "this-is-a-1hr-test.md"
+            self.assertEqual(p.read_text(), "# [ ] THis is a 1hr test\n\n")
+            self.assertEqual(sorted(x.name for x in self.tasks.iterdir()),
+                             ["this-is-a-1hr-test.md"])
 
     class Marker(Case):
         def test_bullet_with_dedicated_file_gets_marker(self):
