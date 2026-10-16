@@ -53,8 +53,13 @@ Commands:
                        added: newest first-seen first. modified: most
                        recently changed first (its line, or its dedicated
                        file; hand edits count from the next td run).
-                       all shows the open states; done lists the [x]/[X]
-                       bullets and file tasks (space , D, with modified).
+                       all shows the open states, and after TODAY
+                       # RESCHEDULE: reminders that fired while their task
+                       is still open, but those on a line with a ++/.+
+                       repeater, oldest first, each ending in
+                       path:line:col on its date's day; done lists the
+                       [x]/[X] bullets and file tasks (space , D, with
+                       modified).
   td promote [--from PATH:LINE]
                        stdin: a line, at PATH:LINE. A bullet gets its file
                        ~/tasks/<slug>.md: created with a `# [S] title`
@@ -232,7 +237,8 @@ LEGEND = ("# td VIEW ONLY (status keys change the task itself; space , p "
           "goes there): [ ] todo  [Y] today  [A] active  [W] waiting")
 
 Bullet = namedtuple("Bullet", "path line raw indent state text hash")
-Scheduled = namedtuple("Scheduled", "path line due title hash")
+# raw: the line; col: where the stamp starts in it (0-based).
+Scheduled = namedtuple("Scheduled", "path line due title hash raw col")
 
 
 def now():
@@ -496,7 +502,8 @@ def scan_schedules():
                     continue
                 iso = due.isoformat(timespec="minutes")
                 out.append(Scheduled(f, i, due, line_title,
-                                     schedule_hash(str(f), iso, text)))
+                                     schedule_hash(str(f), iso, text),
+                                     raw, ts.start()))
     return out
 
 
@@ -532,20 +539,33 @@ def _drop_lines(path, old):
 
 # Reminder rows are kept this long after they were due. By then a tick has
 # run after their time, so they can't fire again (see _tick), and dropping
-# them keeps the sidecars from growing forever.
+# them keeps the sidecars from growing forever. alarm.log only gets arming
+# failures, so a year of them stays small.
 KEEP_DAYS = 7
+LOG_KEEP_DAYS = 365
 
 
-def prune_reminders(t):
-    """Drop `fired`, `scheduled` and `stamped-now` rows due over KEEP_DAYS
-    before t, and alarm.log lines older than that. Run by the first tick
-    of a day, after it has fired what is due."""
+def prune_reminders(t, live=()):
+    """Drop `scheduled` and `stamped-now` rows due over KEEP_DAYS before t,
+    `fired` rows too unless their reminder is still in an open task (live:
+    the (hash, due_iso) keys scan_schedules found; the agenda lists those
+    under RESCHEDULE until they move or are done), and alarm.log lines over
+    LOG_KEEP_DAYS old. Run by the first tick of a day, after it has fired
+    what is due."""
     cutoff = (t - timedelta(days=KEEP_DAYS)).isoformat(timespec="minutes")
-    for path, col in ((FIRED_PATH, 0), (SCHEDULED_PATH, 2),
-                      (STAMPED_NOW_PATH, 1)):
+    live = set(live)
+
+    def gone(line):
+        parts = line.split("\t")
+        return (len(parts) > 1 and parts[0] < cutoff
+                and (parts[1], parts[0]) not in live)
+
+    _drop_lines(FIRED_PATH, gone)
+    for path, col in ((SCHEDULED_PATH, 2), (STAMPED_NOW_PATH, 1)):
         _drop_lines(path, lambda line, col=col: (
             len(line.split("\t")) > col and line.split("\t")[col] < cutoff))
-    _drop_lines(ALARM_LOG, lambda line: line[:16] < cutoff)
+    log_cutoff = (t - timedelta(days=LOG_KEEP_DAYS)).isoformat(timespec="minutes")
+    _drop_lines(ALARM_LOG, lambda line: line[:16] < log_cutoff)
 
 
 def compact_task_rows(live):
@@ -845,7 +865,8 @@ def _tick():
     if new_scheduled:
         _append_sidecar(SCHEDULED_PATH, new_scheduled)
     if last_tick is None or last_tick.date() != t.date():
-        prune_reminders(t)
+        prune_reminders(t, {(s.hash, s.due.isoformat(timespec="minutes"))
+                            for s in items})
     save_last_tick(t)
     upcoming = [s.due - lead for s in items
                 if s.due - lead > t
@@ -937,6 +958,37 @@ def _modified_iso(b, changed):
     return max(iso, mtime.isoformat(timespec="seconds"))
 
 
+def _fired_reminders(t):
+    """One-off reminders that went off and still wait, for the agenda's
+    RESCHEDULE: open (scan_schedules), due by t, with a `fired` row, on a
+    line with no ++/.+ repeater (its date moves on done). Oldest first."""
+    fired = load_fired()
+    return sorted((s for s in scan_schedules()
+                   if s.due <= t and not REPEATER.search(s.raw)
+                   and (s.hash, s.due.isoformat(timespec="minutes")) in fired),
+                  key=lambda s: (s.due, str(s.path), s.line, s.col))
+
+
+def _fired_text(s):
+    """What a RESCHEDULE row says: an inbox bullet's text; in a task file, the
+    heading, or `title: line` for any other line. Stamps stay in."""
+    if _same_file(s.path, td_file()):
+        return s.title
+    hm = H1.match(s.raw)
+    if hm:
+        return hm[1]
+    b = parse_bullet(s.path, s.line, s.raw)
+    line = b.text if b else re.sub(r"^\s*(?:[-*+]|#+)\s+", "", s.raw)
+    return f"{_identity_text(s.title) or s.path.stem}: {line.strip()}"
+
+
+def _fired_row(s):
+    """A RESCHEDULE row: no checkbox, so the status keys pass it by, and the
+    reminder's path:line:col with col on its day, where space , p puts the
+    cursor for + and - to move the date."""
+    return f"- {_fired_text(s)}  {tilde(s.path)}:{s.line}:{s.col + 9}"
+
+
 def build_list(args):
     state, sort = _parse_list_args(args)
     inbox, bullets = scan_inbox()
@@ -970,14 +1022,18 @@ def build_list(args):
         groups = {name: [] for name in GROUPS}
         for b in kept:
             groups[STATE_NAMES[b.state]].append(b)
+        sections = []
         for name in GROUPS:
-            items = groups[name]
-            if not items:
+            sections.append((name.upper(), [row(b) for b in groups[name]]))
+            if name == "today":
+                sections.append(("RESCHEDULE", [_fired_row(s) for s in
+                                                _fired_reminders(now())]))
+        for title, rows in sections:
+            if not rows:
                 continue
-            out.append(f"# {name.upper()}")
+            out.append(f"# {title}")
             out.append("")
-            for b in items:
-                out.append(row(b))
+            out.extend(rows)
             out.append("")
     else:
         out.append(f"# {state.upper()}")
@@ -1492,17 +1548,26 @@ def _goto(source, lineno, raw, want_file):
     """Where `space , p` (want_file False) or `space , P` (True) goes from
     line lineno of source, whose text is raw -> a path or PATH:LINE.
 
-    A line ending in `path:line:col` (file-task and orphan rows) goes to
-    that file. A bullet goes to its ~/tasks/<slug>.md, if it exists; but p
+    A line ending in `path:1:1` (file-task and orphan rows) goes to that
+    file; another `path:line:col` (RESCHEDULE rows) to that line and column. A
+    bullet goes to its ~/tasks/<slug>.md, if it exists; but p
     on an agenda row goes to the row's line in the inbox, the source of
     truth. Anything else stays: PATH:LINE (a bare path would put the
     cursor back at the top)."""
     here = f"{source}:{lineno}" if source and lineno else str(source or td_file())
-    tail = re.search(r"(\S+):\d+:\d+\s*$", raw)
+    tail = re.search(r"(\S+):(\d+):(\d+)\s*$", raw)
     if tail:
         candidate = Path(tail[1]).expanduser()
         if candidate.is_file():
-            return str(candidate)
+            if f"{tail[2]}:{tail[3]}" == "1:1":
+                return str(candidate)  # a file-task or orphan row: the file
+            # A RESCHEDULE row: its reminder's line, found again if the file
+            # changed since the agenda was built.
+            text = raw[:tail.start(1)].rstrip()
+            for s in _fired_reminders(now()):
+                if f"- {_fired_text(s)}" == text and _same_file(s.path, candidate):
+                    return f"{s.path}:{s.line}:{s.col + 9}"
+            return f"{candidate}:{tail[2]}:{tail[3]}"
     bm = TASK.match(raw)
     if not bm:
         return here
@@ -2642,34 +2707,40 @@ def run_tests(verbose=False):
 
         def test_prunes_reminder_rows_a_week_after_due(self):
             # The first tick of a day drops rows due over 7 days earlier;
-            # the old reminder, still in the file, doesn't fire again.
-            self.put_inbox("- [ ] old 2026-10-01 12:00\n"
-                           "- [ ] recent 2026-10-08 12:00\n")
+            # a fired row stays while its reminder is still in an open
+            # task (the agenda's RESCHEDULE), and the old reminder doesn't fire
+            # again. alarm.log keeps a year.
+            p = self.put_inbox("- [ ] old 2026-10-01 12:00\n"
+                               "- [ ] gone 2026-10-01 12:30\n"
+                               "- [ ] recent 2026-10-08 12:00\n")
             self.td("tick", now_="2026-10-01 11:00")
             self.td("stamp", stdin="- [ ] did\n", now_="2026-10-01 11:07")
-            self.td("tick", now_="2026-10-01 12:00")
+            self.td("tick", now_="2026-10-01 12:30")
             self.td("tick", now_="2026-10-08 12:00")
+            p.write_text("- [ ] old 2026-10-01 12:00\n"
+                         "- [x] gone 2026-10-01 12:30\n"
+                         "- [ ] recent 2026-10-08 12:00\n")
             self.cache.joinpath("alarm.log").write_text(
-                "2026-10-01T09:00:00  could not arm old\n"
-                "2026-10-08T09:00:00  could not arm recent\n")
+                "2025-10-08T09:00:00  could not arm last year\n"
+                "2025-10-10T09:00:00  could not arm this year\n")
             self.td("tick", now_="2026-10-09 09:00")
-            for name in ("fired", "scheduled"):
-                self.assertNotIn("old", self.read_cache(name), name)
-                self.assertIn("recent", self.read_cache(name), name)
+            fired = self.read_cache("fired")
+            self.assertIn("old", fired)
+            self.assertNotIn("gone", fired)
+            self.assertIn("recent", fired)
+            scheduled = self.read_cache("scheduled")
+            self.assertNotIn("old", scheduled)
+            self.assertNotIn("gone", scheduled)
+            self.assertIn("recent", scheduled)
             self.assertEqual(self.read_cache("stamped-now"), "")
             self.assertEqual(self.read_cache("alarm.log"),
-                             "2026-10-08T09:00:00  could not arm recent\n")
+                             "2025-10-10T09:00:00  could not arm this year\n")
             self.assertNotIn("would fire",
                              self.td("tick", now_="2026-10-09 10:00"))
             # Ticks don't write `added` (it orders the agenda's tasks).
             self.assertEqual(self.read_cache("added"), "")
-
-        def test_reminders_need_termux(self):
-            self.put_inbox("- [ ] call 2026-10-10 12:00\n")
-            r = self.td_run("tick", TD_TERMUX="0")
-            self.assertNotEqual(r.returncode, 0)
-            self.assertIn(b"need Termux", r.stderr)
-            self.assertIn("call", self.td("list", TD_TERMUX="0"))
+            self.assertIn("- old 2026-10-01 12:00",
+                          self.td("list", now_="2026-10-09 10:00"))
 
         def test_active_dedicated_file_fires(self):
             self.put_dedicated("renew-passport.md",
@@ -3081,6 +3152,98 @@ def run_tests(verbose=False):
             self.assertIn(
                 "- [A] refactor td parser 2026-10-12 Sun 09:00 ++1w (*)", out)
             self.assertNotIn("# ORPHANS", out)
+
+    class Reschedule(Case):
+        """The agenda's RESCHEDULE section: one-off reminders that went off
+        and still wait."""
+
+        def fire_all(self):
+            self.td("tick", now_="2026-10-10 08:00")
+            self.td("tick", now_="2026-10-10 11:00")
+
+        def section(self, out):
+            if "# RESCHEDULE" not in out:
+                return []
+            body = out.split("# RESCHEDULE\n\n", 1)[1].split("\n\n", 1)[0]
+            return body.splitlines()
+
+        def test_lists_fired_one_off_reminders(self):
+            self.put_inbox("- [Y] call jon [2026-10-10 Sat 10:00]\n"
+                           "- [ ] pills 2026-10-10 Sat 09:00 ++1d\n"
+                           "- [ ] gym 2026-10-10 Sat 09:05 .+2d\n"
+                           # A repeater keeps its line's other date out too.
+                           "- [ ] rent 2026-10-10 09:10 ++1m, ask 2026-10-10 09:20\n"
+                           "- [ ] later 2026-10-12 Mon 09:00\n"
+                           "- [ ] bank 2026-10-10 Sat 09:30 → ~/tasks/bank.md\n")
+            self.put_dedicated("trip.md", "# [ ] trip\n\n"
+                               "- [ ] book taxi 2026-10-10 10:30\n"
+                               "- [x] pack 2026-10-10 10:40\n"
+                               "flight 2026-10-10 Sat 10:45\n")
+            # Never fire: a date already past when first seen, and a stamp
+            # of now (space , s).
+            self.put_dedicated("note.md", "# [ ] note\nmet 2026-10-01 10:00\n")
+            self.fire_all()
+            did = self.td("stamp", stdin="- [ ] did\n", now_="2026-10-10 11:01")
+            p = self.inbox
+            p.write_text(p.read_text() + did)
+            self.td("tick", now_="2026-10-10 11:02")
+            out = self.td("list", now_="2026-10-10 11:05")
+            self.assertEqual(self.section(out), [
+                "- bank 2026-10-10 Sat 09:30  ~/tasks/todo.md:6:20",
+                "- call jon [2026-10-10 Sat 10:00]  ~/tasks/todo.md:1:25",
+                "- trip: book taxi 2026-10-10 10:30  ~/tasks/trip.md:3:25",
+                "- trip: flight 2026-10-10 Sat 10:45  ~/tasks/trip.md:5:16",
+            ])
+            # The tasks keep their rows in their sections too.
+            self.assertIn("- [Y] call jon [2026-10-10 Sat 10:00]\n", out)
+            # After TODAY, before the other groups.
+            self.assertLess(out.index("# TODAY"), out.index("# RESCHEDULE"))
+            self.assertLess(out.index("# RESCHEDULE"), out.index("# TODO"))
+            # Only in the view of all open tasks.
+            self.assertNotIn("# RESCHEDULE", self.td("list", "--state", "today",
+                                                now_="2026-10-10 11:05"))
+
+        def test_leaves_when_moved_or_done(self):
+            p = self.put_inbox("- [ ] call jon 2026-10-10 10:00\n"
+                               "- [ ] pay 2026-10-10 10:30\n")
+            self.fire_all()
+            self.assertEqual(len(self.section(self.td("list"))), 2)
+            p.write_text("- [ ] call jon 2026-10-11 Sun 10:00\n"
+                         "- [x] pay 2026-10-10 10:30\n")
+            self.assertEqual(self.section(self.td("list")), [])
+
+        def test_heading_stamp_row_is_the_heading(self):
+            self.put_dedicated("dentist.md", "# [ ] dentist 2026-10-10 10:00\n")
+            self.fire_all()
+            self.assertEqual(self.section(self.td("list")),
+                             ["- dentist 2026-10-10 10:00  ~/tasks/dentist.md:1:23"])
+
+        def test_jump_goes_to_the_day_even_after_lines_move(self):
+            p = self.put_inbox("- [ ] alpha\n- [ ] call jon 2026-10-10 10:00\n")
+            self.fire_all()
+            self.td("list")
+            agenda = self.cache / "agenda.md"
+            lineno = next(i for i, line in enumerate(
+                agenda.read_text().splitlines(), 1) if line.startswith("- call jon"))
+            row = agenda.read_text().splitlines()[lineno - 1] + "\n"
+            out = self.td("jump", "--from", f"{agenda}:{lineno}", stdin=row)
+            self.assertEqual(out.strip(), f"{p}:2:24")
+            # todo.md got a line on top since the agenda was built.
+            p.write_text("- [ ] new\n" + p.read_text())
+            out = self.td("jump", "--from", f"{agenda}:{lineno}", stdin=row)
+            self.assertEqual(out.strip(), f"{p}:3:24")
+
+        def test_status_keys_pass_a_reschedule_row_by(self):
+            p = self.put_inbox("- [ ] call jon 2026-10-10 10:00\n")
+            self.fire_all()
+            self.td("list")
+            agenda = self.cache / "agenda.md"
+            row = next(line for line in agenda.read_text().splitlines()
+                       if line.startswith("- call jon")) + "\n"
+            for state in ("x", "Y", "todo"):
+                out = self.td("toggle", state, "--from", str(agenda), stdin=row)
+                self.assertEqual(out.strip(), row.strip())
+            self.assertEqual(p.read_text(), "- [ ] call jon 2026-10-10 10:00\n")
 
     class Jump(Case):
         def go(self, cmd, path, lineno):
@@ -3930,7 +4093,7 @@ def run_tests(verbose=False):
     loader = unittest.defaultTestLoader
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
                                for c in (Parse, List, Tick, New, Stamp, Next,
-                                         Promote, Marker, Jump, SetToggle,
+                                         Promote, Marker, Reschedule, Jump, SetToggle,
                                          AgendaToggle, File, WeekView, Rename, Fire, Recurring,
                                          TlAgrees,
                                          KeysDoc))

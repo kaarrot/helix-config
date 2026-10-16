@@ -171,7 +171,9 @@ Each reminder (its file, time and line text) fires once
 reminders at the same minute both fire, even in one file. A state change
 (`[ ]` → `[Y]`) or a repeater bump keeps the text, so a reminder that has
 fired doesn't fire again. A notification that fails isn't counted as
-fired: it is retried a minute later.
+fired: it is retried a minute later. A reminder that fired stays on the
+agenda, under RESCHEDULE, until you move its date or finish the task,
+unless its line has a `++`/`.+` repeater.
 
 ### How it runs
 
@@ -261,13 +263,17 @@ app).
 
 - [Y] pay rent
 
+# RESCHEDULE
+
+- call jon [2026-10-15 Thu 10:00]  ~/tasks/todo.md:3:25
+
 # ACTIVE
 
 - [A] refactor td parser (*)
 
 # TODO
 
-- [ ] call jon
+- [ ] call jon [2026-10-15 Thu 10:00]
 
 # WAITING
 
@@ -278,6 +284,18 @@ app).
 - old-task  ~/tasks/old-task.md:1:1
 ```
 
+- RESCHEDULE rows, after TODAY, are reminders that went off and still
+  wait: the task is open and the date unchanged. A line with a `++`/`.+`
+  repeater isn't listed: its date moves when you mark the task done. A
+  row is the reminder's line (`trip: book taxi 2026-10-20 10:00` for one in a task file), oldest
+  first, ending in `path:line:col` with the column on the date's day. So
+  `space , p` puts the cursor there, for `+`/`-` to move the date (or
+  `space , s` to set it to today); if the file changed since the agenda
+  was built, it finds the line again. A row goes once its date is in the
+  future again or its task is done. The task keeps its row in its group
+  too, and that row takes `space , x` and the status keys: RESCHEDULE rows
+  have no checkbox, so those keys pass them by. Only `space , a` and
+  `space , A` show RESCHEDULE.
 - Bullet rows are todo.md's open bullets, ` (*)` when the task has its own
   file. They carry no path: `space , p` finds the row's line in todo.md
   (same state and text). If todo.md changed since the agenda was built and
@@ -376,11 +394,15 @@ remember what `td` has seen. Reminders are keyed by (file, time, line text
 without its checkbox or stamp), tasks by (file, text without its stamp).
 
 None of them grows for ever. The first tick of each day drops the
-`fired`, `scheduled` and `stamped-now` rows (and `alarm.log` lines) more
-than 7 days past. A tick has run after those times, so they can't fire
-again, even if the reminder is still in a file. Building the agenda keeps
-one `added` and one `changed` row per task that still exists. The other
-files are rewritten each time.
+`scheduled` and `stamped-now` rows more than 7 days past, and the `fired`
+ones too once their reminder has left the open tasks (its date moved, or
+the task is done or deleted); until then the agenda can list it under
+RESCHEDULE.
+A tick has run after those times, so they can't fire again, even if the
+reminder is still in a file. `alarm.log` only gets arming failures, so its
+lines are kept a year. Building the agenda keeps one `added` and one
+`changed` row per task that still exists. The other files are rewritten
+each time.
 
 | file | holds |
 |------|-------|
