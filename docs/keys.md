@@ -31,6 +31,7 @@ from the times. todo.md is not a task file for `tl`: its bullets are todos.
 | `I` | **Switch back.** Ends what is running, as `i` does (no heading), and clocks in to the task you worked on before it: opens that task file and adds `YYYY-MM-DD HH:MM - ` at its end, in insert mode. "Before it" means the latest entry in a file other than the running entry's, so pressing `I` again switches back. With nothing running (say after `o`), it resumes the task of the latest entry. If there is no other task, it works like `i` in this buffer. Both files are saved, as with `i` |
 | `L` | **Week summary in a buffer**, to copy from. Saves, then opens `~/.cache/tl/summary.txt` with the same report as `l`, for this week, Monday to Sunday, over all task files (wherever you press it). The file is rewritten each time and read-only, like the agenda; anything typed there is thrown away by the next `L`. In it, `-` and `+` show the previous and next week, as often as you press them; `L` goes back to this week |
 | `o` | **Clock out.** Saves all buffers, then waits at the command prompt `# done: `. Type what you did and press Enter: the latest running entry (in any task file, started in the last 12 hours) gets its end time and duration, and your text becomes the `# heading` line right above it, or is added to the heading already there after ` - `. Enter on an empty prompt ends the entry with no heading; Esc does nothing. The text needs no quoting; only `%` is special (type `%%` for one) |
+| `O` | **Clock out and switch back.** `o` and `I` in one. Saves all buffers, ends the running entry and anything else still running, and clocks in to the task you worked on before it, as `I` does: `YYYY-MM-DD HH:MM - ` at the end of that task's file. Then it waits at the `# done: ` prompt: type what you did and press Enter, and your text becomes the ended entry's heading, as with `o`, and the task you switched to opens on its new entry, in normal mode (`A` to type a note). Enter on an empty prompt adds no heading; Esc leaves you where you are, with the clock already switched. With nothing running, it resumes the task of the latest entry; with no other task, it only clocks out. As with `n`, `%` is typed `%%`, and the text can't contain `}` |
 | `r` | **Recent files.** A popup with the 9 most recently changed task files, newest first, each with its last entry. Open one with `:o <path>` |
 | `l` | **Summary** (time log). Saves, then shows time per day for the last 14 days in a popup: per task file its total and title, and under it the `# headings` it was worked under. Running entries come first, and problems (overlaps, duplicates, typos, entries over 12 hours) last, as `~/path:line` you can open with `gf`. Always over all task files, wherever you press it (the agenda too) |
 
@@ -264,6 +265,16 @@ starting Python, so it sees the saved file in practice.
   `$BASH_EXECUTION_STRING` (the whole command line), so it needs no
   quoting. `tl` looks for exactly `"$BASH_EXECUTION_STRING" # done:`
   (`DONE_MARK` in `tl`): change both together.
+- **`O`** can't switch buffers before its prompt: a key that does loses
+  the prompt as soon as it ends (see `N`). So `tl out --back` does the
+  switch on disk first, under `:noop %sh{}`: it ends the entries, adds the
+  new one to the other task's file, and keeps what it did in
+  `~/.cache/tl/switch`. `:reload-all` brings both files into their
+  buffers (`:write-all` saved them, so nothing is lost). The prompt is
+  `:open %sh{tl note "$BASH_EXECUTION_STRING" # done: }`, with the cursor
+  before the `}`, as `n` does: on Enter, `tl note` adds the heading and
+  prints the new entry's `PATH:LINE:COL`, and `:open` goes there. That
+  buffer is up to date already, so the cursor lands on the new line.
 - **`l`** runs `align_view_top` first: a popup opens below the cursor's
   screen row when 6 rows fit there, so at the top it gets the full height.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Time-log helper for Helix (keys: space , i / I / o / r / l; see docs/keys.md).
+"""Time-log helper for Helix (keys: space , i / I / o / O / r / l; see docs/keys.md).
 
 An entry is any line that starts with a date (optionally after indentation and
 a list bullet, checkbox or not), so entries can sit anywhere in a file, in any order:
@@ -17,6 +17,15 @@ the start/end times.
                         end, at now, the latest-started entry still running (started in the last
                         12h) in the task files on disk. TEXT becomes the "# heading" right above it,
                         or is added to the one there (" - TEXT"). Comment form, so TEXT needs no quoting.
+    tl out --back [--from F]
+                        the first step of `space , O`: end the latest running entry, then as
+                        `tl next --back`: end what still runs, and clock in to the task before the
+                        ended one (with nothing running, the latest entry's): add "YYYY-MM-DD HH:MM - "
+                        at the end of its file. What it did is kept in ~/.cache/tl/switch for:
+    tl note "$BASH_EXECUTION_STRING" # done: TEXT
+                        the last step of `space , O`: TEXT heads the entry `tl out --back` ended, as
+                        `tl out` heads it; print the new entry as path:line:col for :open %sh{} (F
+                        when there was no task to go back to).
     tl stop [--skip F]  end, at now, every entry still running that started less than 12h ago, in
                         the task files on disk except F; print where ("stopped ~/tasks/x.md:3").
     tl stop - [--file F]
@@ -274,10 +283,7 @@ def cmd_next(args):
     t = now()
     skip = opt(args, "--skip")
     if "--back" in args:
-        starts, running = entry_starts(t)
-        current = max(running)[-1] if running else None
-        earlier = [key[-1] for key in sorted(starts, reverse=True) if key[-1] != current]
-        target = earlier[0] if earlier else None
+        target = back_target(t)
     else:
         try:
             target = FROM_PATH.read_text(encoding="utf-8").strip() or None
@@ -289,13 +295,94 @@ def cmd_next(args):
     return 0
 
 
+def back_target(t):
+    """The task file to switch back to (`space , I`, `space , O`): the latest entry's file other
+    than the running entry's, or with nothing running the latest entry's. None if there is none."""
+    starts, running = entry_starts(t)
+    current = max(running)[-1] if running else None
+    earlier = [key[-1] for key in sorted(starts, reverse=True) if key[-1] != current]
+    return earlier[0] if earlier else None
+
+
 # Ends the prompt `space , o` leaves open: what you type after it is a shell comment, so it needs no quoting.
 DONE_MARK = '"$BASH_EXECUTION_STRING" # done:'
 
 
-def cmd_out(invocation=""):
+def done_text(invocation):
+    """What was typed after the prompt's DONE_MARK, stripped; "" with none."""
+    return invocation.split(DONE_MARK, 1)[1].strip() if DONE_MARK in invocation else ""
+
+
+def cmd_out(args):
+    if "--back" in args:
+        return cmd_back(args)
+    comment = done_text(" ".join(args))
+    ended = end_latest(now(), comment)
+    if not ended:
+        print("nothing running (older open entries are left for the summary to flag)")
+        return 0
+    path, i = ended
+    print(f"stopped {tilde(path)}:{i + 1}" + (f"  # {comment}" if comment else ""))
+    return 0
+
+
+# What `tl out --back` did, for `tl note`: "path\tindex" of the entry it ended (empty when nothing
+# ran), and where :open goes: the new entry, as path:line:col.
+SWITCH_PATH = Path("~/.cache/tl/switch").expanduser()
+
+
+def cmd_back(args):
+    """tl out --back [--from F]: the first step of `space , O`, run before its prompt (a key that
+    switches buffers loses its prompt). End the latest running entry and any other still running,
+    then clock in to the task before it (back_target), as `space , I` does: a new entry at the end
+    of its file. Kept in SWITCH_PATH for `tl note`; F is where to go when there is no such task."""
     t = now()
-    comment = invocation.split(DONE_MARK, 1)[1].strip() if DONE_MARK in invocation else ""
+    target = back_target(t)  # before the entry ends: it tells which task ran
+    ended = end_latest(t)
+    stop_files(None, t)
+    go = opt(args, "--from") or ""
+    if target is not None:
+        path = Path(target)
+        text = path.read_bytes().decode("utf-8", "surrogateescape")
+        eol = "\r\n" if "\r\n" in text else "\n"
+        if text and not text.endswith("\n"):
+            text += eol
+        entry = t.strftime("%Y-%m-%d %H:%M - ")
+        text += entry + eol
+        path.write_bytes(text.encode("utf-8", "surrogateescape"))
+        go = f"{path}:{text.count(chr(10))}:{len(entry)}"  # the cursor on its last space
+    SWITCH_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SWITCH_PATH.write_text("\t".join((str(ended[0]), str(ended[1])) if ended else ("", "")) + f"\t{go}\n",
+                           encoding="utf-8", errors="surrogateescape")
+    return 0
+
+
+def cmd_note(args):
+    """tl note "$BASH_EXECUTION_STRING" # done: TEXT: the last step of `space , O`, at its prompt.
+    TEXT heads the entry `tl out --back` ended, as `tl out` heads it; then print where :open goes."""
+    comment = done_text(" ".join(args))
+    try:
+        ended, i, go = SWITCH_PATH.read_text(encoding="utf-8", errors="surrogateescape").rstrip("\n").split("\t")
+        SWITCH_PATH.unlink()
+    except (OSError, ValueError):
+        return 0
+    if comment and ended:
+        path, i = Path(ended), int(i)
+        try:
+            lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
+        except OSError:
+            lines = []
+        if i < len(lines) and parse(lines[i].rstrip("\r\n"))[0] is not None:
+            add_heading(lines, i, comment)
+            path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
+    print(go, end="")  # no newline: for :open %sh{}
+    return 0
+
+
+def end_latest(t, comment=""):
+    """End, at t, the latest-started entry running (started in the last 12h) in the task files on
+    disk, with comment as its heading (see add_heading) -> (path, index of its line), or None when
+    nothing runs."""
     _, files = recent_files(None)
     running = []  # (start, path, index) of entries running, started in the last 12h
     for path in files or []:
@@ -306,24 +393,28 @@ def cmd_out(invocation=""):
             if e and e.end is None and timedelta(0) <= t - started_at(e) < timedelta(minutes=MAX_SANE):
                 running.append((started_at(e), str(path), i))
     if not running:
-        print("nothing running (older open entries are left for the summary to flag)")
-        return 0
+        return None
     _, path, i = max(running)
     path = Path(path)
     lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
     body = lines[i].rstrip("\r\n")
-    eol = lines[i][len(body):]
-    lines[i] = render(parse(body)[0], t.hour * 60 + t.minute) + eol
+    lines[i] = render(parse(body)[0], t.hour * 60 + t.minute) + lines[i][len(body):]
     if comment:
-        above = lines[i - 1].rstrip("\r\n") if i else ""
-        if i and re.match(r" {0,3}#{1,6}(\s|$)", above):  # a heading already: add to it ("# " left empty counts)
-            lines[i - 1] = (f"{above} - {comment}" if HEADING.match(above) else f"# {comment}") + lines[i - 1][len(above):]
-        else:
-            lines.insert(i, f"# {comment}{eol or chr(10)}")
-            i += 1
+        i = add_heading(lines, i, comment)
     path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
-    print(f"stopped {tilde(path)}:{i + 1}" + (f"  # {comment}" if comment else ""))
-    return 0
+    return path, i
+
+
+def add_heading(lines, i, comment):
+    """comment as the "# heading" right above the entry lines[i], or added to the heading already
+    there (" - comment"; an empty "# " is filled) -> the entry's index after."""
+    eol = lines[i][len(lines[i].rstrip("\r\n")):]
+    above = lines[i - 1].rstrip("\r\n") if i else ""
+    if i and re.match(r" {0,3}#{1,6}(\s|$)", above):  # a heading already: add to it ("# " left empty counts)
+        lines[i - 1] = (f"{above} - {comment}" if HEADING.match(above) else f"# {comment}") + lines[i - 1][len(above):]
+        return i
+    lines.insert(i, f"# {comment}{eol or chr(10)}")
+    return i + 1
 
 
 def tilde(path):
@@ -524,9 +615,11 @@ def main(argv):
     elif cmd == "close":
         cmd_close()
     elif cmd == "out":
-        return cmd_out(" ".join(argv[2:]))
+        return cmd_out(argv[2:])
     elif cmd == "stop":
         return cmd_stop(argv[2:])
+    elif cmd == "note":
+        return cmd_note(argv[2:])
     elif cmd == "running":
         return cmd_running(argv[2:])
     elif cmd == "next":
@@ -730,6 +823,65 @@ def run_tests(verbose=False):
             self.tl(argv=["bash", "-c", line])
             self.assertEqual(self.get("A.md"), f"# {comment}\n2026-10-09 13:00 - 14:05 = 1h 05min\n")
 
+    class OutBack(Case):
+        """tl out --back, then tl note, as space , O runs them."""
+
+        def back(self):
+            self.assertEqual(self.tl("out", "--back", "--from", "here.md"), "")
+
+        def note(self, comment):
+            # what bash hands `tl note` as "$BASH_EXECUTION_STRING" at the key's prompt
+            return self.tl("note", f'"$BASH_EXECUTION_STRING" # done: {comment}')
+
+        def test_ends_the_entry_and_clocks_in_to_the_task_before(self):
+            a = self.put("A.md", "# A\n2026-10-09 09:00 - 10:00\n")
+            self.put("B.md", "# B\nnotes\n2026-10-09 13:00 -\n")
+            self.put("C.md", "2026-10-09 08:00 -\n")  # also running, longer: ended too, as space , I does
+            self.back()
+            self.assertEqual(self.get("B.md"), "# B\nnotes\n2026-10-09 13:00 - 14:05 = 1h 05min\n")
+            self.assertEqual(self.get("C.md"), "2026-10-09 08:00 - 14:05 = 6h 05min\n")
+            self.assertEqual(self.get("A.md"), "# A\n2026-10-09 09:00 - 10:00\n2026-10-09 14:05 - \n")
+            # The prompt's text then heads the entry that ended, and :open goes to the new one.
+            self.assertEqual(self.note("did b"), f"{a}:3:19")
+            done_b = "# B\nnotes\n# did b\n2026-10-09 13:00 - 14:05 = 1h 05min\n"
+            self.assertEqual(self.get("B.md"), done_b)
+            self.assertEqual(self.note("again"), "")  # once
+            self.assertEqual(self.get("B.md"), done_b)
+            # Pressed again: back to B, with A's new entry ended.
+            self.back()
+            self.assertEqual(self.note(""), f"{self.tasks / 'B.md'}:5:19")
+            self.assertEqual(self.get("A.md"), "# A\n2026-10-09 09:00 - 10:00\n2026-10-09 14:05 - 14:05 = 0h 00min\n")
+            self.assertEqual(self.get("B.md"), done_b + "2026-10-09 14:05 - \n")
+
+        def test_empty_prompt_adds_no_heading(self):
+            self.put("A.md", "2026-10-09 09:00 - 10:00\n")
+            self.put("B.md", "# B\n2026-10-09 13:00 -\n")
+            self.back()
+            self.note("")
+            self.assertEqual(self.get("B.md"), "# B\n2026-10-09 13:00 - 14:05 = 1h 05min\n")
+            self.assertFalse((self.home / ".cache" / "tl" / "switch").exists())
+
+        def test_nothing_running_resumes_the_latest(self):
+            self.put("A.md", "2026-10-09 09:00 - 10:00\n")
+            b = self.put("B.md", "2026-10-09 10:00 - 12:00")  # no newline at the end
+            self.back()
+            self.assertEqual(self.get("B.md"), "2026-10-09 10:00 - 12:00\n2026-10-09 14:05 - \n")
+            self.assertEqual(self.note("x"), f"{b}:2:19")  # nothing ended: nothing to head
+            self.assertEqual(self.get("B.md"), "2026-10-09 10:00 - 12:00\n2026-10-09 14:05 - \n")
+
+        def test_keeps_the_files_line_endings(self):
+            a = self.put("A.md", "2026-10-09 09:00 - 10:00\r\n")
+            self.put("B.md", "2026-10-09 13:00 -\n")
+            self.back()
+            self.assertEqual(self.get("A.md"), "2026-10-09 09:00 - 10:00\r\n2026-10-09 14:05 - \r\n")
+            self.assertEqual(self.note(""), f"{a}:2:19")
+
+        def test_no_other_task_only_clocks_out(self):
+            self.put("A.md", "2026-10-09 13:00 -\n")
+            self.back()
+            self.assertEqual(self.note("done"), "here.md")
+            self.assertEqual(self.get("A.md"), "# done\n2026-10-09 13:00 - 14:05 = 1h 05min\n")
+
     class Switch(Case):
         """tl running / tl next, as space , i and space , I run them."""
 
@@ -882,7 +1034,7 @@ def run_tests(verbose=False):
                              f"Task folder not found: {missing}\n(create it or set TL_DIR)\n")
 
     loader = unittest.defaultTestLoader
-    suite = unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in (Parse, Commands, Out, Switch, Summary))
+    suite = unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in (Parse, Commands, Out, OutBack, Switch, Summary))
     return 0 if unittest.TextTestRunner(verbosity=2 if verbose else 1).run(suite).wasSuccessful() else 1
 
 
