@@ -2,7 +2,7 @@
 """Time-log helper for Helix (keys: space , i / I / o / r / l; see docs/keys.md).
 
 An entry is any line that starts with a date (optionally after indentation and
-a list bullet), so entries can sit anywhere in a file, in any order:
+a list bullet, checkbox or not), so entries can sit anywhere in a file, in any order:
 
     2026-10-09 09:30 - 10:45 = 1h 15min  note
     - 2026-10-09 13:00 -                 (still running)
@@ -57,7 +57,8 @@ from collections import defaultdict, namedtuple
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-PREFIX = r"\s*(?:[-*]\s+(?:\[[ xX]\]\s+)?)?"  # indent + optional "- " / "* " / "- [ ] "
+# indent + optional "- " / "* " / "- [S] ", any of td's states: a bullet keeps its entry whatever its checkbox
+PREFIX = r"\s*(?:[-*]\s+(?:\[[ xXyYaAwW!]\]\s+)?)?"
 ENTRY = re.compile(
     rf"""^(?P<prefix>{PREFIX})
         (?P<date>\d{{4}}-\d{{2}}-\d{{2}})\s+
@@ -71,8 +72,9 @@ ENTRY = re.compile(
 # td's TL_ENTRY is the same pattern (td's tests check), so a line is a time-log entry here
 # or a reminder there: `2026-11-01 10:00` with no dash is td's, not a broken entry.
 ATTEMPT = re.compile(rf"^{PREFIX}(\d{{4}}-\d{{2}}-\d{{2}})\s+\d{{1,2}}:\d{{2}}\s*[-–]")
-# Markdown heading; "#+BEGIN_SRC", "#tag" and an empty "# " are not one.
-HEADING = re.compile(r"^ {0,3}#{1,6}\s+(\S.*?)(?:\s+#+)?\s*$")
+# Markdown heading; "#+BEGIN_SRC", "#tag" and an empty "# " are not one. The title leaves out td's
+# state ("# [A] fix parser" is "fix parser"), so it stays the same when the state changes.
+HEADING = re.compile(r"^ {0,3}#{1,6}\s+(?:\[[ xXyYaAwW!]\]\s+)?(\S.*?)(?:\s+#+)?\s*$")
 # Code block fence (markdown or org); a "# " line inside a block is a comment, not a heading.
 FENCE = re.compile(r"^\s*(?:```|~~~|#\+(?:BEGIN|END)_)", re.I)
 
@@ -228,20 +230,25 @@ def opt(args, name):
 
 
 def entry_starts(t):
-    """-> ([(start, path)] of every entry already started, [(start, path)] of those running, started
-    in the last 12h), over the task files on disk but td's inbox."""
+    """-> ([(start, mtime, index, path)] of every entry already started, [the same] of those running,
+    started in the last 12h), over the task files on disk but td's inbox; index is the line's, from 0.
+    The latest (max) is the one started last: entries start on the minute, so for a task switch within
+    one, the file written last holds the newer one (the switch writes both: it ends one entry, then
+    starts the other), and in one file the lower line."""
     _, files = recent_files(None)
     starts, running = [], []
     for path in files or []:
         if is_td_inbox(path):
             continue
-        for raw in path.read_bytes().decode("utf-8", "surrogateescape").splitlines():
+        mtime = path.stat().st_mtime
+        for i, raw in enumerate(path.read_bytes().decode("utf-8", "surrogateescape").splitlines()):
             e, _ = parse(raw)
             if e is None or started_at(e) > t:
                 continue
-            starts.append((started_at(e), str(path)))
+            key = (started_at(e), mtime, i, str(path))
+            starts.append(key)
             if e.end is None and t - started_at(e) < timedelta(minutes=MAX_SANE):
-                running.append((started_at(e), str(path)))
+                running.append(key)
     return starts, running
 
 
@@ -253,7 +260,7 @@ def cmd_running(args):
     here = opt(args, "--from") or ""
     FROM_PATH.parent.mkdir(parents=True, exist_ok=True)
     FROM_PATH.write_text(here, encoding="utf-8")
-    print(max(running)[1] if running else here, end="")  # no newline: for :open %sh{}
+    print(max(running)[-1] if running else here, end="")  # no newline: for :open %sh{}
     return 0
 
 
@@ -268,8 +275,8 @@ def cmd_next(args):
     skip = opt(args, "--skip")
     if "--back" in args:
         starts, running = entry_starts(t)
-        current = max(running)[1] if running else None
-        earlier = [path for _, path in sorted(starts, reverse=True) if path != current]
+        current = max(running)[-1] if running else None
+        earlier = [key[-1] for key in sorted(starts, reverse=True) if key[-1] != current]
         target = earlier[0] if earlier else None
     else:
         try:
@@ -596,6 +603,8 @@ def run_tests(verbose=False):
             self.assertEqual(parse("  - [ ] 2026-10-09 9:05 -"), (Entry("  - [ ] ", "2026-10-09", 545, None, ""), None))
             e, _ = parse("2026-10-09 23:30 – 00:15")  # en dash, past midnight
             self.assertEqual(duration(e.start, e.end), 45)
+            for state in " xXyYaAwW!":  # any of td's states: toggling a bullet keeps its entry
+                self.assertEqual(parse(f"- [{state}] 2026-10-09 09:00 - 10:00")[0].end, 600, state)
 
         def test_rejects(self):
             self.assertEqual(parse("notes 2026-10-09 10:00 -"), (None, None))
@@ -771,6 +780,22 @@ def run_tests(verbose=False):
             self.assertEqual(self.back(a), str(a))
             self.assertEqual(self.tl("next", "--skip", "nowhere.md"), "nowhere.md")
 
+        def test_same_minute_switches_go_by_the_file_written_last(self):
+            # Z, then A, then M within the minute 14:05: back from M is A, whatever the names say.
+            z = self.put("Z.md", "2026-10-09 14:05 - 14:05\n")
+            a = self.put("A.md", "2026-10-09 14:05 - 14:05\n")
+            m = self.put("M.md", "2026-10-09 14:05 -\n")
+            for path, when in ((z, 1000), (a, 2000), (m, 3000)):
+                os.utime(path, (when, when))
+            self.assertEqual(self.back(m), str(a))
+            # Two running from the same minute: the one written last is the current one.
+            b = self.put("B.md", "2026-10-09 14:00 -\n")
+            c = self.put("C.md", "2026-10-09 14:00 -\n")
+            self.put("M.md", "2026-10-09 14:05 - 14:05\n")
+            os.utime(b, (5000, 5000))
+            os.utime(c, (4000, 4000))
+            self.assertEqual(self.tl("running", "--from", str(a)), str(b))
+
         def test_skips_todos_future_and_forgotten_entries(self):
             self.put("todo.md", "- [ ] 2026-10-09 13:50 - prep slides\n")  # a todo, not an entry
             self.put("A.md", "2026-10-09 09:00 - 10:00\n")
@@ -798,6 +823,10 @@ def run_tests(verbose=False):
                              "2026-10-08 Thu   1h 30min\n"
                              "    A   1h 30min  Title A\n      - Second\n"
                              "-----\nTotal (2 days)  4h 40min\n")
+
+        def test_titles_leave_out_tds_state(self):
+            self.put("A.md", "# [A] Title A\n2026-10-09 11:00 - 12:00\n## [x] Second\n2026-10-09 12:00 - 12:30\n")
+            self.assertIn("    A   1h 30min  Title A\n      - Second\n", self.tl("summary", "1"))
 
         def test_running_entries_first_whatever_their_date(self):
             self.put("C.md", "# Cee\n2026-10-09 13:30 -  running note\n2026-09-01 10:00 -  forgotten\n")

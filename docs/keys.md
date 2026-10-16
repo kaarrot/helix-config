@@ -63,9 +63,9 @@ left out). Renaming the bullet unlinks it from its file.
 | `A` | The same agenda, most recently changed first: a bullet's line (state, text, stamp) or its own file. Edits by hand count from the next `a`, `A` or status key |
 | `D` | **Done tasks.** The agenda with only the done ones under DONE: `[x]` bullets and files whose first line is `# [x] title`, most recently changed first, as `A` orders them. `x` on a row takes the task back to `[ ]` and the row drops out; `p` goes to the task. `a` brings back the open ones |
 | `p` | **Go to the task.** On a bullet: open its own file, if it has one; otherwise stay. On an agenda row: go to that bullet's line in todo.md; a row for a file goes to the file. Never creates anything. Uses the line as it is in the buffer, saved or not |
-| `P` | **Give the task a file.** Saves, then creates `~/tasks/<slug>.md` for the bullet, with a heading `# [S] title` that carries the bullet's state, and opens it. An existing file is reused and its heading's state updated. On an agenda row it only opens the row's file, if any. Works on a bullet you have just typed, saved or not |
-| `x` | **Done.** Toggles `[ ]` ↔ `[x]`. If the line has a repeater after its stamp, `++Nu` or `.+Nu` (N a number, u = `d`/`w`/`m`/`y`), the date moves instead and the bullet stays `[ ]`: `++1m` moves it a month at a time until it is in the future (rent on the 1st), `.+2w` sets it to today + 2 weeks (water the plants). See [Status keys in other files](#status-keys-in-other-files) |
-| `s` | **Stamp.** On a line with no date, adds today's date and the current time at the end: `2026-10-13 Tue 09:30`. On a line with one, changes its date to today and keeps the time. With the cursor on the date (after editing it by hand), keeps the date and only fixes the weekday. A time-log entry's leading time is history, so a fresh stamp is added at the end. A stamp of "now" never fires a reminder; edit it to a later time and it will |
+| `P` | **Give the task a file.** Saves, then creates `~/tasks/<slug>.md` for the bullet, with a heading `# [S] title` that carries the bullet's state (the title leaves out the bullet's stamp and repeater: the reminder stays on the bullet), and opens it. An existing file is reused and its heading's state updated. On an agenda row it only opens the row's file, if any. Works on a bullet you have just typed, saved or not |
+| `x` | **Done.** Toggles `[ ]` ↔ `[x]`. If the line has a repeater after its stamp, `++Nu` or `.+Nu` (N a number, u = `d`/`w`/`m`/`y`), the date moves instead and the bullet stays `[ ]`: `++1m` moves it a month at a time until it is in the future (rent on the 1st), `.+2w` sets it to today + 2 weeks (water the plants). A task file with no todo.md bullet repeats the same way, with the date and repeater on any line but a bullet (`2026-12-15 Tue 11:50 ++2m` under `# [ ] haircut`). See [Status keys in other files](#status-keys-in-other-files) |
+| `s` | **Stamp.** On a line with no date, adds today's date and the current time at the end: `2026-10-13 Tue 09:30`. On a line with one, changes its date to today and keeps the time. With the cursor on the date (after editing it by hand), keeps the date and only fixes the weekday. A time-log entry's leading time is history, so a fresh stamp is added at the end. A stamp of "now" never fires a reminder; edit it to a later time and it will. With two stamps on the line, the cursor picks which one changes. Doesn't save: the reminder alarm learns the new time once the file is saved, at the next tick (opening the agenda runs one) |
 | `, y` | Toggle `[ ]` ↔ `[Y]` (today) |
 | `, a` | Toggle `[ ]` ↔ `[A]` (active) |
 | `, w` | Toggle `[ ]` ↔ `[W]` (waiting) |
@@ -93,9 +93,17 @@ save the file. They also keep the task's other copies in step:
   todo.md bullet the file belongs to gets the same state. The file name
   finds the bullet, so a heading you retitled still works. Marking a
   repeating bullet done moves its date, and the heading goes back to `[ ]`.
-- **On a bullet in another file with the same text as a todo.md bullet:**
-  that todo.md bullet changes too.
+- **On a file task** (a task file with no todo.md bullet) with a repeating
+  date on a line that isn't a bullet: `x` on its agenda row, or on the
+  date's line, moves the date, and the heading stays `[ ]`. On the heading
+  itself, `x` moves a date on that same line; with the date on another
+  line it changes nothing, since the key gets only the heading's line and
+  can't reach the date (and marking it done would end the repeats).
+- **On a bullet in another file in ~/tasks with the same text as a todo.md
+  bullet:** that todo.md bullet changes too.
 - **On any other bullet** (subtasks): only that line.
+- **Outside ~/tasks** (a README's checklist): only that line, whatever its
+  text; todo.md and the task files are left alone.
 
 If several todo.md bullets have the same text (an old done `call mom` and a
 new one), the open one changes. A state typed by hand doesn't reach other
@@ -108,10 +116,13 @@ no repeaters, and no other copies change.
 ## Moving a stamp or a time-log entry (normal mode, no `space ,`)
 
 `+` moves the stamp (`YYYY-MM-DD Xxx HH:MM`) on the cursor's line later and
-`-` moves it earlier, by the part under the cursor. The cursor stays on that
+`-` moves it earlier, by the part under the cursor (on a line with two
+stamps, the one the cursor is on, else the first). The cursor stays on that
 part, so pressing again keeps moving it. The weekday follows the date, and
 one undo reverts one press. A line with no stamp is left alone, and so is
-the agenda. These keys don't save.
+the agenda. These keys don't save, so the reminder alarm learns the new
+time as it does a hand edit: once saved, at the next tick (opening the
+agenda runs one).
 
 On the week summary view (`space , L`), `-` shows the previous week and `+`
 the next one, wherever the cursor is.

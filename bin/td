@@ -17,7 +17,8 @@ Two tiers of tasks:
   of a tl log entry line (`YYYY-MM-DD HH:MM - …`, the pattern tl uses).
   Inbox bullets fire while they are open: [ ]/[Y]/[A]/[W]. A dedicated
   file fires while its bullet is open; a file with no bullet, unless its
-  first H1 is `# [x]`/`# [X]`/`# [!]`. The agenda marks a bullet with
+  first H1 is `# [x]`/`# [X]`/`# [!]`. A done or ignored subtask bullet in
+  a file doesn't fire. The agenda marks a bullet with
   " (*)" when a dedicated file with the same slug exists.
 
       # refactor td parser
@@ -34,8 +35,11 @@ Commands:
                        (also ones added since the previous tick, unless
                        `td stamp` wrote them as "now"), then arm one exact
                        Android alarm for the next one. `td list` and the
-                       commands that edit tasks start a tick in the
+                       commands that change tasks on disk (toggle, set,
+                       rename, file, promote) start a tick in the
                        background when they finish, so the alarm follows.
+                       Not stamp, shift and new: their keys don't save,
+                       so the next tick sees their change.
   td list [--state todo|today|active|waiting|done|all] [--sort added|modified]
                        build the agenda from $TD_FILE bullets; write to
                        ~/.cache/td/agenda.md (read-only: it is a view) and
@@ -101,14 +105,16 @@ Commands:
                        (or orphan's) file and first-line heading, or a
                        bullet's todo.md text and its own file, if any.
   td stamp [--restamp] [--col N]
-                       stdin: a line. If it contains a date, replace (default)
+                       stdin: a line. If it contains a date (the one at
+                       column N with --col N, else the first), replace (default)
                        with today's date (preserving the time) or recompute
                        the weekday only (--restamp, or --col N with column N,
                        1-based, on the stamp). If no date, append a
                        fresh "YYYY-MM-DD Xxx HH:MM" to the end of the line.
                        The weekday is always kept in sync with the date.
   td shift +N|-N [--col COL]
-                       stdin: a line. Move its stamp by N of the part under
+                       stdin: a line. Move its stamp (the one at COL when it
+                       has two, else the first) by N of the part under
                        column COL (1-based): year, month, day (or weekday),
                        hour, or 5 minutes; the day when COL is off the stamp
                        or not given. The weekday follows the date; month ends
@@ -139,6 +145,7 @@ import fcntl
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -156,13 +163,13 @@ TASK = re.compile(r"^(?P<indent>\s*)- \[(?P<state>[ xXyYaAwW!])\]\s+(?P<text>.*?
 SCHEDULE_TS = re.compile(
     r"(\d{4}-\d{2}-\d{2})(?: [A-Z][a-z]{2})? (\d{1,2}:\d{2})")
 # A tl log entry: the line *starts* (after an optional "- " / "* " /
-# "- [ ] ") with date, time, then "-" or "–". That leading time is a log,
-# never a schedule. The same pattern as tl's ATTEMPT (a test checks), so a
-# line is either a log entry to tl or a reminder to td, never both or
-# neither. A " - " after a time elsewhere is just text:
-# `call bank 2026-10-12 10:00 - bring docs` is a reminder.
+# "- [S] ", any state) with date, time, then "-" or "–". That leading time
+# is a log, never a schedule, whatever the checkbox says. The same pattern
+# as tl's ATTEMPT (a test checks), so a line is either a log entry to tl or
+# a reminder to td, never both or neither. A " - " after a time elsewhere is
+# just text: `call bank 2026-10-12 10:00 - bring docs` is a reminder.
 TL_ENTRY = re.compile(
-    r"^\s*(?:[-*]\s+(?:\[[ xX]\]\s+)?)?(\d{4}-\d{2}-\d{2})\s+\d{1,2}:\d{2}\s*[-–]")
+    r"^\s*(?:[-*]\s+(?:\[[ xXyYaAwW!]\]\s+)?)?(\d{4}-\d{2}-\d{2})\s+\d{1,2}:\d{2}\s*[-–]")
 # org-mode-style repeater, as its own token: ++2w bumps the old date by
 # N units until >today; .+2w bumps to today + N units. Units: d/w/m/y.
 # Whitespace (or start) before the sigil, and a non-word after the unit,
@@ -171,7 +178,6 @@ TL_ENTRY = re.compile(
 REPEATER = re.compile(r"(?<!\S)(\+\+|\.\+)(0*[1-9]\d*)([dwmy])(?!\w)")
 LINK = re.compile(r"\s*→\s*\S+\s*$")
 MARKER = re.compile(r"\s*\(\*\)\s*$")
-_REPEATER_TAIL = re.compile(r"\s+(?:\+\+|\.\+)0*[1-9]\d*[dwmy]\s*$")
 AGENDA_ROW = re.compile(
     r"^(?P<rest>- \[[ xXyYaAwW!]\].*?)\s{2,}(?P<path>\S+?):(?P<line>\d+):\d+\s*$")
 H1 = re.compile(r"^#\s+(?:\[[ xXyYaAwW!]\]\s+)?(.+?)\s*$")
@@ -261,34 +267,54 @@ def _same_file(a, b):
         return False
 
 
-def find_stamp(line):
-    """First SCHEDULE_TS match in line, skipping a tl log entry's leading time."""
-    m = SCHEDULE_TS.search(line)
+def find_stamps(line):
+    """Every SCHEDULE_TS match in line, but a tl log entry's leading time."""
     entry = TL_ENTRY.match(line)
-    if m and entry and m.start() < entry.end():
-        m = SCHEDULE_TS.search(line, m.end())
-    return m
+    return [m for m in SCHEDULE_TS.finditer(line)
+            if not (entry and m.start() < entry.end())]
+
+
+def find_stamp(line):
+    """The first of find_stamps(line), or None."""
+    stamps = find_stamps(line)
+    return stamps[0] if stamps else None
+
+
+def _stamp_at(line, i):
+    """The stamp in line holding 0-based index i (or just past its end),
+    else the first one; None when line has none. Which stamp `space , s`
+    and `+`/`-` work on when a line has two."""
+    stamps = find_stamps(line)
+    if i is not None:
+        for m in stamps:
+            if m.start() <= i <= m.end():
+                return m
+    return stamps[0] if stamps else None
+
+
+def _split_eol(s):
+    """(s without its line ending, the line ending: "\\n", "\\r\\n" or "")."""
+    body = s.rstrip("\r\n")
+    return body, s[len(body):]
 
 
 def _identity_text(text):
-    """Task text with link, (*), and a trailing stamp/repeater removed.
+    """Task text with link, (*), and its stamps and repeaters removed.
 
-    The stamp is an annotation. Leaving it in the slug or the added-hash
-    orphans the dedicated file and jumps the row to the top of the agenda
-    every time `td stamp` or a repeater bump moves the date.
+    A stamp is an annotation, wherever it is in the line (`call bank
+    2026-10-12 10:00 - bring docs`, `rent 2026-11-01 09:00 ++1m #home`).
+    Leaving it in the slug or the added-hash orphans the dedicated file and
+    jumps the row to the top of the agenda every time `td stamp`, `+`/`-` or
+    a repeater bump moves the date. A repeater goes with the stamps: on a
+    line with none, `++1d` is text.
     """
     s = MARKER.sub("", text).strip()
     s = LINK.sub("", s).strip()
-    # Repeater belongs to the stamp. Drop it only when a stamp is actually
-    # trailing — a bare `++1d` in the title is not one.
-    rep = _REPEATER_TAIL.search(s)
-    head = s[:rep.start()] if rep else s
-    stamp = None
-    for m in SCHEDULE_TS.finditer(head):
-        if head[m.end():].strip() == "":
-            stamp = m
-    if stamp and (stamp.start() == 0 or head[stamp.start() - 1].isspace()):
-        s = head[:stamp.start()].rstrip()
+    stamps = find_stamps(s)
+    if stamps:
+        for m in reversed(stamps):
+            s = s[:m.start()] + " " + s[m.end():]
+        s = REPEATER.sub(" ", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -309,7 +335,7 @@ def schedule_hash(path, due_iso, text):
 
 def stamp_text(path, lineno, raw):
     """The line a reminder's key holds: a bullet's text without its
-    checkbox, link, marker or trailing stamp (as bullet_hash), else the line
+    checkbox, link, marker, stamps or repeater (as bullet_hash), else the line
     itself. So toggling a state or a repeater bump keeps the text."""
     b = parse_bullet(path, lineno, raw)
     return _identity_text(b.text if b else raw)
@@ -340,13 +366,17 @@ def _bump_recurring(raw, today):
 
     ++Nu: new = old + N*unit, repeated until >today (anchored).
     .+Nu: new = today + N*unit (floating).
+    The stamp is the one the repeater follows (the nearest before it), else
+    the first, so a second date on the line stays put.
     """
-    m_ts = find_stamp(raw)
-    if not m_ts:
-        return None
     m_rep = REPEATER.search(raw)
     if not m_rep:
         return None
+    stamps = find_stamps(raw)
+    if not stamps:
+        return None
+    before = [m for m in stamps if m.start() < m_rep.start()]
+    m_ts = before[-1] if before else stamps[0]
     try:
         old = datetime.strptime(f"{m_ts.group(1)} {m_ts.group(2)}",
                                 "%Y-%m-%d %H:%M")
@@ -403,14 +433,16 @@ def scan_schedules():
     """All schedule candidates across $TL_DIR files + inbox bullets.
 
     Any `YYYY-MM-DD HH:MM` timestamp counts — no `SCHEDULE:` marker needed —
-    except the leading time of a tl log entry (see TL_ENTRY). On inbox
-    bullets, only open states ([ ], [Y], [A], [W]) are eligible — [x]/[!]
-    skip. A dedicated file follows its inbox bullet (the one whose slug is
-    the file name), as the agenda does: it is skipped unless that bullet is
-    open, whatever its heading says, so a bullet marked done by hand stops
-    its file too. A file with no bullet is skipped when its first H1 is
-    `# [x]`/`# [X]`/`# [!]`. Otherwise every timestamp in the file is a
-    candidate. The inbox is scanned even when $TD_FILE lives outside $TL_DIR.
+    except the leading time of a tl log entry (see TL_ENTRY); a line with
+    two has two reminders. On inbox bullets, only open states ([ ], [Y],
+    [A], [W]) are eligible — [x]/[!] skip. A dedicated file follows its
+    inbox bullet (the one whose slug is the file name), as the agenda does:
+    it is skipped unless that bullet is open, whatever its heading says, so
+    a bullet marked done by hand stops its file too. A file with no bullet
+    is skipped when its first H1 is `# [x]`/`# [X]`/`# [!]`. Otherwise every
+    timestamp in the file is a candidate, but on a subtask bullet that is
+    done or ignored. The inbox is scanned even when $TD_FILE lives outside
+    $TL_DIR.
     """
     folder = task_folder()
     files = sorted(folder.glob("*.md")) if folder.is_dir() else []
@@ -441,25 +473,26 @@ def scan_schedules():
             elif file_state in ("x", "X", "!"):
                 continue
         for i, raw in enumerate(lines, 1):
+            stamps = find_stamps(raw)
+            if not stamps:
+                continue
+            b = parse_bullet(f, i, raw)
+            if (b and b.state not in VISIBLE) or (is_inbox and not b):
+                continue
+            text = stamp_text(f, i, raw)
             if is_inbox:
-                b = parse_bullet(f, i, raw)
-                if not b or b.state not in VISIBLE:
-                    continue
                 line_title = (LINK.sub("", MARKER.sub("", b.text)).strip()
                               or f.stem)
             else:
                 line_title = file_title
-            ts = find_stamp(raw)
-            if not ts:
-                continue
-            try:
-                due = datetime.strptime(f"{ts[1]} {ts[2]}", "%Y-%m-%d %H:%M")
-            except ValueError:
-                continue
-            iso = due.isoformat(timespec="minutes")
-            out.append(Scheduled(f, i, due, line_title,
-                                 schedule_hash(str(f), iso,
-                                               stamp_text(f, i, raw))))
+            for ts in stamps:
+                try:
+                    due = datetime.strptime(f"{ts[1]} {ts[2]}", "%Y-%m-%d %H:%M")
+                except ValueError:
+                    continue
+                iso = due.isoformat(timespec="minutes")
+                out.append(Scheduled(f, i, due, line_title,
+                                     schedule_hash(str(f), iso, text)))
     return out
 
 
@@ -637,11 +670,14 @@ def fire_notification(title, body, open_path):
         print(f"would fire: {tilde(open_path)}  {title}: {body}")
         return True
     try:
+        # The action is a shell command line (termux-notification runs it
+        # with sh -c), so the path is quoted.
         r = subprocess.run(["termux-notification",
                             "--title", title,
                             "--content", body,
                             "--sound",
-                            "--action", f"termux-open {open_path}"],
+                            "--action",
+                            f"termux-open {shlex.quote(str(open_path))}"],
                            check=False)
     except OSError:
         return False
@@ -719,7 +755,7 @@ def cmd_tick(args=()):
 
     A tick runs from that alarm (`--alarm`: then it releases the wake lock
     the alarm took), and in the background after `td list` and the
-    commands that edit tasks (`--later`: it waits 2 s, so
+    commands that change tasks (`--later`: it waits 2 s, so
     a key's trailing :update has saved the buffer). Ticks take a lock, so
     two at once never fire a reminder twice."""
     _need_termux("tick")
@@ -894,7 +930,7 @@ def _modified_iso(b, changed):
         mtime = datetime.fromtimestamp(dedicated.stat().st_mtime)
     except OSError:
         return iso
-    return max(iso, mtime.isoformat(timespec="minutes"))
+    return max(iso, mtime.isoformat(timespec="seconds"))
 
 
 def build_list(args):
@@ -905,7 +941,8 @@ def build_list(args):
     # Files with a `# [S]` first line and no bullet are tasks of their own.
     file_tasks = _file_tasks(bullet_slugs)
     bullets = bullets + file_tasks
-    when = now().isoformat(timespec="minutes")
+    # To the second, so tasks seen a few seconds apart don't tie.
+    when = now().isoformat(timespec="seconds")
     update_added([(b.hash, b.text) for b in bullets], when)
     added = load_added()
     changed = update_changed(bullets, when, added)
@@ -1003,7 +1040,8 @@ def _changed(data):
     back the pipe's edit with `:earlier 1`, so the pipe must make exactly one edit. A line given
     back as it was can make none (an empty one does), and the undo would take back the reload
     before it instead, leaving the buffer stale and modified."""
-    return data[:-1] + " \n" if data.endswith("\n") else data + " "
+    body, eol = _split_eol(data)
+    return body + " " + eol
 
 
 def _echo_if_agenda(args, data):
@@ -1105,13 +1143,13 @@ def _carry_over(old_hash, new_hash, label):
     added = load_added()
     if old_hash in added:
         _append_sidecar(ADDED_PATH, [(added[old_hash], new_hash, label[:80])])
-    _append_sidecar(CHANGED_PATH, [(now().isoformat(timespec="minutes"), new_hash, "")])
+    _append_sidecar(CHANGED_PATH, [(now().isoformat(timespec="seconds"), new_hash, "")])
 
 
 def _set_heading_title(path, title):
     """Give path's first-line heading a new title, keeping its `[S]`; no heading: add `# title`."""
     lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
-    hm = H1_PARTS.match(lines[0].rstrip("\n")) if lines else None
+    hm = H1_PARTS.match(_split_eol(lines[0])[0]) if lines else None
     if hm:
         state = f"[{hm['state']}] " if hm["state"] is not None else ""
         _write_line(path, lines, 0, f"{hm['hash']}{state}{title}{hm['trail']}")
@@ -1128,7 +1166,8 @@ def cmd_rename(args):
     name is (_task_name), and the agenda is rebuilt: a file-task or orphan row's file
     is renamed to the new slug and its first-line heading gets the name (keeping `[S]`; a file
     with no heading gets `# NAME`); a bullet row's todo.md bullet gets the name as its text, and
-    its own file, if any, is renamed and retitled with it, so the two stay linked. Prints
+    its own file, if any, is renamed and retitled with it, so the two stay linked (the title
+    without the bullet's stamps: they are the bullet's reminders, not the file's). Prints
     AGENDA:LINE for :open. A file already there under the new name, an unusable name, or a row
     with no task: exit 1, nothing changed."""
     source, lineno = _from_spec(args)
@@ -1156,13 +1195,13 @@ def cmd_rename(args):
         lines, hits, _ = _find_bullet_lines(inbox, task.name, task.state) if inbox.is_file() else ([], [], "")
         if not hits:
             sys.exit("td: no such bullet in todo.md now (space , a rebuilds the agenda)")
-        m = TASK.match(lines[hits[0]].rstrip("\n"))
+        m = TASK.match(_split_eol(lines[hits[0]])[0])
         old_file = task_folder() / f"{slugify(m['text'])}.md"
         if new_file.exists() and not _same_file(old_file, new_file):
             sys.exit(f"td: {tilde(new_file)} already exists")
         _write_line(inbox, lines, hits[0], f"{m['indent']}- [{m['state']}] {name}")
         if old_file.is_file():
-            _set_heading_title(old_file, LINK.sub("", name).strip())
+            _set_heading_title(old_file, _identity_text(name))
             if not _same_file(old_file, new_file):
                 old_file.rename(new_file)
         _carry_over(bullet_hash(str(inbox), m["text"]), bullet_hash(str(inbox), name), name)
@@ -1193,16 +1232,15 @@ def cmd_new(args):
     # space , q pipes the last line through here (space , Q the first): an
     # empty bullet left by an earlier one is reused, not joined by a second.
     piped = sys.stdin.read()
-    nl = "\n" if piped.endswith("\n") else ""
-    raw = piped.rstrip("\n")
+    raw, eol = _split_eol(piped)
     if raw.rstrip() == bullet.rstrip():
-        sys.stdout.write(bullet + nl)
+        sys.stdout.write(bullet + eol)
     elif not piped:
         sys.stdout.write(bullet)
     elif above:
-        sys.stdout.write(bullet + "\n" + raw + nl)
+        sys.stdout.write(bullet + (eol or "\n") + raw + eol)
     else:
-        sys.stdout.write(raw + "\n" + bullet + nl)
+        sys.stdout.write(raw + (eol or "\n") + bullet + eol)
     return 0
 
 
@@ -1258,10 +1296,9 @@ def cmd_shift(args):
         _tl().view_step(n)
         sys.stdout.write(_changed(data))
         return 0
-    trailing_nl = data.endswith("\n")
-    body = data[:-1] if trailing_nl else data
+    body, eol = _split_eol(data)
     i = col - 1 if col is not None else None
-    m = find_stamp(body)
+    m = _stamp_at(body, i)
     # A tl entry line: its head (date, start, end) moves, in tl's format. Off the head, the
     # day moves: the entry's, unless the line also has a reminder stamp, whose day moves.
     head = _tl().entry_head(body) if TL_ENTRY.match(body) else None
@@ -1287,7 +1324,7 @@ def cmd_shift(args):
                 old_hour = m.group(2).index(":")
                 i = m.start() + 15 + (i - m.start(2)) + (2 - old_hour)
             body = body[:m.start()] + new + body[m.end():]
-    sys.stdout.write(body + ("\n" if trailing_nl else ""))
+    sys.stdout.write(body + eol)
     if i is not None:
         try:
             CACHE.mkdir(parents=True, exist_ok=True)
@@ -1376,12 +1413,11 @@ def cmd_stamp(args):
     data = sys.stdin.read()
     if _echo_if_agenda(args, data):
         return 0
-    trailing_nl = data.endswith("\n")
-    body = data[:-1] if trailing_nl else data
+    body, eol = _split_eol(data)
     t = now()
     stamped = None  # "YYYY-MM-DD HH:MM" this run wrote (not for --restamp)
 
-    m = find_stamp(body)
+    m = _stamp_at(body, col - 1 if col is not None else None)
     # Cursor on the stamp (or just past it): the date was edited by hand,
     # so only fix the weekday instead of moving the date to today.
     if m and col is not None and m.start() <= col - 1 <= m.end():
@@ -1407,7 +1443,7 @@ def cmd_stamp(args):
             rewritten = f"{body} {stamp}" if body else stamp
             stamped = t.strftime("%Y-%m-%d %H:%M")
 
-    sys.stdout.write(rewritten + ("\n" if trailing_nl else ""))
+    sys.stdout.write(rewritten + eol)
     _record_stamped_now(stamped, t)
     return 0
 
@@ -1490,8 +1526,11 @@ def cmd_promote(args):
     A bullet gets its dedicated file ~/tasks/<slug>.md: written with a
     `# [S] title` heading if missing, else its heading is retagged with
     the bullet's state, and the agenda is refreshed for the new ` (*)`.
-    From the agenda nothing is written (it is a view). Then prints where P
-    goes (see _goto): the dedicated file, or the line itself."""
+    The title leaves out the bullet's stamps and repeater: they stay the
+    bullet's, and in the heading they would fire a second time and never
+    move with a repeater bump. From the agenda nothing is written (it is a
+    view). Then prints where P goes (see _goto): the dedicated file, or the
+    line itself."""
     source, lineno = _from_spec(args)
     raw = sys.stdin.read().rstrip("\r\n")
     m = TASK.match(raw)
@@ -1502,7 +1541,7 @@ def cmd_promote(args):
         folder.mkdir(parents=True, exist_ok=True)
         dedicated = folder / f"{slug}.md"
         if not dedicated.exists():
-            dedicated.write_text(f"# [{canon(m['state'])}] {core}\n\n",
+            dedicated.write_text(f"# [{canon(m['state'])}] {_identity_text(core)}\n\n",
                                  encoding="utf-8", errors="surrogateescape")
         else:
             _retag_dedicated_h1(core, canon(m["state"]))
@@ -1566,15 +1605,23 @@ def cmd_toggle(args):
 
     The agenda is a view: a row comes back unchanged, and the task it
     shows changes where it lives (see _toggle_agenda_row). Everywhere else
-    the line is toggled, and from a file other
-    than $TD_FILE the inbox bullet with the same slug gets the same state.
+    the line is toggled, and from another file in $TL_DIR the inbox bullet
+    with the same slug gets the same state.
     In a dedicated file (~/tasks/<slug>.md) the `# [S] title` heading
     toggles too, and sets the inbox bullet named by the file (an open one
-    first, see _set_inbox_state). The inbox line is rewritten from itself,
-    so it keeps its indent and link, and marking it done bumps it if it
-    repeats. The dedicated file's
+    first, see _set_inbox_state); with no bullet, a file task, done moves
+    its repeating date instead (see _set_file_task; from its buffer, only a
+    date on the heading line can move, so with the date on another line the
+    heading stays as it is). The inbox line is
+    rewritten from itself, so it keeps its indent and link, and marking it
+    done bumps it if it repeats. A line that is neither bullet nor heading
+    changes only when it is a date with a repeater and the state is done:
+    the date moves. The dedicated file's
     heading follows the inbox (unless that file is the one being edited:
-    Helix saves it next), and agenda.md is refreshed."""
+    Helix saves it next), and agenda.md is refreshed.
+
+    Outside $TL_DIR and the inbox (a README's checklist), or without
+    --from, only the line itself changes."""
     if not args:
         sys.exit("usage: td toggle STATE [--from PATH [--line N]]")
     # A name (todo, waiting, ...) saves quoting " " in a key binding.
@@ -1607,11 +1654,9 @@ def cmd_toggle(args):
         lines = data.splitlines(keepends=True)
         if not 1 <= line_no <= len(lines):
             return 0
-        raw = lines[line_no - 1].rstrip("\n")
+        raw = _split_eol(lines[line_no - 1])[0]
     else:
-        piped = sys.stdin.read()
-        nl = "\n" if piped.endswith("\n") else ""
-        raw = piped.rstrip("\n")
+        raw, nl = _split_eol(sys.stdin.read())
         if from_path is not None:
             # Helix's :pipe puts any stderr output in place of the line.
             sys.stderr = open(os.devnull, "w")
@@ -1634,6 +1679,7 @@ def cmd_toggle(args):
 
     from_inbox = _same_file(from_path, inbox)
     own_slug = _dedicated_slug(from_path)
+    in_tasks = from_inbox or _in_task_folder(from_path)
     bm = TASK.match(raw)
     hm = H1_PARTS.match(raw) if own_slug and not bm else None
     if hm:
@@ -1641,20 +1687,40 @@ def cmd_toggle(args):
         cur = canon(hm["state"] or " ")
         wanted = " " if cur == state else state
         inbox_line = _set_inbox_state(inbox, own_slug, wanted)
-        new_state = canon(TASK.match(inbox_line)["state"]) if inbox_line else wanted
-        emit(f"{hm['hash']}[{new_state}] {hm['title']}{hm['trail']}")
+        if inbox_line:
+            new_state = canon(TASK.match(inbox_line)["state"])
+            emit(f"{hm['hash']}[{new_state}] {hm['title']}{hm['trail']}")
+        elif use_file:
+            # A file task, on disk: done moves a repeating date instead.
+            new_lines = _set_file_task(lines, line_no - 1, wanted)
+            if new_lines != lines:
+                from_path.write_bytes("".join(new_lines).encode("utf-8", "surrogateescape"))
+        elif wanted in ("x", "X") and _repeats_below(from_path):
+            # A file task, from its buffer, with its repeating date on
+            # another line: only the heading came, and Helix saves the
+            # buffer next, so the date can't move from here, and done would
+            # end the repeats. The heading stays as it is (x on the date
+            # line, or on the agenda row, moves the date).
+            emit(raw)
+        else:
+            emit(_set_file_task([raw], 0, wanted)[0])
         refresh_list()
         return 0
     if not bm:
-        emit(raw)
+        # A date with a repeater on a line of its own (a file task's
+        # `2026-12-15 Tue 11:50 ++2m`): done moves it. Other lines stay.
+        bumped = _bump_recurring(raw, now()) if state in ("x", "X") else None
+        emit(raw if bumped is None else bumped)
         return 0
 
     wanted = " " if canon(bm["state"]) == state else state
     new_raw = _set_state(raw, wanted)
     emit(new_raw)
+    if not in_tasks:
+        return 0  # a checklist elsewhere: this line only
     heading_state = canon(TASK.match(new_raw)["state"])
     slug = slugify(bm["text"])
-    if from_path is not None and not from_inbox:
+    if not from_inbox:
         inbox_line = _set_inbox_state(inbox, slug, wanted)
         if inbox_line:
             heading_state = canon(TASK.match(inbox_line)["state"])
@@ -1669,7 +1735,8 @@ def _toggle_agenda_row(raw, state):
     rebuild the agenda. A bullet row: its todo.md line (the one with the
     same state and text, as space , p finds it), bumped instead if it
     repeats and state is done; its file's heading follows. A file-task row
-    (ending `path:1:1`): that file's `# [S] title` heading. Anything else
+    (ending `path:1:1`): that file's `# [S] title` heading, or done moves
+    its repeating date instead (see _set_file_task). Anything else
     (orphans, headings, a stale row): nothing but the rebuild."""
     bm = TASK.match(raw)
     if bm:
@@ -1679,13 +1746,14 @@ def _toggle_agenda_row(raw, state):
             path = Path(frow["path"]).expanduser()
             lines = (path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
                      if path.is_file() else [])
-            hm = H1_PARTS.match(lines[0].rstrip("\n")) if lines else None
-            if hm:
-                _write_line(path, lines, 0, f"{hm['hash']}[{wanted}] {hm['title']}{hm['trail']}")
+            if lines and H1_PARTS.match(_split_eol(lines[0])[0]):
+                new_lines = _set_file_task(lines, 0, wanted)
+                if new_lines != lines:
+                    path.write_bytes("".join(new_lines).encode("utf-8", "surrogateescape"))
         elif td_file().is_file():
             lines, hits, _ = _find_bullet_lines(td_file(), bm["text"], bm["state"])
             if hits:
-                old = lines[hits[0]].rstrip("\n")
+                old = _split_eol(lines[hits[0]])[0]
                 new = _set_state(old, wanted)
                 if new != old:
                     _write_line(td_file(), lines, hits[0], new)
@@ -1706,6 +1774,52 @@ def _set_state(raw, new_state):
         if bumped is not None:
             return CHECKBOX.sub("- [ ]", bumped, count=1)
     return CHECKBOX.sub(f"- [{new_state}]", raw, count=1)
+
+
+def _set_file_task(lines, head, wanted):
+    """A file task's lines (line ends kept) with the heading at lines[head]
+    set to [wanted] -> new lines. Done (x/X) on a task with a repeating date
+    moves the date instead and sets [ ], as for a bullet: every line with a
+    stamp and a ++/.+ repeater (`2026-12-15 Tue 11:50 ++2m`, or the heading
+    itself) but a bullet's, since bullets are subtasks with dates of their
+    own (see _bump_recurring)."""
+    out = list(lines)
+    if wanted in ("x", "X"):
+        t = now()
+        for i, line in enumerate(out):
+            body, eol = _split_eol(line)
+            bumped = None if TASK.match(body) else _bump_recurring(body, t)
+            if bumped is not None:
+                out[i] = bumped + eol
+                wanted = " "
+    body, eol = _split_eol(out[head])
+    hm = H1_PARTS.match(body)
+    if hm:
+        out[head] = f"{hm['hash']}[{wanted}] {hm['title']}{hm['trail']}{eol}"
+    return out
+
+
+def _repeats_below(path):
+    """True when the file task at path has, on disk, a repeating date under
+    its first line that _set_file_task would move."""
+    try:
+        lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines()
+    except OSError:
+        return False
+    t = now()
+    return any(not TASK.match(line) and _bump_recurring(line, t) is not None
+               for line in lines[1:])
+
+
+def _in_task_folder(path):
+    """True when path is a file directly in $TL_DIR (the inbox, a task's
+    own file, a tl task file)."""
+    if path is None:
+        return False
+    try:
+        return path.resolve().parent == task_folder().resolve()
+    except OSError:
+        return False
 
 
 def _dedicated_slug(path):
@@ -1731,13 +1845,13 @@ def _set_inbox_state(inbox, slug, new_state):
     lines = inbox.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
     hits = []  # (closed, index)
     for i, line in enumerate(lines):
-        m = TASK.match(line.rstrip("\n"))
+        m = TASK.match(_split_eol(line)[0])
         if m and slugify(m["text"]) == slug:
             hits.append((canon(m["state"]) not in VISIBLE, i))
     if not hits:
         return None
     _, i = min(hits)
-    raw = lines[i].rstrip("\n")
+    raw = _split_eol(lines[i])[0]
     new = _set_state(raw, new_state)
     if new != raw:
         _write_line(inbox, lines, i, new)
@@ -1745,9 +1859,9 @@ def _set_inbox_state(inbox, slug, new_state):
 
 
 def _write_line(path, lines, i, new):
-    """Replace lines[i] (keeping its line ending) and write lines to path."""
-    keep_nl = lines[i].endswith("\n")
-    lines[i] = new + ("\n" if keep_nl else "")
+    """Replace lines[i] with new, keeping the old line's ending ("\\r\\n"
+    too, whatever new ends with), and write lines to path."""
+    lines[i] = _split_eol(new)[0] + _split_eol(lines[i])[1]
     path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
 
 
@@ -1769,7 +1883,7 @@ def _find_bullet_lines(path, text, old_state, exact=False):
     lines = data.splitlines(keepends=True)
     hits = []
     for i, raw in enumerate(lines):
-        m = TASK.match(raw.rstrip("\n"))
+        m = TASK.match(raw.rstrip("\r\n"))
         if (m and canon(m["state"]) == canon(old_state)
                 and key(m["text"]) == needle):
             hits.append(i)
@@ -1796,10 +1910,10 @@ def _retag_dedicated_h1(text, new_state):
     data = path.read_bytes().decode("utf-8", "surrogateescape")
     lines = data.splitlines(keepends=True)
     for i, raw in enumerate(lines):
-        m = H1_WITH_STATE.match(raw.rstrip("\n"))
+        body, tail = _split_eol(raw)
+        m = H1_WITH_STATE.match(body)
         if not m:
             continue
-        tail = "\n" if raw.endswith("\n") else ""
         new = f"{m[1]}[{new_state}] {m[2]}{tail}"
         if new == raw:
             return False
@@ -1897,9 +2011,10 @@ def cmd_uninstall():
 
 # After these, a background tick re-arms the alarm: they may have moved,
 # added or closed a reminder, and opening the agenda (`list`) re-arms it
-# after a reboot.
-RETICK = {"list", "new", "file", "rename", "stamp", "shift", "promote", "set",
-          "toggle"}
+# after a reboot. Not `stamp`, `shift` and `new`: their keys don't save the
+# buffer, so a tick would only see the file as it was. Their change is
+# armed like a hand edit, once saved: by the next tick.
+RETICK = {"list", "file", "rename", "promote", "set", "toggle"}
 
 
 def main(argv):
@@ -1945,6 +2060,7 @@ def main(argv):
 # -------------------------------------------------------------------- tests
 
 def run_tests(verbose=False):
+    import json
     import subprocess as sp
     import tempfile
     import unittest
@@ -2025,6 +2141,20 @@ def run_tests(verbose=False):
             self.assertEqual(plain, stamped)
             self.assertEqual(plain, bumped)
             self.assertNotEqual(plain, bullet_hash(p, "pay rent later"))
+
+        def test_identity_leaves_out_stamps_anywhere(self):
+            # Text after the stamp, or two stamps: moving one keeps the task.
+            p = "/x.md"
+            for a, b in (("call bank 2026-10-12 10:00 - bring docs",
+                          "call bank 2026-10-13 Tue 11:00 - bring docs"),
+                         ("rent 2026-11-01 09:00 ++1m #home", "rent 2026-12-01 Tue 09:00 ++1m #home"),
+                         ("trip 2026-10-12 10:00 or 2026-10-14 10:00",
+                          "trip 2026-10-12 10:00 or 2026-10-15 Thu 10:00")):
+                self.assertEqual(bullet_hash(p, a), bullet_hash(p, b), a)
+                self.assertEqual(slugify(a), slugify(b), a)
+            self.assertEqual(slugify("call bank 2026-10-12 10:00 - bring docs"), "call-bank-bring-docs")
+            # A repeater goes with a stamp; on a line with none it is text.
+            self.assertEqual(slugify("learn C ++1d"), "learn-c-1d")
 
         def test_slugify(self):
             self.assertEqual(slugify("Costco run!"), "costco-run")
@@ -2193,6 +2323,15 @@ def run_tests(verbose=False):
             self.put_inbox(
                 "- [ ] alpha 2026-10-12 Sun 09:00 ++1w\n- [ ] bravo\n")
             out = self.td("list", now_="2026-10-10 12:00")
+            self.assertLess(out.index("bravo"), out.index("alpha"))
+
+        def test_added_seconds_apart_newest_first(self):
+            # The real clock: two tasks added within a minute keep their order.
+            self.put_inbox("- [ ] alpha\n")
+            self.td("list", TL_NOW=None)
+            time.sleep(1.1)
+            self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
+            out = self.td("list", TL_NOW=None)
             self.assertLess(out.index("bravo"), out.index("alpha"))
 
     class Tick(Case):
@@ -2423,6 +2562,28 @@ def run_tests(verbose=False):
             p.write_text("- [Y] pay rent 2026-10-10 12:00\n")
             out = self.td("tick", now_="2026-10-10 12:00")
             self.assertNotIn("would fire", out)
+
+        def test_every_stamp_on_a_line_fires(self):
+            self.put_inbox("- [ ] call bank 2026-10-10 12:00, or 2026-10-10 13:00\n")
+            self.td("tick")
+            self.assertEqual(self.td("tick", now_="2026-10-10 12:00").count("would fire"), 1)
+            self.assertEqual(self.td("tick", now_="2026-10-10 13:00").count("would fire"), 1)
+
+        def test_closed_subtask_in_a_task_file_doesnt_fire(self):
+            self.put_dedicated("trip.md", "# trip\n- [x] book taxi 2026-10-10 12:00\n"
+                               "- [!] call hotel 2026-10-10 12:00\n- [ ] pack 2026-10-10 12:00\n"
+                               "check in 2026-10-10 12:00\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 12:00")
+            self.assertEqual(out.count("would fire"), 2)
+            self.assertIn("trip", out)
+
+        def test_tl_entry_in_any_state_doesnt_fire(self):
+            # A status key on a time-log bullet doesn't turn it into a reminder.
+            self.put_inbox("- [Y] 2026-10-10 12:00 - prep slides\n")
+            self.put_dedicated("talk.md", "# talk\n- [A] 2026-10-10 12:00 - rehearse\n")
+            self.td("tick")
+            self.assertNotIn("would fire", self.td("tick", now_="2026-10-10 12:00"))
 
         def test_recurring_fires_each_time(self):
             # Fires, is marked done (bumps a day), fires again the next day.
@@ -2691,6 +2852,30 @@ def run_tests(verbose=False):
                 self.assertEqual(self.shift("+1", line, col),
                                  "- [ ] pay rent 2026-10-21 Wed 09:30", col)
 
+        def test_two_stamps_the_one_under_the_cursor_moves(self):
+            line = "- [ ] call 2026-10-12 Mon 10:00 or 2026-10-14 Wed 10:00\n"
+            # the first stamp's day is cols 20-21, the second's 44-45
+            self.assertEqual(self.shift("+1", line, 45),
+                             "- [ ] call 2026-10-12 Mon 10:00 or 2026-10-15 Thu 10:00\n")
+            self.assertEqual(self.shift("+1", line, 21),
+                             "- [ ] call 2026-10-13 Tue 10:00 or 2026-10-14 Wed 10:00\n")
+            self.assertEqual(self.shift("+1", line, 3),
+                             "- [ ] call 2026-10-13 Tue 10:00 or 2026-10-14 Wed 10:00\n")
+            typo = "- [ ] call 2026-10-12 Mon 10:00 or 2026-10-14 Mon 10:00\n"
+            self.assertEqual(self.td("stamp", "--col", "45", stdin=typo),
+                             "- [ ] call 2026-10-12 Mon 10:00 or 2026-10-14 Wed 10:00\n")
+
+        def test_crlf_line_ends_stay(self):
+            self.assertEqual(self.shift("+1", "- [ ] rent 2026-10-20 Tue 09:30\r\n"),
+                             "- [ ] rent 2026-10-21 Wed 09:30\r\n")
+            self.assertEqual(self.td("stamp", stdin="- [ ] call jon\r\n"),
+                             "- [ ] call jon 2026-10-10 Sat 11:00\r\n")
+            self.assertEqual(self.td("new", "-", stdin="- [ ] call jon\r\n"),
+                             "- [ ] call jon\r\n- [ ] \r\n")
+            self.assertEqual(self.td("new", "-", "--above", stdin="- [ ] call jon\r\n"),
+                             "- [ ] \r\n- [ ] call jon\r\n")
+            self.assertEqual(self.td("new", "-", stdin="- [ ] \r\n"), "- [ ] \r\n")
+
         def test_shift_minutes_land_on_five(self):
             line = "call 2026-10-20 Tue 09:32"
             self.assertEqual(self.shift("+1", line, 24), "call 2026-10-20 Tue 09:35")
@@ -2845,6 +3030,11 @@ def run_tests(verbose=False):
             self.td("promote",
                     stdin="- [ ] pay rent 2026-11-01 Sat 09:00 ++1m\n")
             self.assertTrue((self.tasks / "pay-rent.md").is_file())
+
+        def test_heading_leaves_out_the_stamp(self):
+            # The stamp stays the bullet's: in the heading it would fire twice.
+            self.td("promote", stdin="- [ ] pay rent 2026-11-01 Sun 09:00 ++1m #home\n")
+            self.assertEqual((self.tasks / "pay-rent-home.md").read_text(), "# [ ] pay rent #home\n\n")
 
     class Marker(Case):
         def test_bullet_with_dedicated_file_gets_marker(self):
@@ -3150,6 +3340,30 @@ def run_tests(verbose=False):
             self.assertEqual(out, "  - [x] write tests\n")
             self.assertEqual(p.read_text(), "- [A] refactor td parser\n")
 
+        def test_checklist_outside_the_task_folder_changes_alone(self):
+            p = self.put_inbox("- [ ] alpha\n")
+            d = self.put_dedicated("alpha.md", "# [ ] alpha\n")
+            readme = self.home / "proj" / "README.md"
+            readme.parent.mkdir()
+            readme.write_text("- [ ] alpha\n")
+            self.assertEqual(self.piped("x", readme, "- [ ] alpha\n").stdout, b"- [x] alpha\n")
+            self.td("toggle", "x", "--from", str(readme), "--line", "1")
+            self.assertEqual(readme.read_text(), "- [x] alpha\n")
+            self.assertEqual(p.read_text(), "- [ ] alpha\n")
+            self.assertEqual(d.read_text(), "# [ ] alpha\n")
+            self.assertEqual(self.td("toggle", "x", stdin="- [ ] alpha\n"), "- [x] alpha\n")
+            self.assertEqual(p.read_text(), "- [ ] alpha\n")
+
+        def test_crlf_files_keep_their_line_ends(self):
+            p = self.put_inbox("- [ ] alpha\r\n- [ ] bravo\r\n")
+            d = self.put_dedicated("bravo.md", "# [ ] bravo\r\n\r\nnotes\r\n")
+            self.td("toggle", "x", "--from", str(p), "--line", "2")
+            self.assertEqual(p.read_bytes(), b"- [ ] alpha\r\n- [x] bravo\r\n")
+            self.assertEqual(d.read_bytes(), b"# [x] bravo\r\n\r\nnotes\r\n")
+            out = self.piped("A", d, "# [x] bravo\r\n").stdout
+            self.assertEqual(out, b"# [A] bravo\r\n")
+            self.assertEqual(p.read_bytes(), b"- [ ] alpha\r\n- [A] bravo\r\n")
+
         def test_piped_duplicate_is_silent(self):
             p = self.put_inbox("- [ ] alpha\n- [ ] alpha\n")
             d = self.put_dedicated("notes.md", "# notes\n")
@@ -3248,6 +3462,22 @@ def run_tests(verbose=False):
             self.assertEqual(d.read_bytes(), b"# [A] renew passport\r\n\r\nnotes\r\n")
             self.assertIn("# ACTIVE\n\n- [A] renew passport  ~/tasks/passport.md:1:1", agenda)
             self.assertEqual(self.inbox.read_text(), "- [ ] alpha\n")
+
+        def test_repeating_file_task_row_moves_its_date(self):
+            # A file task (no todo.md bullet) repeats by its own date: done moves it and the
+            # task stays open, on any line but a subtask's.
+            d = self.put_dedicated("haircut.md", "# [ ] haircut\r\n2026-12-15 Tue 11:50 ++2m\r\n\r\n"
+                                                 "- [ ] book 2026-12-01 Tue 09:00 ++1m\r\n")
+            self.td("list")
+            agenda = self.toggle_row("x", "haircut")
+            self.assertEqual(d.read_bytes(), b"# [ ] haircut\r\n2027-02-15 Mon 11:50 ++2m\r\n\r\n"
+                                             b"- [ ] book 2026-12-01 Tue 09:00 ++1m\r\n")
+            self.assertIn("- [ ] haircut  ~/tasks/haircut.md:1:1", agenda)
+            # The date on the heading line moves the same way.
+            d = self.put_dedicated("rent.md", "# [Y] rent 2026-10-01 Thu 09:00 ++1m\n")
+            self.td("list")
+            self.toggle_row("x", "rent")
+            self.assertEqual(d.read_text(), "# [ ] rent 2026-11-01 Sun 09:00 ++1m\n")
 
         def test_stale_or_other_rows_change_nothing(self):
             p = self.put_inbox("- [ ] alpha\n")
@@ -3384,8 +3614,9 @@ def run_tests(verbose=False):
             self.rename("bravo", "bravo two 2026-10-20 Tue 09:00")
             self.assertEqual(p.read_text(), "- [ ] alpha\n  - [A] bravo two 2026-10-20 Tue 09:00\n")
             self.assertFalse(d.exists())
+            # The stamp stays the bullet's: in the heading it would fire twice.
             self.assertEqual((self.tasks / "bravo-two.md").read_text(),
-                             "# [A] bravo two 2026-10-20 Tue 09:00\n\nnotes\n")
+                             "# [A] bravo two\n\nnotes\n")
             self.assertIn("- [A] bravo two 2026-10-20 Tue 09:00 (*)", self.read_cache("agenda.md"))
 
         def test_bullet_without_a_file(self):
@@ -3426,6 +3657,20 @@ def run_tests(verbose=False):
             out = self.td("fire", str(p))
             self.assertIn("would fire", out)
             self.assertIn("ping", out)
+
+        def test_tap_action_quotes_the_path(self):
+            # termux-notification runs --action with sh -c.
+            bin_dir = self.home / "bin"
+            bin_dir.mkdir()
+            fake = bin_dir / "termux-notification"
+            fake.write_text(f"#!{sys.executable}\nimport json, sys\n"
+                            f"open({str(self.home / 'args')!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
+            fake.chmod(0o755)
+            p = self.put_dedicated("it's here.md", "# here\n2026-10-10 09:00\n")
+            self.td("fire", str(p), TD_DRY_RUN=None, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+            args = json.loads((self.home / "args").read_text())
+            action = args[args.index("--action") + 1]
+            self.assertEqual(shlex.split(action), ["termux-open", str(p)])
 
     class Recurring(Case):
         # NOW = "2026-10-10 11:00" (Sat)
@@ -3520,6 +3765,13 @@ def run_tests(verbose=False):
             self.assertEqual(
                 out, "- [ ] pay rent 2026-11-01 Sun 09:00 ++1m #active")
 
+        def test_bump_moves_the_stamp_before_the_repeater(self):
+            t = datetime(2026, 10, 10, 11, 0)
+            self.assertEqual(_bump_recurring("rent 2026-10-01 09:00 ++1m, paid 2026-10-05 10:00", t),
+                             "rent 2026-11-01 Sun 09:00 ++1m, paid 2026-10-05 10:00")
+            self.assertEqual(_bump_recurring("since 2026-09-01 08:00: rent 2026-10-01 09:00 ++1m", t),
+                             "since 2026-09-01 08:00: rent 2026-11-01 Sun 09:00 ++1m")
+
         def test_toggle_x_bumps_cumulative(self):
             # `td toggle x` on a recurring bullet: state stays [ ], date bumps.
             out = self.td("toggle", "x",
@@ -3552,6 +3804,36 @@ def run_tests(verbose=False):
             self.td("toggle", "x", "--from", str(p), "--line", "1")
             self.assertEqual(p.read_text(),
                              "- [ ] rent 2026-11-01 Sun 09:00 ++1m\n")
+
+        def test_file_task_repeats_from_its_own_file(self):
+            text = "# [ ] haircut\n2026-12-15 Tue 11:50 ++2m\n\n1mm at the back\n"
+            bumped = "# [ ] haircut\n2027-02-15 Mon 11:50 ++2m\n\n1mm at the back\n"
+            p = self.put_dedicated("haircut.md", text)
+            # x on the date line moves it; other states leave it.
+            date = "2026-12-15 Tue 11:50 ++2m\n"
+            self.assertEqual(self.td("toggle", "x", "--from", str(p), stdin=date),
+                             "2027-02-15 Mon 11:50 ++2m\n")
+            self.assertEqual(self.td("toggle", "Y", "--from", str(p), stdin=date), date)
+            self.assertEqual(self.td("toggle", "x", "--from", str(p), stdin="1mm at the back\n"),
+                             "1mm at the back\n")
+            # x on the heading from the buffer: the date is on another line, which this key
+            # can't change, so the heading stays (done would end the repeats).
+            self.assertEqual(self.td("toggle", "x", "--from", str(p), stdin="# [ ] haircut\n"),
+                             "# [ ] haircut\n")
+            self.assertEqual(self.td("toggle", "Y", "--from", str(p), stdin="# [ ] haircut\n"),
+                             "# [Y] haircut\n")
+            self.assertEqual(p.read_text(), text)
+            # On disk (--line) the whole file is there: the date moves.
+            self.td("toggle", "x", "--from", str(p), "--line", "1")
+            self.assertEqual(p.read_text(), bumped)
+            # The date on the heading line moves from the buffer too.
+            q = self.put_dedicated("rent.md", "# [ ] rent 2026-10-01 Thu 09:00 ++1m\n")
+            self.assertEqual(self.td("toggle", "x", "--from", str(q), stdin=q.read_text()),
+                             "# [ ] rent 2026-11-01 Sun 09:00 ++1m\n")
+            # With no repeater, done is done.
+            r = self.put_dedicated("passport.md", "# [ ] renew passport\n2026-12-15 Tue 11:50\n")
+            self.assertEqual(self.td("toggle", "x", "--from", str(r), stdin="# [ ] renew passport\n"),
+                             "# [x] renew passport\n")
 
         def test_toggle_x_bumps_from_today_state(self):
             # Marking a [y] (today) line done also bumps if recurring.

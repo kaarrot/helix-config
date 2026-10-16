@@ -118,8 +118,9 @@ decides whose a line is:
 ```
 
 A line that starts with date, time and a dash (after an optional `- `, `* `
-or `- [ ] `) is a time-log entry: `td` never fires its leading time, and
-`tl` logs it, or flags it under "Check by hand" if it is malformed. Any
+or a checkbox in any state, `- [ ] `, `- [Y] `, ...) is a time-log entry:
+`td` never fires its leading time, and `tl` logs it, or flags it under
+"Check by hand" if it is malformed. Any
 other date and time is `td`'s. Both scripts use the same pattern (`tl`'s
 `ATTEMPT`, `td`'s `TL_ENTRY`), and `td test` checks they still match.
 
@@ -135,7 +136,8 @@ Any `YYYY-MM-DD HH:MM` (a weekday between them, `2026-11-01 Sun 10:00`, is
 allowed and ignored) fires a Termux notification:
 
 - in todo.md, on a bullet that is open: `[ ]`, `[Y]`, `[A]` or `[W]`
-- in `~/tasks/*.md`, on any line, while the file's todo.md bullet is open.
+- in `~/tasks/*.md`, on any line, while the file's todo.md bullet is open,
+  but on a subtask that is done or ignored (`- [x] book taxi 2026-10-20 10:00`).
   A bullet marked done by hand, or with `space . x`, stops its file too,
   whatever the heading says. A file with no bullet fires unless its first
   heading is `# [x]`, `# [X]` or `# [!]`.
@@ -206,15 +208,17 @@ The tick then releases it with `termux-wake-unlock`, which also releases a
 wake lock you took yourself.
 
 A tick also runs in the background, 2 s after `td list` (the agenda keys)
-and the commands that edit tasks: `stamp`, `shift`, `toggle`, `set`,
-`rename`, `file`, `promote` and `new`. So the alarm follows every change
-made with td's keys, and opening the agenda re-arms it after a reboot. The
-2 s let a key's trailing `:update` save the buffer first, and running in
-the background hides the helper's ~1.3 s start-up.
+and the commands that change tasks on disk, or whose key saves next:
+`toggle`, `set`, `rename`, `file` and `promote`. So the alarm follows the
+status keys, `n`, `N` and `P`, and opening the agenda re-arms it after a
+reboot. The 2 s let a key's trailing `:update` save the buffer first, and
+running in the background hides the helper's ~1.3 s start-up.
 
 A plain `:w` after a hand edit runs no tick: open the agenda to arm it (or
-run `td tick`). Ticks take `~/.cache/td/tick.lock`, so two at once never
-fire a reminder twice.
+run `td tick`). The same goes for `space , s`, `+`, `-` and `space , q`:
+they don't save, so a tick after them would only see the file as it was.
+Ticks take `~/.cache/td/tick.lock`, so two at once never fire a reminder
+twice.
 
 The shim is `~/.config/helix/bin/td-tick`, which `td install` writes:
 
@@ -321,6 +325,23 @@ and keeps it `[ ]`; the rest of the line is kept.
 |----------|----------|
 | `++Nu` | **anchored**: old date + N units, repeated until it is after now. Missed cycles don't pile up, and "rent on the 1st" stays on the 1st however late you tick it |
 | `.+Nu` | **floating**: today + N units, at the stamp's time. "Water the plants about 2 weeks after I last did" |
+
+A task file with no todo.md bullet (a file task) repeats by its own date:
+the date and repeater on a line that isn't a bullet, or on the heading.
+`space , x` on its agenda row moves every such date in the file, and the
+heading stays `# [ ]`; on the date's line it moves that date. Bullets in
+the file are subtasks with dates of their own.
+
+```
+# [ ] haircut
+2026-12-15 Tue 11:50 ++2m                       # → 2027-02-15 Mon 11:50
+
+1mm at the back
+```
+
+On the heading inside the file, `space , x` moves only a date on the
+heading line: the key gets that line alone, so with the date on another
+line it leaves the task as it is.
 
 Months clamp the day: Jan 31 + 1m → Feb 28/29; Feb 29 + 1y → Feb 28. The
 repeater must be a word of its own: `C++1d` and `++1days` are text, and so
