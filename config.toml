@@ -9,7 +9,7 @@ wrap-indicator = "\t"
 
 [editor]
 scroll-lines = 1
-gutters = ["diagnostics", "spacer", "diff"]
+gutters = ["diagnostics", "folds", "spacer", "diff"]
 shell = ["bash", "-lc"]
 end-of-line-diagnostics = "disable"
 auto-completion = true
