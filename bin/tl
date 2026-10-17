@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Time-log helper for Helix (keys: space , i / I / o / O / r / l; see docs/keys.md).
+"""Time-log helper for Helix (keys: space , i / I / o / O / u / r / l; see docs/keys.md).
 
 An entry is any line that starts with a date (optionally after indentation and
 a list bullet, checkbox or not), so entries can sit anywhere in a file, in any order:
@@ -11,8 +11,10 @@ The "= 1h 15min" part is only a convenience; totals are always recomputed from
 the start/end times.
 
     tl start            print "YYYY-MM-DD HH:MM - " (no newline)
-    tl close            stdin = region of text. Every entry line in it gets its end filled with
-                        now if missing and its duration refreshed; other lines are untouched.
+    tl close [--file F] stdin = region of text. Every entry line in it gets its end filled with
+                        now if missing and its duration refreshed; other lines are untouched
+                        (space , u). F is the file the text came from: if it is td's inbox, the
+                        text passes through unchanged.
     tl out "$BASH_EXECUTION_STRING" # done: TEXT
                         end, at now, the latest-started entry still running (started in the last
                         12h) in the task files on disk. TEXT becomes the "# heading" right above it,
@@ -53,7 +55,7 @@ the start/end times.
                         markdown "# heading" above its entries, as bullets (but the title).
     tl test [-v]        run the tests at the end of this file (temporary task folders, faked clock).
 
-Task files: $TL_DIR (default ~/tasks), *.txt and *.md. stop (also stop - --file), out and summary skip td's inbox
+Task files: $TL_DIR (default ~/tasks), *.txt and *.md. stop (also stop - --file), close --file, out and summary skip td's inbox
 ($TD_FILE, default $TL_DIR/todo.md): a `- [ ] 2026-10-12 09:00 - prep slides` there is a todo,
 not a running entry. $TL_NOW="YYYY-MM-DD HH:MM" fakes the clock.
 """
@@ -165,10 +167,15 @@ def cmd_start():
     sys.stdout.write(now().strftime("%Y-%m-%d %H:%M - "))
 
 
-def cmd_close():
+def cmd_close(args):
     t = now()
+    text = sys.stdin.read()
+    source = opt(args, "--file")
+    if source and is_td_inbox(Path(source)):  # td's inbox passes through unchanged
+        sys.stdout.write(text)
+        return 0
     out = []
-    for raw in sys.stdin.read().splitlines(keepends=True):
+    for raw in text.splitlines(keepends=True):
         body = raw.rstrip("\r\n")
         e, _ = parse(body)  # unparseable and non-entry lines pass through untouched
         if e is not None:
@@ -176,6 +183,7 @@ def cmd_close():
             raw = render(e, end) + raw[len(body):]
         out.append(raw)
     sys.stdout.write("".join(out))
+    return 0
 
 
 def stop_lines(lines, t):
@@ -613,7 +621,7 @@ def main(argv):
     if cmd == "start":
         cmd_start()
     elif cmd == "close":
-        cmd_close()
+        return cmd_close(argv[2:])
     elif cmd == "out":
         return cmd_out(argv[2:])
     elif cmd == "stop":
@@ -722,6 +730,15 @@ def run_tests(verbose=False):
             self.assertEqual(self.tl("close", stdin=text),
                              "# h\n2026-10-09 13:00 - 14:05 = 1h 05min  open\n"
                              "2026-10-09 09:00 - 10:30 = 1h 30min\nnot 2026-10-09 10:00 -\n")
+
+        def test_close_from_td_inbox_passes_through(self):
+            # space , u in todo.md: its bullets are todos, not entries
+            text = "- [ ] 2026-10-09 13:00 - prep slides\n"
+            todo = self.put("todo.md", text)
+            self.assertEqual(self.tl("close", "--file", str(todo), stdin=text), text)
+            other = self.put("A.md", text)
+            self.assertEqual(self.tl("close", "--file", str(other), stdin=text),
+                             "- [ ] 2026-10-09 13:00 - 14:05 = 1h 05min  prep slides\n")
 
         def test_stop_files(self):
             self.put("A.md", "# A\r\n2026-10-09 13:00 -  a\r\n")

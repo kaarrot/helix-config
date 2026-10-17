@@ -109,6 +109,8 @@ I = [":open %sh{~/.config/helix/bin/tl running --from %{buffer_name}}", "select_
 o = "@:write-all<ret>:sh ~/.config/helix/bin/tl out \"$BASH_EXECUTION_STRING\" # done: "
 # Clock out and switch back: end the running entry and clock in to the task worked on before it; type what you did at the "# done:" prompt, Enter goes there
 O = "@:write-all<ret>:noop %sh{~/.config/helix/bin/tl out --back --from %{buffer_name}}<ret>:reload-all<ret>:open %sh{~/.config/helix/bin/tl note \"$BASH_EXECUTION_STRING\" # done: }<left>"
+# Refresh durations: work out "= 1h 15min" again for the entry on the line (or in the selected lines) from its times, say after typing one by hand; a running one is ended now
+u = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/tl close --file %{buffer_name}", "collapse_selection"]
 # Recently changed task files, newest first, in a popup
 r = ":sh ~/.config/helix/bin/tl recent"
 # Time per day for all task files, from any buffer (the agenda too)
