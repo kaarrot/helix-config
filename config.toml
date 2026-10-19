@@ -45,7 +45,7 @@ C-4 = ":run-shell-command echo -n \"%(buffer_name)\" | xclip -selection clipboar
 "{" = "goto_prev_paragraph"
 # ryk rewind: poke the live --serve daemon (~10s of already-played PCM).
 # Same script Grok/Claude `/rr` will run. Needs ~/.local/bin/ryk-rewind and a
-# warm daemon (first `space+. d` / `ryk --send` auto-starts it). Helix stays
+# warm daemon (first `space+. k` / `ryk --send` auto-starts it). Helix stays
 # free because speak uses --send, not one-shot ryk. See kukuryku docs/rewind-plan.md.
 A-r = ":sh ryk-rewind"
 
@@ -92,7 +92,7 @@ A = "@:: agy --dangerously-skip-permissions -p 2<gt>/dev/null<ret>"
 # fire while audio is playing. --send returns once queued; --serve owns pacat.
 # `/spk` in Grok/Claude already --sends into the same daemon, so Alt-r also
 # rewinds that speech if Helix can take the key.
-d = "@:: /data/data/com.termux/files/home/PRJ/kukuryku/target/release/ryk --send<ret>"
+k = "@:: ryk --send<ret>"
 
 # tl/td keys live under `space ,` (`space .` holds the AI tools). One line each
 # here; docs/keys.md explains every key in detail, and why each is built as it is.
