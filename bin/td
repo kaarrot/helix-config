@@ -30,9 +30,9 @@ Two tiers of tasks:
 
 Commands:
   td install           build the alarm helper (bin/TdAlarm.java, needs
-                       `pkg install ecj dx`), write the `td-tick` shim, drop
-                       the old 15-min job, and arm the first reminder
-  td uninstall         cancel the alarm (and any old job), remove the shim
+                       `pkg install ecj dx`), write the `td-tick` shim, and
+                       arm the first reminder
+  td uninstall         cancel the alarm, remove the shim
   td tick              scan files, record future timestamps, fire due ones
                        (also ones added since the previous tick, unless
                        `td stamp` wrote them as "now"), then arm one exact
@@ -212,7 +212,6 @@ def canon(state):
     the same."""
     return {"y": "Y", "a": "A", "w": "W"}.get(state, state)
 
-JOB_ID = 7421
 CACHE = Path("~/.cache/td").expanduser()
 FIRED_PATH = CACHE / "fired"
 ADDED_PATH = CACHE / "added"
@@ -2202,13 +2201,6 @@ def build_alarm():
     return None
 
 
-def _cancel_job():
-    """Drop the 15-min job older td versions registered."""
-    subprocess.run(["termux-job-scheduler", "--cancel", "--job-id", str(JOB_ID)],
-                   check=False, stdout=subprocess.DEVNULL,
-                   stderr=subprocess.DEVNULL)
-
-
 def cmd_install():
     _need_termux("install")
     err = build_alarm()
@@ -2218,7 +2210,6 @@ def cmd_install():
     TICK_SHIM.write_text(f"#!/bin/sh\nexec {sys.executable} "
                          f"{Path(__file__).resolve()} tick \"$@\"\n")
     TICK_SHIM.chmod(0o755)
-    _cancel_job()
     if cmd_tick() != 0:
         sys.exit(f"td install: see {tilde(ALARM_LOG)}")
     print(f"td: installed: alarm helper {tilde(ALARM_JAR)}, shim "
@@ -2228,7 +2219,6 @@ def cmd_install():
 
 def cmd_uninstall():
     _need_termux("uninstall")
-    _cancel_job()
     if ALARM_JAR.is_file():
         err = _run_alarm("cancel", str(TICK_SHIM))
         if err:

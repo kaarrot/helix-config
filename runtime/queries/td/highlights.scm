@@ -1,7 +1,7 @@
 ; inherits: markdown
 
 ; td tasks are `- [S] text` bullets only (bin/td TASK), so `*`, `+` and `1.` lists stay plain.
-; The text is styled on `paragraph`, not `(inline)`: markdown.inline captures its root node
+; The text is styled on `paragraph`, not `(inline)`: td.inline captures its root node
 ; to find a leading [Y]/[A]/[W]/[!], and an uncoloured capture over the exact same range
 ; would clear this colour. `paragraph` also takes the line end, so the ranges differ.
 ; Only the paragraph right after the marker (`.`) is the task: a note after a blank

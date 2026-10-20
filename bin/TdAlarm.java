@@ -33,7 +33,7 @@ public class TdAlarm {
     // AlarmManager.RTC_WAKEUP, and the hidden flag setExactAndAllowWhileIdle()
     // passes.
     static final int RTC_WAKEUP = 0, ALLOW_WHILE_IDLE = 1 << 2;
-    // Fixed request codes (job 7421's id), so setting again replaces.
+    // Fixed request codes, so setting again replaces.
     static final int REQ_FIRE = 7421, REQ_WAKE = 7422;
     static final long WAKE_LEAD_MS = 15000;
 

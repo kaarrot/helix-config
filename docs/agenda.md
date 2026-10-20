@@ -25,8 +25,8 @@ The first time:
    *Put unused apps to sleep*, which stops a sleeping app's alarms.
 4. **Install**: `~/.config/helix/bin/td install`. It builds
    `bin/TdAlarm.java` into `~/.cache/td/td-alarm.jar`, writes the `td-tick`
-   shim, cancels the 15-min job older versions used, and arms the next
-   reminder. Re-run it whenever `bin/TdAlarm.java` changes.
+   shim, and arms the next reminder. Re-run it whenever `bin/TdAlarm.java`
+   changes.
 5. **Try it**: add `- [ ] test 2026-10-14 18:05` to todo.md, with a time a
    few minutes ahead, save, open the agenda (`space , a`, which arms the
    alarm), and lock the screen. The notification arrives at that minute. If
@@ -237,9 +237,7 @@ exec /data/data/com.termux/files/usr/bin/python3 /data/data/com.termux/files/hom
 
 It holds no settings (a tick from the alarm doesn't see `.bashrc`
 exports): the defaults live in `td`, so re-running `td install` changes
-nothing else. Older versions ran it from a 15-min JobScheduler job (id
-7421); `td install` cancels that job. `td uninstall` cancels the alarm and
-removes the shim.
+nothing else. `td uninstall` cancels the alarm and removes the shim.
 
 Each tick:
 
@@ -417,8 +415,8 @@ is `++0d` (it would never move), so those lines are just marked done.
 
 | command | does |
 |---------|------|
-| `td install` | build the alarm helper, write the `td-tick` shim, cancel the old job 7421, arm the next reminder |
-| `td uninstall` | cancel the alarm (and the old job), remove the shim |
+| `td install` | build the alarm helper, write the `td-tick` shim, arm the next reminder |
+| `td uninstall` | cancel the alarm, remove the shim |
 | `td tick` | scan, record future times, fire due ones, arm the alarm for the next one; `--alarm` (from the alarm) also releases the wake lock |
 | `td list [--state todo\|today\|active\|waiting\|done\|all] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout, and the options to `~/.cache/td/agenda-args` |
 | `td promote [--from PATH:LINE]` | stdin: a line. Create or reuse the bullet's task file (not from the agenda), then print where `space , P` goes and write it to `~/.cache/td/open` |
