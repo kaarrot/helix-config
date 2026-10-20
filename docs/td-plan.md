@@ -365,7 +365,7 @@ from a limit of what a key binding can do:
 | Saves land after the key, shell steps during it | strict ordering, `:write!`, the old `P` race |
 | `:pipe` always marks the buffer modified, and puts errors in the line | `td` silent on stderr; the undo trick |
 | A script can only hand back a path, through `%sh{}` | 4 cache files: `stamp-col`, `open`, `tl/from`, `agenda-args` |
-| No prompt for user input | the `$BASH_EXECUTION_STRING` comment trick in `space , o` |
+| No prompt for user input | the `$BASH_EXECUTION_STRING` comment trick in `space , O` |
 
 [keys.md](keys.md#how-the-keys-are-built) spends about 80 lines
 explaining these workarounds.

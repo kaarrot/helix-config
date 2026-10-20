@@ -105,10 +105,10 @@ k = "@:: ryk --send<ret>"
 i = [":open %sh{~/.config/helix/bin/tl running --from %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{~/.config/helix/bin/tl next --skip %{buffer_name}}", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/tl start", ":write!", "insert_at_line_end"]
 # Switch back: end the running entry (no heading), clock in to the task worked on before it
 I = [":open %sh{~/.config/helix/bin/tl running --from %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{~/.config/helix/bin/tl next --back --skip %{buffer_name}}", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/tl start", ":write!", "insert_at_line_end"]
-# Clock out: type what you did at the "# done:" prompt, Enter ends the running entry
-o = "@:write-all<ret>:sh ~/.config/helix/bin/tl out \"$BASH_EXECUTION_STRING\" # done: "
-# Clock out and switch back: end the running entry and clock in to the task worked on before it; type what you did at the "# done:" prompt, Enter goes there
-O = "@:write-all<ret>:noop %sh{~/.config/helix/bin/tl out --back --from %{buffer_name}}<ret>:reload-all<ret>:open %sh{~/.config/helix/bin/tl note \"$BASH_EXECUTION_STRING\" # done: }<left>"
+# Clock out: end the running entry and go to its task file, in insert mode on a "# " heading above it, to type what you did
+o = [":open %sh{~/.config/helix/bin/tl out --visit --from %{buffer_name}:%{cursor_line}}", "select_all", ":pipe ~/.config/helix/bin/tl out --edit - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{cat ~/.cache/tl/goto && rm ~/.cache/tl/goto}", "insert_at_line_end"]
+# Clock out from here: type what you did at the "# done:" prompt, Enter ends the running entry; stays in this buffer
+O = "@:write-all<ret>:sh ~/.config/helix/bin/tl out \"$BASH_EXECUTION_STRING\" # done: "
 # Refresh durations: work out "= 1h 15min" again for the entry on the line (or in the selected lines) from its times, say after typing one by hand; a running one is ended now
 u = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/tl close --file %{buffer_name}", "collapse_selection"]
 # Recently changed task files, newest first, in a popup

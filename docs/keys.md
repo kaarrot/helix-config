@@ -30,8 +30,8 @@ from the times. todo.md is not a task file for `tl`: its bullets are todos.
 | `i` | **Clock in.** First ends what is running (every entry that started less than 12 hours ago and has no end), in whichever task file it is, keeping a note you typed there and haven't saved; that file is saved. Then adds `YYYY-MM-DD HH:MM - ` on a new line at the end of this buffer, saves it so the next clock-in can find the entry, and leaves you in insert mode to type the note. In todo.md the new line is not an entry: `tl` skips todo.md, so it is never stopped or counted |
 | `I` | **Switch back.** Ends what is running, as `i` does (no heading), and clocks in to the task you worked on before it: opens that task file and adds `YYYY-MM-DD HH:MM - ` at its end, in insert mode. "Before it" means the latest entry in a file other than the running entry's, so pressing `I` again switches back. With nothing running (say after `o`), it resumes the task of the latest entry. If there is no other task, it works like `i` in this buffer. Both files are saved, as with `i` |
 | `L` | **Week summary in a buffer**, to copy from. Saves, then opens `~/.cache/tl/summary.txt` with the same report as `l`, for this week, Monday to Sunday, over all task files (wherever you press it). The file is rewritten each time and read-only, like the agenda; anything typed there is thrown away by the next `L`. In it, `-` and `+` show the previous and next week, as often as you press them; `L` goes back to this week |
-| `o` | **Clock out.** Saves all buffers, then waits at the command prompt `# done: `. Type what you did and press Enter: the latest running entry (in any task file, started in the last 12 hours) gets its end time and duration, and your text becomes the `# heading` line right above it, or is added to the heading already there after ` - `. Enter on an empty prompt ends the entry with no heading; Esc does nothing. The text needs no quoting; only `%` is special (type `%%` for one) |
-| `O` | **Clock out and switch back.** `o` and `I` in one. Saves all buffers, ends the running entry and anything else still running, and clocks in to the task you worked on before it, as `I` does: `YYYY-MM-DD HH:MM - ` at the end of that task's file. Then it waits at the `# done: ` prompt: type what you did and press Enter, and your text becomes the ended entry's heading, as with `o`, and the task you switched to opens on its new entry, in normal mode (`A` to type a note). Enter on an empty prompt adds no heading; Esc leaves you where you are, with the clock already switched. With nothing running, it resumes the task of the latest entry; with no other task, it only clocks out. As with `n`, `%` is typed `%%`, and the text can't contain `}` |
+| `o` | **Clock out and write it down.** Ends the running entry (the latest started, in any task file, in the last 12 hours) and goes to its task file, in insert mode on a heading right above the entry: a new `# `, or ` - ` added to the heading already there. Type what you did; it is the entry's heading, as `O`'s prompt makes it, and saving keeps it. The entry is ended in its own buffer, so a note typed there and not yet saved is kept, and that file is saved. Esc leaves the empty `# ` (or ` - `); the next `o` there uses the `# ` as it is. With nothing running, it stays on your line, in insert mode at its end (Esc) |
+| `O` | **Clock out from here.** Saves all buffers, then waits at the command prompt `# done: `, without leaving this buffer. Type what you did and press Enter: the latest running entry (in any task file, started in the last 12 hours) gets its end time and duration, and your text becomes the `# heading` line right above it, or is added to the heading already there after ` - `. Enter on an empty prompt ends the entry with no heading; Esc does nothing. The text needs no quoting; only `%` is special (type `%%` for one) |
 | `u` | **Refresh durations.** After you change an entry's start or end time by hand, works its `= 1h 15min` out again from the times. Acts on the entry on the cursor's line, or on every entry in the selected lines (`%` first for the whole file); other lines are left alone. An entry still running there gets its end time now, as if clocked out with no heading. In todo.md it does nothing: its bullets are todos. Doesn't save. (`+`/`-` on a time refresh the duration by themselves) |
 | `r` | **Recent files.** A popup with the 9 most recently changed task files, newest first, each with its last entry. Open one with `:o <path>` |
 | `l` | **Summary** (time log). Saves, then shows time per day for the last 14 days in a popup: per task file its total and title, and under it the `# headings` it was worked under. Running entries come first, and problems (overlaps, duplicates, typos, entries over 12 hours) last, as `~/path:line` you can open with `gf`. Always over all task files, wherever you press it (the agenda too) |
@@ -248,7 +248,7 @@ starting Python, so it sees the saved file in practice.
   moved before the `}` (`<left>`), so your text goes inside `%sh{}`. On
   Enter, `td file` creates the file and prints `PATH:2`, which `:open`
   opens. The name is a shell comment read back from
-  `$BASH_EXECUTION_STRING`, as `o` does it; a `}` in it would end `%sh{}`
+  `$BASH_EXECUTION_STRING`, as `O` does it; a `}` in it would end `%sh{}`
   early.
 - **`N`** is a macro that copies the name from the row: `x` selects the
   line, `S` splits it on the parts around the name (the leading `- [S] `,
@@ -261,22 +261,26 @@ starting Python, so it sees the saved file in practice.
   Getting the name another way doesn't work: switching buffers inside the
   key (a scratch buffer, or a file holding the name) closes the prompt as
   soon as the key ends.
-- **`o`** is a macro, so the command prompt stays open for you to type.
+- **`o`** works like `i`: it ends the entry in its own buffer, not on
+  disk, so unsaved edits there are kept. (Ending it on disk inside one key
+  can't keep them: `:write-all` only lands after the key, so `tl` would
+  edit the old file, and the reload that shows its change drops the
+  buffer's edits.) In order:
+  1. `:open %sh{tl out --visit --from …}` goes to the file with the latest
+     running entry (this buffer if nothing runs); `tl` keeps this
+     buffer and line in `~/.cache/tl/goto`.
+  2. That whole buffer goes through `:pipe tl out --edit -`, which ends its
+     latest running entry, adds the `# ` (or ` - `) heading, and writes the
+     heading's line to `~/.cache/tl/goto`; `:update` saves it.
+  3. `:open %sh{cat ~/.cache/tl/goto …}` goes there (or back, if nothing
+     ran), and `insert_at_line_end` types after it. A key has no if, so
+     with nothing running it still ends in insert mode.
+- **`O`** is a macro, so the command prompt stays open for you to type.
   The prompt holds `:sh tl out "$BASH_EXECUTION_STRING" # done: `, so what
   you type is a shell comment, which bash ignores. `tl` reads it back from
   `$BASH_EXECUTION_STRING` (the whole command line), so it needs no
   quoting. `tl` looks for exactly `"$BASH_EXECUTION_STRING" # done:`
   (`DONE_MARK` in `tl`): change both together.
-- **`O`** can't switch buffers before its prompt: a key that does loses
-  the prompt as soon as it ends (see `N`). So `tl out --back` does the
-  switch on disk first, under `:noop %sh{}`: it ends the entries, adds the
-  new one to the other task's file, and keeps what it did in
-  `~/.cache/tl/switch`. `:reload-all` brings both files into their
-  buffers (`:write-all` saved them, so nothing is lost). The prompt is
-  `:open %sh{tl note "$BASH_EXECUTION_STRING" # done: }`, with the cursor
-  before the `}`, as `n` does: on Enter, `tl note` adds the heading and
-  prints the new entry's `PATH:LINE:COL`, and `:open` goes there. That
-  buffer is up to date already, so the cursor lands on the new line.
 - **`l`** runs `align_view_top` first: a popup opens below the cursor's
   screen row when 6 rows fit there, so at the top it gets the full height.
 
