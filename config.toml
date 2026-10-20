@@ -134,10 +134,12 @@ n = "@:open %sh{~/.config/helix/bin/td file \"$BASH_EXECUTION_STRING\" # name: }
 N = '@xS^- (?:\[.\] )?|(?:  \S+:\d+:\d+| \(\*\))?\n<ret>),"ty;:open %sh{~/.config/helix/bin/td rename --from %{buffer_name}:%{cursor_line} "$BASH_EXECUTION_STRING" # name: }<left><C-r>t'
 # Stamp the line: add today's date and time, or move its date to today; on the date: fix the weekday
 s = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td stamp --col $(cat ~/.cache/td/stamp-col) --from %{buffer_name}"]
-# Agenda of todo.md, newest added first (view only; the status keys work on its rows)
-a = [":open %sh{~/.config/helix/bin/td list >/dev/null; echo ~/.cache/td/agenda.md}", ":reload"]
+# Agenda of todo.md, newest added first (view only; the status keys work on its rows), with
+# every task's subtasks folded (za toggles one). fold_all needs an hx that folds (helix
+# main-kuba): another one refuses this config as an unknown command, so drop it there.
+a = [":open %sh{~/.config/helix/bin/td list >/dev/null; echo ~/.cache/td/agenda.md}", ":reload", "fold_all"]
 # Agenda, most recently changed first
-A = [":open %sh{~/.config/helix/bin/td list --sort modified >/dev/null; echo ~/.cache/td/agenda.md}", ":reload"]
+A = [":open %sh{~/.config/helix/bin/td list --sort modified >/dev/null; echo ~/.cache/td/agenda.md}", ":reload", "fold_all"]
 # Done tasks in the agenda, most recently changed first
 D = [":open %sh{~/.config/helix/bin/td list --state done --sort modified >/dev/null; echo ~/.cache/td/agenda.md}", ":reload"]
 # Give the bullet its own file ~/tasks/<slug>.md, and open it
@@ -145,18 +147,18 @@ P = [":update", "extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td promot
 # Open the bullet's own file; on the agenda, its line in todo.md
 p = ["extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}", "collapse_selection", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
 # Mark done (a ++/.+ repeater moves the date instead, but an hourly one); on the agenda, in todo.md
-x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{buffer_name}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
+x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{buffer_name} --row %{cursor_line}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
 
 # Status keys, `space , ,` then the checkbox letter: toggle the line's state
 # (on the agenda, the task's state in todo.md or its file; the agenda then reloads)
 [keys.normal.space.",".","]
 # Today [Y]
-y = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle Y --from %{buffer_name}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
+y = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle Y --from %{buffer_name} --row %{cursor_line}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
 # Active [A]
-a = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle A --from %{buffer_name}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
+a = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle A --from %{buffer_name} --row %{cursor_line}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
 # Waiting [W]
-w = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle W --from %{buffer_name}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
+w = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle W --from %{buffer_name} --row %{cursor_line}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
 # Done [x], the same as space , x
-x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{buffer_name}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
+x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{buffer_name} --row %{cursor_line}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
 # Back to todo [ ]
-space = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle todo --from %{buffer_name}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
+space = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle todo --from %{buffer_name} --row %{cursor_line}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]

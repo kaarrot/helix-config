@@ -75,8 +75,8 @@ created by `space , P`:
 
 2026-11-01 10:00
 
-- outline the parser rewrite
-- benchmark old vs new
+- [x] outline the parser rewrite
+- [ ] benchmark old vs new
 ```
 
 The heading carries the task's state, kept in step by the status keys (see
@@ -276,6 +276,7 @@ app).
 # ACTIVE
 
 - [A] refactor td parser (*)
+  - [ ] benchmark old vs new
 
 # TODO
 
@@ -306,6 +307,29 @@ app).
   file. They carry no path: `space , p` finds the row's line in todo.md
   (same state and text). If todo.md changed since the agenda was built and
   nothing matches, it stays put; `space , a` rebuilds.
+- Subtask rows: under an open task with its own file (a ` (*)` bullet or
+  a file task), indented, that file's open bullets, `[ ]`, `[Y]`, `[A]`
+  and `[W]`, at any indent and in file order; not empty ones, or a running
+  `tl` entry (`- [ ] 2026-10-13 13:00 -`). A row carries no path: being
+  indented makes it a subtask, and the task row above it names the file,
+  where the bullet with the same state and text is found. So `space , p`
+  goes to its line, and the status keys and `space , x` change it there,
+  as they do in the file (a repeater moves its date). If it isn't in the
+  file now, `p` stays and the keys only rebuild. The keys pass the cursor's
+  line (`--row`), so the same subtask under two tasks is told apart.
+  `space , N` refuses them: rename a subtask in its file.
+- Subtask rows start folded under their task's row, shown as `⋯ N lines`
+  (N open subtasks): `za` on the task's row unfolds and folds them, `zR`
+  unfolds all, `zM` folds all. `space , a` and `space , A` fold them all
+  again; a status key's rebuild keeps a task you unfolded open, and a jump
+  or search onto a hidden row unfolds it. The fold comes from
+  `runtime/queries/td/folds.scm` (only in a file that starts with the
+  agenda's `# td VIEW ONLY`, so nested bullets elsewhere don't fold) and the keys'
+  `fold_all`. Both need an hx that folds (helix main-kuba). Another hx
+  ignores the query but refuses the whole config over `fold_all` ("Bad
+  config: … No command named 'fold_all'", then Helix's default config):
+  take `"fold_all"` out of `a` and `A` there, and the agenda works
+  unfolded.
 - File-task rows (listed under their status) and orphan rows (files with
   no bullet and no status) end in `path:line:col`, so `space , p` or `gf`
   opens the file.
@@ -399,7 +423,7 @@ is `++0d` (it would never move), so those lines are just marked done.
 | `td list [--state todo\|today\|active\|waiting\|done\|all] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout, and the options to `~/.cache/td/agenda-args` |
 | `td promote [--from PATH:LINE]` | stdin: a line. Create or reuse the bullet's task file (not from the agenda), then print where `space , P` goes and write it to `~/.cache/td/open` |
 | `td jump [--from PATH:LINE]` | stdin: a line. Print where `space , p` goes and write it to `~/.cache/td/open` |
-| `td toggle S [--from PATH [--line N]]` | toggle the line's state between `[ ]` and `S` (a name like `waiting` works too); stdin to stdout, or with `--line` the file on disk. On an agenda row, the task it shows changes instead, and the agenda is rebuilt. Keeps the task's other copies in step (see [keys.md](keys.md#status-keys-in-other-files)); moves a repeating date instead of marking done |
+| `td toggle S [--from PATH [--line N \| --row N]]` | toggle the line's state between `[ ]` and `S` (a name like `waiting` works too); stdin to stdout, or with `--line` the file on disk. On an agenda row, the task it shows changes instead, and the agenda is rebuilt; `--row`, the row's line in the agenda, tells which task a subtask row is under. Keeps the task's other copies in step (see [keys.md](keys.md#status-keys-in-other-files)); moves a repeating date instead of marking done |
 | `td set PATH LINE S` | set the checkbox at `PATH:LINE` to `S` |
 | `td stamp [--restamp] [--col N]` | stdin: a line. Add a stamp, or move its date to today keeping the time; `--restamp`, or `--col N` on the stamp, only fixes the weekday |
 | `td shift +N\|-N [--col N]` | stdin: a line. Move its stamp by the part under column N (the day without `--col`); on a time-log line, its date, start or end time, in `tl`'s format, duration redone; on the week summary view, the week. With `--col`, save the part's new column to `~/.cache/td/stamp-col` |
