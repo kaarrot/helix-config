@@ -36,12 +36,14 @@ the start/end times.
                         the text came from: if it is td's inbox, the text passes through unchanged.
     tl running [--from F]
                         print the task file of the latest entry running on disk (F if none), and
-                        keep F for `tl next`. The first step of `space , i` / `I`: the key ends the
+                        keep F for `tl next`. The first step of `space , i`: the key ends the
                         entry in that file's buffer, so unsaved edits there are kept.
-    tl next [--back] [--skip R]
-                        the same as `tl stop --skip R`, then print the file to clock in to: the one
-                        `tl running` kept, or with --back the task worked on before the running one
-                        (with nothing running, the latest entry's). R if there is none.
+    tl next [--skip R]  the same as `tl stop --skip R`, then print the file to clock in to: the one
+                        `tl running` kept. R if there is none.
+    tl where [--from F:LINE]
+                        print the latest entry running (started in the last 12h) as path:line, for
+                        `space , I` to go to; F:LINE if none runs.
+    tl where --say      print "running since HH:MM", or "nothing running", for :echo %sh{}.
     tl recent [N]       numbered list of the N (default 9) most recently modified task files
     tl recent --nth K [ELSE]
                         path of the Kth most recently modified task file (ELSE if none)
@@ -271,7 +273,7 @@ def entry_starts(t):
 
 
 def cmd_running(args):
-    """tl running [--from F]: the first step of `space , i` / `I`. Print the task file of the latest
+    """tl running [--from F]: the first step of `space , i`. Print the task file of the latest
     entry running on disk, so the key ends it in that file's buffer, where its unsaved edits are;
     F when nothing runs. F, the buffer the key was pressed in, is kept for `tl next`."""
     _, running = entry_starts(now())
@@ -283,34 +285,35 @@ def cmd_running(args):
 
 
 def cmd_next(args):
-    """tl next [--back] [--skip R]: the last step of `space , i` / `I`, once the key has ended the
-    entry in R's buffer. End the entries running in the other task files on disk, as `tl stop` does,
-    and print the file to clock in to: the buffer `tl running` kept (`space , i`); with --back
-    (`space , I`), the task worked on before the running one, which is the latest entry in a file
-    other than the running entry's, or with nothing running the latest entry's file. R if there is
-    none. R's entry still runs on disk (the key's save lands later), which tells which one ran."""
+    """tl next [--skip R]: the last step of `space , i`, once the key has ended the entry in R's
+    buffer. End the entries running in the other task files on disk, as `tl stop` does, and print
+    the file to clock in to: the buffer `tl running` kept, else R."""
     t = now()
     skip = opt(args, "--skip")
-    if "--back" in args:
-        target = back_target(t)
-    else:
-        try:
-            target = FROM_PATH.read_text(encoding="utf-8").strip() or None
-            FROM_PATH.unlink()
-        except OSError:
-            target = None
+    try:
+        target = FROM_PATH.read_text(encoding="utf-8").strip() or None
+        FROM_PATH.unlink()
+    except OSError:
+        target = None
     stop_files(Path(skip) if skip else None, t)
     print(target or skip or "", end="")  # no newline: for :open %sh{}
     return 0
 
 
-def back_target(t):
-    """The task file to switch back to (`space , I`): the latest entry's file other
-    than the running entry's, or with nothing running the latest entry's. None if there is none."""
-    starts, running = entry_starts(t)
-    current = max(running)[-1] if running else None
-    earlier = [key[-1] for key in sorted(starts, reverse=True) if key[-1] != current]
-    return earlier[0] if earlier else None
+def cmd_where(args):
+    """tl where [--from F:LINE]: `space , I`. Print the latest entry running (started in the last
+    12h) as path:line, for :open %sh{}; F:LINE, where the key was pressed, if none runs. With
+    --say, what the key echoes after: "running since HH:MM", or "nothing running"."""
+    _, running = entry_starts(now())
+    if "--say" in args:
+        print(f"running since {max(running)[0]:%H:%M}" if running else "nothing running", end="")
+        return 0
+    if not running:
+        print(opt(args, "--from") or "", end="")
+        return 0
+    _, _, i, path = max(running)
+    print(f"{path}:{i + 1}", end="")
+    return 0
 
 
 # Ends the prompt `space , O` leaves open: what you type after it is a shell comment, so it needs no quoting.
@@ -625,6 +628,8 @@ def main(argv):
         return cmd_running(argv[2:])
     elif cmd == "next":
         return cmd_next(argv[2:])
+    elif cmd == "where":
+        return cmd_where(argv[2:])
     elif cmd == "recent":
         return cmd_recent(argv[2:])
     elif cmd == "test":
@@ -894,10 +899,7 @@ def run_tests(verbose=False):
             self.assertEqual(self.goto(), f"{b}:2")
 
     class Switch(Case):
-        """tl running / tl next, as space , i and space , I run them."""
-
-        def back(self, skip):
-            return self.tl("next", "--back", "--skip", str(skip))
+        """tl running / tl next, as space , i runs them, and tl where, as space , I does."""
 
         def test_running_names_the_file_to_end_the_entry_in(self):
             a = self.put("A.md", "2026-10-09 09:00 - 10:00\n2026-10-09 13:00 -\n")
@@ -918,55 +920,31 @@ def run_tests(verbose=False):
             self.assertEqual(self.get("C.md"), "2026-10-09 13:30 -\n")  # its buffer ends it
             self.assertFalse((self.home / ".cache" / "tl" / "from").exists())
 
-        def test_back_to_the_task_before_the_running_one(self):
-            a = self.put("A.md", "2026-10-09 09:00 - 10:00\n2026-10-09 11:00 - 12:00\n")
-            b = self.put("B.md", "2026-10-09 12:00 - 13:00\n2026-10-09 13:30 -\n")
-            self.assertEqual(self.back(b), str(a))
-            self.assertEqual(self.get("B.md"), "2026-10-09 12:00 - 13:00\n2026-10-09 13:30 -\n")
-
-        def test_pressed_again_switches_back(self):
-            a = self.put("A.md", "2026-10-09 09:00 - 10:00\n")
-            b = self.put("B.md", "2026-10-09 10:00 - 11:00\n2026-10-09 13:00 -\n")
-            self.assertEqual(self.back(b), str(a))
-            self.put("B.md", "2026-10-09 10:00 - 11:00\n2026-10-09 13:00 - 13:30\n")
-            self.put("A.md", "2026-10-09 09:00 - 10:00\n2026-10-09 13:30 -\n")
-            self.assertEqual(self.back(a), str(b))
-
-        def test_nothing_running_resumes_the_latest(self):
-            self.put("A.md", "2026-10-09 09:00 - 10:00\n")
-            b = self.put("B.md", "2026-10-09 10:00 - 12:00\n")
-            self.assertEqual(self.back(b), str(b))
-            self.assertEqual(self.tl("next", "--back"), str(b))
-
-        def test_no_other_task_stays(self):
-            a = self.put("A.md", "2026-10-09 09:00 - 10:00\n2026-10-09 13:00 -\n")
-            self.assertEqual(self.back(a), str(a))
+        def test_next_without_a_kept_buffer_stays(self):
             self.assertEqual(self.tl("next", "--skip", "nowhere.md"), "nowhere.md")
 
-        def test_same_minute_switches_go_by_the_file_written_last(self):
-            # Z, then A, then M within the minute 14:05: back from M is A, whatever the names say.
-            z = self.put("Z.md", "2026-10-09 14:05 - 14:05\n")
-            a = self.put("A.md", "2026-10-09 14:05 - 14:05\n")
-            m = self.put("M.md", "2026-10-09 14:05 -\n")
-            for path, when in ((z, 1000), (a, 2000), (m, 3000)):
-                os.utime(path, (when, when))
-            self.assertEqual(self.back(m), str(a))
-            # Two running from the same minute: the one written last is the current one.
+        def test_where_is_the_running_entry(self):
+            self.put("A.md", "2026-10-09 09:00 - 10:00\n2026-10-09 11:00 -\n")  # running, started earlier
+            b = self.put("B.md", "# B\nnotes\n2026-10-09 12:00 - 13:00\n2026-10-09 13:30 -  writing\n")
+            self.assertEqual(self.tl("where", "--from", "here.md:7"), f"{b}:4")
+            self.assertEqual(self.tl("where", "--say"), "running since 13:30")
+            self.assertEqual(self.get("B.md"), "# B\nnotes\n2026-10-09 12:00 - 13:00\n2026-10-09 13:30 -  writing\n")
+
+        def test_where_with_nothing_running_stays(self):
+            self.put("todo.md", "- [ ] 2026-10-09 13:50 - prep slides\n")  # a todo, not an entry
+            self.put("A.md", "2026-10-09 09:00 - 10:00\n2026-10-09 18:00 -\n")  # 18:00: future
+            self.put("C.md", "2026-10-08 01:00 -\n")  # running 37h: forgotten, not current
+            self.assertEqual(self.tl("where", "--from", "here.md:7"), "here.md:7")
+            self.assertEqual(self.tl("where", "--say"), "nothing running")
+
+        def test_same_minute_running_goes_by_the_file_written_last(self):
+            a = self.put("A.md", "2026-10-09 14:00 - 14:05\n")
             b = self.put("B.md", "2026-10-09 14:00 -\n")
             c = self.put("C.md", "2026-10-09 14:00 -\n")
-            self.put("M.md", "2026-10-09 14:05 - 14:05\n")
             os.utime(b, (5000, 5000))
             os.utime(c, (4000, 4000))
             self.assertEqual(self.tl("running", "--from", str(a)), str(b))
-
-        def test_skips_todos_future_and_forgotten_entries(self):
-            self.put("todo.md", "- [ ] 2026-10-09 13:50 - prep slides\n")  # a todo, not an entry
-            self.put("A.md", "2026-10-09 09:00 - 10:00\n")
-            b = self.put("B.md", "2026-10-09 11:00 - 12:00\n2026-10-09 18:00 - 19:00\n")  # 18:00: future
-            self.put("C.md", "2026-10-08 01:00 -\n")  # running 37h: forgotten, not current
-            self.assertEqual(self.tl("next", "--back"), str(b))
-            self.assertEqual(self.tl("running", "--from", "x.md"), "x.md")
-            self.assertEqual(self.get("C.md"), "2026-10-08 01:00 -\n")
+            self.assertEqual(self.tl("where"), f"{b}:1")
 
     class Summary(Case):
         def test_one_line_per_task_and_day_with_heading_bullets(self):

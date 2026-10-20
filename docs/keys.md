@@ -28,7 +28,7 @@ from the times. todo.md is not a task file for `tl`: its bullets are todos.
 | Key | What it does |
 |---|---|
 | `i` | **Clock in.** First ends what is running (every entry that started less than 12 hours ago and has no end), in whichever task file it is, keeping a note you typed there and haven't saved; that file is saved. Then adds `YYYY-MM-DD HH:MM - ` on a new line at the end of this buffer, saves it so the next clock-in can find the entry, and leaves you in insert mode to type the note. In todo.md the new line is not an entry: `tl` skips todo.md, so it is never stopped or counted |
-| `I` | **Switch back.** Ends what is running, as `i` does (no heading), and clocks in to the task you worked on before it: opens that task file and adds `YYYY-MM-DD HH:MM - ` at its end, in insert mode. "Before it" means the latest entry in a file other than the running entry's, so pressing `I` again switches back. With nothing running (say after `o`), it resumes the task of the latest entry. If there is no other task, it works like `i` in this buffer. Both files are saved, as with `i` |
+| `I` | **Go to the running entry.** Opens the task file with the running entry (the latest started, in the last 12 hours, in any task file) with the cursor on it, and shows "running since HH:MM". Changes nothing. With nothing running it stays where you are and shows "nothing running" |
 | `L` | **Week summary in a buffer**, to copy from. Saves, then opens `~/.cache/tl/summary.txt` with the same report as `l`, for this week, Monday to Sunday, over all task files (wherever you press it). The file is rewritten each time and read-only, like the agenda; anything typed there is thrown away by the next `L`. In it, `-` and `+` show the previous and next week, as often as you press them; `L` goes back to this week |
 | `o` | **Clock out and write it down.** Ends the running entry (the latest started, in any task file, in the last 12 hours) and goes to its task file, in insert mode on a heading right above the entry: a new `# `, or ` - ` added to the heading already there. Type what you did; it is the entry's heading, as `O`'s prompt makes it, and saving keeps it. The entry is ended in its own buffer, so a note typed there and not yet saved is kept, and that file is saved. Esc leaves the empty `# ` (or ` - `); the next `o` there uses the `# ` as it is. With nothing running, it stays on your line, in insert mode at its end (Esc) |
 | `O` | **Clock out from here.** Saves all buffers, then waits at the command prompt `# done: `, without leaving this buffer. Type what you did and press Enter: the latest running entry (in any task file, started in the last 12 hours) gets its end time and duration, and your text becomes the `# heading` line right above it, or is added to the heading already there after ` - `. Enter on an empty prompt ends the entry with no heading; Esc does nothing. The text needs no quoting; only `%` is special (type `%%` for one) |
@@ -210,8 +210,8 @@ starting Python, so it sees the saved file in practice.
 - **`a`, `A`:** `td list` runs inside `%sh{}`, so the agenda is rebuilt
   before `:open`, and `:reload` drops anything typed into the read-only
   buffer.
-- **`i`, `I`** read the task files on disk, so the running entry must be
-  there: both save the new entry at once. They end the running entry in
+- **`i`** reads the task files on disk, so the running entry must be
+  there: it saves the new entry at once. It ends the running entry in
   its own buffer, not on disk, so a note typed there and not yet saved is
   kept (writing that file behind Helix's back would clash with it). In
   order:
@@ -220,15 +220,17 @@ starting Python, so it sees the saved file in practice.
      buffer's name in `~/.cache/tl/from`.
   2. That whole buffer goes through `:pipe tl stop -`, and `:update` saves
      it.
-  3. `:open %sh{tl next --skip …}` (`I`: `tl next --back`) ends what still
-     runs in the other files on disk and goes where you clock in: back to
-     the buffer kept in step 1 (`i`), or the task before the running one
-     (`I`). On disk that entry still runs, since the save lands later, so
-     `tl` can tell which task was current.
+  3. `:open %sh{tl next --skip …}` ends what still runs in the other files
+     on disk and goes back to the buffer kept in step 1.
   4. `tl start`'s output goes on a new last line, and `:write!` saves it.
      The `!` is needed when this is the buffer step 2 saved: a second save
      of one buffer in one key otherwise fails with "file modified by an
      external process", since Helix hasn't recorded the first one yet.
+- **`I`** is `:open %sh{tl where --from …}`, then `:echo %sh{tl where --say}`.
+  With nothing running, `tl where` prints the buffer and line the key was
+  pressed on, so `:open` stays there: a failing `%sh{}` would hand `:open`
+  nothing, and Helix would show its own error ("path must be a regular
+  file") instead of `tl`'s.
 - **`q`** opens todo.md and pipes its first line through
   `td new - --above`, which prints that line back with `- [ ] ` on a line
   above it, or just `- [ ] ` when the line already is that empty bullet.
