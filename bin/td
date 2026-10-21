@@ -69,7 +69,16 @@ Commands:
                        is written from the agenda). Prints where `space , P`
                        goes, and writes it to ~/.cache/td/open: that file
                        (from an agenda row, the row's file, if any), else
-                       PATH:LINE.
+                       PATH:LINE. A bullet in the inbox is kept in
+                       ~/.cache/td/cut, with its file, for --cut.
+  td promote --cut - [--file PATH]
+                       the next step of `space , P`, on the whole buffer of
+                       PATH: stdin to stdout, but if PATH is the inbox and
+                       holds the bullet promote kept, its section (the lines
+                       under it, up to the next bullet not under it or a
+                       heading: notes, time entries, subtodos) moves to the
+                       end of the bullet's file, without the indent its
+                       lines share.
   td jump [--from PATH:LINE]
                        stdin: a line, at PATH:LINE. Prints where `space , p`
                        goes, and writes it to ~/.cache/td/open: a bullet's
@@ -225,6 +234,9 @@ LIST_ARGS_PATH = CACHE / "agenda-args"
 COL_PATH = CACHE / "stamp-col"
 # Where `space , p` / `P` go: td jump/promote write it, the key :opens it.
 OPEN_PATH = CACHE / "open"
+# The inbox bullet `space , P` was pressed on, as PATH:LINE, and the file it got: `td promote` keeps
+# them for `td promote --cut -`, the key's next step.
+CUT_PATH = CACHE / "cut"
 TICK_SHIM = Path("~/.config/helix/bin/td-tick").expanduser()
 TICK_LOCK = CACHE / "tick.lock"
 # The reminder alarm (see bin/TdAlarm.java): built by `td install`, run
@@ -1760,7 +1772,11 @@ def cmd_promote(args):
     around them: they stay the bullet's, and in the heading they would fire
     a second time and never move with a repeater bump. From the agenda
     nothing is written (it is a view). Then prints where P goes (see _goto):
-    the dedicated file, or the line itself."""
+    the dedicated file, or the line itself. A bullet in the inbox, and its
+    file, are kept in CUT_PATH for --cut (see _cut_section)."""
+    if "--cut" in args:
+        return _cut_section(args)
+    CUT_PATH.unlink(missing_ok=True)  # an old one, from a P that stopped half-way
     source, lineno = _from_spec(args)
     raw = sys.stdin.read().rstrip("\r\n")
     m = TASK.match(raw)
@@ -1775,8 +1791,49 @@ def cmd_promote(args):
                                  encoding="utf-8", errors="surrogateescape")
         else:
             _retag_dedicated_h1(core, canon(m["state"]))
+        if lineno and _same_file(source, td_file()):
+            CACHE.mkdir(parents=True, exist_ok=True)
+            CUT_PATH.write_text(f"{source}:{lineno}\n{dedicated}\n", encoding="utf-8",
+                                errors="surrogateescape")
         refresh_list()
     _hand_back(_goto(source, lineno, raw, want_file=True))
+    return 0
+
+
+def _cut_section(args):
+    """td promote --cut - [--file PATH]: the next step of `space , P`, on the whole buffer of
+    PATH, after `td promote` kept the bullet and its file in CUT_PATH. If PATH is the inbox and
+    the bullet is still a bullet there, move its section (the lines under it, up to the next
+    bullet not under it or a heading: notes, time entries, subtodos; see tl's section_end) out of
+    the text and to the end of the file, on disk, without the indent its lines share and the blank
+    lines it starts with: subtodos come out as the file's subtasks. Else the text passes
+    through."""
+    lines = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").splitlines(keepends=True)
+    source = Path(args[args.index("--file") + 1]).expanduser() if "--file" in args[:-1] else None
+    try:
+        kept, dedicated = CUT_PATH.read_text(encoding="utf-8", errors="surrogateescape").splitlines()[:2]
+        CUT_PATH.unlink()
+    except (OSError, ValueError):
+        kept = dedicated = ""
+    m = re.fullmatch(r"(.+):(\d+)", kept)
+    i = int(m[2]) - 1 if m and _same_file(Path(m[1]).expanduser(), source) else None
+    if (i is not None and _same_file(source, td_file()) and 0 <= i < len(lines)
+            and TASK.match(lines[i].rstrip("\r\n"))):
+        end = _tl().section_end(lines, i)
+        moved = lines[i + 1:end + 1]
+        if moved:
+            common = os.path.commonprefix([re.match(r"[ \t]*", raw)[0] for raw in moved if raw.strip()])
+            text = "".join(raw[len(common):] if raw.strip() else raw.lstrip(" \t") for raw in moved)
+            text = text.lstrip("\r\n")  # the file has its blank line under the heading
+            path = Path(dedicated)
+            old = path.read_bytes().decode("utf-8", "surrogateescape") if path.is_file() else ""
+            if old and not old.endswith("\n"):
+                old += "\n"
+            if not text.endswith("\n"):
+                text += "\n"
+            path.write_bytes((old + text).encode("utf-8", "surrogateescape"))
+            del lines[i + 1:end + 1]
+    sys.stdout.buffer.write("".join(lines).encode("utf-8", "surrogateescape"))
     return 0
 
 
@@ -3337,6 +3394,77 @@ def run_tests(verbose=False):
             self.assertEqual(out.strip(), f"{inbox}:1")
             self.assertEqual(sorted(p.name for p in self.tasks.iterdir()), ["todo.md"])
 
+        def press(self, text, lineno, path=None):
+            """space , P on line lineno of the buffer text of path (the inbox): td promote with
+            the line, then td promote --cut - with the whole buffer -> the buffer after."""
+            path = path or self.inbox
+            line = text.splitlines(keepends=True)[lineno - 1]
+            self.td("promote", "--from", f"{path}:{lineno}", stdin=line)
+            return self.td("promote", "--cut", "-", "--file", str(path), stdin=text)
+
+        def test_cut_moves_the_section_to_the_file(self):
+            self.put_inbox("")
+            text = ("- [ ] alpha\n- [ ] prep slides\n  deck\n\n  2026-10-10 09:00 - 10:00\n"
+                    "  - [ ] print\n    2026-10-10 10:00 -\n\n- [ ] call\n")
+            # not saved yet: the buffer counts
+            self.assertEqual(self.press(text, 2), "- [ ] alpha\n- [ ] prep slides\n\n- [ ] call\n")
+            p = self.tasks / "prep-slides.md"
+            self.assertEqual(p.read_text(), "# [ ] prep slides\n\ndeck\n\n2026-10-10 09:00 - 10:00\n"
+                                            "- [ ] print\n  2026-10-10 10:00 -\n")
+            self.assertFalse((self.cache / "cut").exists())
+            # Pressed again after more notes: they go to the end of the file
+            text = "- [ ] prep slides\n\tmore\n"
+            self.assertEqual(self.press(text, 1), "- [ ] prep slides\n")
+            self.assertTrue(p.read_text().endswith("  2026-10-10 10:00 -\nmore\n"))
+            p.write_text("# [ ] prep slides")  # no final newline
+            self.press("- [ ] prep slides\n  last", 1)
+            self.assertEqual(p.read_text(), "# [ ] prep slides\nlast\n")
+
+        def test_cut_notes_need_no_indent(self):
+            # the way notes are usually typed in todo.md: at the left, after a blank line
+            self.put_inbox("")
+            text = ("- [ ] this is a test\n\n2026-10-21 16:20 - 16:20 = 0h 00min  \n \n\nsomething to remember\n"
+                    "\n\n- [ ] Spanish\n")
+            self.assertEqual(self.press(text, 1), "- [ ] this is a test\n\n\n- [ ] Spanish\n")
+            self.assertEqual((self.tasks / "this-is-a-test.md").read_text(),
+                             "# [ ] this is a test\n\n2026-10-21 16:20 - 16:20 = 0h 00min  \n\n\nsomething to remember\n")
+            # a heading ends the section too
+            self.assertEqual(self.press("- [ ] beta\nnote\n# later\nnot beta's\n", 1), "- [ ] beta\n# later\nnot beta's\n")
+            self.assertEqual((self.tasks / "beta.md").read_text(), "# [ ] beta\n\nnote\n")
+
+        def test_cut_with_nothing_under_it_passes_through(self):
+            self.put_inbox("")
+            for text in ("- [ ] alpha\n- [ ] beta\n", "- [ ] alpha\n\n\n- [ ] beta\n",
+                         "# notes\n  under a heading, not a bullet\n"):
+                self.assertEqual(self.press(text, 1), text)
+            self.assertEqual((self.tasks / "alpha.md").read_text(), "# [ ] alpha\n\n")
+
+        def test_cut_a_sub_bullet_takes_only_its_own_lines(self):
+            self.put_inbox("")
+            text = "- [ ] a\n  - [ ] b\n    note b\nnote a\n"
+            self.assertEqual(self.press(text, 2), "- [ ] a\n  - [ ] b\nnote a\n")
+            self.assertEqual((self.tasks / "b.md").read_text(), "# [ ] b\n\nnote b\n")
+
+        def test_cut_leaves_out_the_blank_lines_the_section_starts_with(self):
+            self.put_inbox("")
+            self.assertEqual(self.press("- [ ] alpha\n\n  a note after a blank\n- [ ] beta\n", 1),
+                             "- [ ] alpha\n- [ ] beta\n")
+            self.assertEqual((self.tasks / "alpha.md").read_text(), "# [ ] alpha\n\na note after a blank\n")
+
+        def test_cut_only_in_the_inbox_it_was_pressed_in(self):
+            self.put_inbox("")
+            other = self.put_dedicated("project.md", "")
+            text = "- [ ] sub task\n  its note\n"
+            self.assertEqual(self.press(text, 1, other), text)  # a bullet in a task file: no cut
+            self.assertEqual((self.tasks / "sub-task.md").read_text(), "# [ ] sub task\n\n")
+            # kept for the inbox, but the next step is in another buffer: no cut there
+            self.td("promote", "--from", f"{self.inbox}:1", stdin="- [ ] sub task\n")
+            self.assertEqual(self.td("promote", "--cut", "-", "--file", str(other), stdin=text), text)
+            self.assertFalse((self.cache / "cut").exists())
+            # the bullet is not on that line any more: no cut
+            self.td("promote", "--from", f"{self.inbox}:1", stdin="- [ ] sub task\n")
+            self.assertEqual(self.td("promote", "--cut", "-", "--file", str(self.inbox), stdin="x" + text), "x" + text)
+
         def test_promote_active_bullet_h1_has_state(self):
             self.td("promote", stdin="- [A] foo bar\n")
             self.assertIn("# [A] foo bar", (self.tasks / "foo-bar.md").read_text())
@@ -4446,6 +4574,8 @@ def run_tests(verbose=False):
             finally:
                 sys.dont_write_bytecode = before
             self.assertEqual(TL_ENTRY.pattern, tl.ATTEMPT.pattern)
+            # and a line td reads as a todo is one to tl: in the inbox, never an entry
+            self.assertEqual(TASK.pattern, tl.TODO.pattern)
 
     class KeysDoc(unittest.TestCase):
         # keys.md lists every `space ,` key in config.toml and the `+`/`-`

@@ -23,18 +23,56 @@ after `- `, `* ` or `- [ ] `:
 ```
 
 The `= 1h 15min` part is only for reading; totals are always worked out
-from the times. todo.md is not a task file for `tl`: its bullets are todos.
+from the times. todo.md is a task file too, but its todos (`- [S] ` lines)
+are never entries, even one that starts with a date and time: there the
+entries go under the todos (see [Time in todo.md](#time-in-todomd)).
 
 | Key | What it does |
 |---|---|
-| `i` | **Clock in.** First ends what is running (every entry that started less than 12 hours ago and has no end), in whichever task file it is, keeping a note you typed there and haven't saved; that file is saved. Then adds `YYYY-MM-DD HH:MM - ` on a new line at the end of this buffer, saves it so the next clock-in can find the entry, and leaves you in normal mode at its end: `a` (or `A`) types the note. In todo.md the new line is not an entry: `tl` skips todo.md, so it is never stopped or counted |
+| `i` | **Clock in.** First ends what is running (every entry that started less than 12 hours ago and has no end), in whichever task file it is, keeping a note you typed there and haven't saved; that file is saved. Then adds `YYYY-MM-DD HH:MM - ` on a new line at the end of this buffer, saves it so the next clock-in can find the entry, and leaves you in normal mode at its end: `a` (or `A`) types the note. In todo.md it goes under the todo you are on instead, at the end of its section (its notes, up to the next todo); above the first todo, on a new line below, or on the line itself if it is blank (see [Time in todo.md](#time-in-todomd)) |
 | `I` | **Go to the running entry.** Opens the task file with the running entry (the latest started, in the last 12 hours, in any task file) with the cursor on it, and shows "running since HH:MM". Changes nothing. With nothing running it stays where you are and shows "nothing running" |
 | `L` | **Week summary in a buffer**, to copy from. Saves, then opens `~/.cache/tl/summary.txt` with the same report as `l`, for this week, Monday to Sunday, over all task files (wherever you press it). The file is rewritten each time and read-only, like the agenda; anything typed there is thrown away by the next `L`. In it, `-` and `+` show the previous and next week, as often as you press them; `L` goes back to this week |
-| `o` | **Clock out and write it down.** Ends the running entry (the latest started, in any task file, in the last 12 hours) and goes to its task file, in insert mode on a heading right above the entry: a new `# `, or ` - ` added to the heading already there. Type what you did; it is the entry's heading, as `O`'s prompt makes it, and saving keeps it. The entry is ended in its own buffer, so a note typed there and not yet saved is kept, and that file is saved. Esc leaves the empty `# ` (or ` - `); the next `o` there uses the `# ` as it is. With nothing running, it stays on your line, in insert mode at its end (Esc) |
-| `O` | **Clock out from here.** Saves all buffers, then waits at the command prompt `# done: `, without leaving this buffer. Type what you did and press Enter: the latest running entry (in any task file, started in the last 12 hours) gets its end time and duration, and your text becomes the `# heading` line right above it, or is added to the heading already there after ` - `. Enter on an empty prompt ends the entry with no heading; Esc does nothing. The text needs no quoting; only `%` is special (type `%%` for one) |
-| `u` | **Refresh durations.** After you change an entry's start or end time by hand, works its `= 1h 15min` out again from the times. Acts on the entry on the cursor's line, or on every entry in the selected lines (`%` first for the whole file); other lines are left alone. An entry still running there gets its end time now, as if clocked out with no heading. In todo.md it does nothing: its bullets are todos. Doesn't save. (`+`/`-` on a time refresh the duration by themselves) |
+| `o` | **Clock out and write it down.** Ends the running entry (the latest started, in any task file, in the last 12 hours) and goes to its task file, in insert mode on a heading right above the entry: a new `# `, or ` - ` added to the heading already there. Type what you did; it is the entry's heading, as `O`'s prompt makes it, and saving keeps it. The entry is ended in its own buffer, so a note typed there and not yet saved is kept, and that file is saved. Esc leaves the empty `# ` (or ` - `); the next `o` there uses the `# ` as it is. In todo.md, where a heading would split the todo's section, you type on the entry's own line instead, after its times (after ` - ` when it has a note already). With nothing running, it stays on your line, in insert mode at its end (Esc) |
+| `O` | **Clock out from here.** Saves all buffers, then waits at the command prompt `# done: `, without leaving this buffer. Type what you did and press Enter: the latest running entry (in any task file, started in the last 12 hours) gets its end time and duration, and your text becomes the `# heading` line right above it, or is added to the heading already there after ` - `; in todo.md, the entry's note (after ` - ` when it has one). Enter on an empty prompt ends the entry with no heading; Esc does nothing. The text needs no quoting; only `%` is special (type `%%` for one) |
+| `u` | **Refresh durations.** After you change an entry's start or end time by hand, works its `= 1h 15min` out again from the times. Acts on the entry on the cursor's line, or on every entry in the selected lines (`%` first for the whole file); other lines are left alone. An entry still running there gets its end time now, as if clocked out with no heading. In todo.md the todos themselves are left alone. Doesn't save. (`+`/`-` on a time refresh the duration by themselves) |
 | `r` | **Recent files.** A popup with the 9 most recently changed task files, newest first, each with its last entry. Open one with `:o <path>` |
 | `l` | **Summary** (time log). Saves, then shows time per day for the last 14 days in a popup: per task file its total and title, and under it the `# headings` it was worked under. Running entries come first, and problems (overlaps, duplicates, typos, entries over 12 hours) last, as `~/path:line` you can open with `gf`. Always over all task files, wherever you press it (the agenda too) |
+
+### Time in todo.md
+
+A todo you jot notes under and work on before it deserves a file of its
+own:
+
+```
+- [ ] prep slides
+
+check last year's deck
+2026-10-21 14:37 - 15:10 = 0h 33min  made outline
+2026-10-21 16:00 -
+
+- [ ] call mom
+```
+
+- A todo's **section** is the lines under it, up to the next todo at its
+  indent or less, or a heading; blank lines at its end are left out.
+  Notes need no indent. A sub-todo (`  - [ ] print`) has a section of its
+  own inside its parent's, which ends at a line indented less than the
+  sub-todo: so a note back at the left after it is the parent's again.
+- `i` on the todo, or anywhere in its section (a blank line after it
+  counts), adds the entry at the end of the section, lined up with the
+  todo. `tl` writes the line, so Helix doesn't start it with `- [ ] `.
+  Above the first todo, or under a heading with no todo yet, it goes on
+  the line if it is blank, else on a new line below.
+- `o` and `O` put what you did on the entry's line, as its note, the way
+  a section's lines read best.
+- In the summary, todo.md is `todo`, with no title, and the entries come
+  under the text of the todo whose section they are in.
+- `P` on the todo moves its section to its file (see `P` below):
+  sub-todos come out as the file's subtasks, and `tl` finds a running
+  entry there.
+- The agenda and the reminders never see these lines: td reads only the
+  todos in todo.md. If you delete a todo by hand, delete its section with
+  it, or its time ends up under the todo above.
 
 ## Todos (`td`)
 
@@ -66,7 +104,7 @@ left out). Renaming the bullet unlinks it from its file.
 | `A` | The same agenda, most recently changed first: a bullet's line (state, text, stamp) or its own file. Edits by hand count from the next `a`, `A` or status key |
 | `D` | **Done tasks.** The agenda with only the done ones under DONE: `[x]` bullets and files whose first line is `# [x] title`, most recently changed first, as `A` orders them. `x` on a row takes the task back to `[ ]` and the row drops out; `p` goes to the task. `a` brings back the open ones |
 | `p` | **Go to the task.** On a bullet: open its own file, if it has one; otherwise stay. On an agenda row: go to that bullet's line in todo.md; a row for a file goes to the file; a subtask row goes to its line in the task's file; a RESCHEDULE row goes to the reminder's line, the cursor on its day. Never creates anything. Uses the line as it is in the buffer, saved or not |
-| `P` | **Give the task a file.** Saves, then creates `~/tasks/<slug>.md` for the bullet, with a heading `# [S] title` that carries the bullet's state (the title leaves out the bullet's stamp and repeater, and the brackets around them, so `[… 09:50 ++1h]` doesn't leave a `[ ]` in the name or the file name: the reminder stays on the bullet), and opens it. An existing file is reused and its heading's state updated. On an agenda row it only opens the row's file, if any. Works on a bullet you have just typed, saved or not |
+| `P` | **Give the task a file.** Creates `~/tasks/<slug>.md` for the bullet, with a heading `# [S] title` that carries the bullet's state (the title leaves out the bullet's stamp and repeater, and the brackets around them, so `[… 09:50 ++1h]` doesn't leave a `[ ]` in the name or the file name: the reminder stays on the bullet), and opens it. In todo.md the bullet's section (its notes and time entries: the lines under it, up to the next todo) moves to the end of the file, without the indent its lines share, and the bullet stays as the link; todo.md is saved. An existing file is reused, its heading's state updated, and gets them at its end. On an agenda row it only opens the row's file, if any. Works on a bullet you have just typed, saved or not |
 | `x` | **Done.** Toggles `[ ]` ↔ `[x]`. If the line has a repeater after its stamp, `++Nu` or `.+Nu` (N a number, u = `d`/`w`/`m`/`y`), the date moves instead and the bullet stays `[ ]`: `++1m` moves it a month at a time until it is in the future (rent on the 1st), `.+2w` sets it to today + 2 weeks (water the plants). An hourly one (`++1h`, a reminder every hour until done) is just marked done. A task file with no todo.md bullet repeats the same way, with the date and repeater on any line but a bullet (`2026-12-15 Tue 11:50 ++2m` under `# [ ] haircut`). See [Status keys in other files](#status-keys-in-other-files) |
 | `s` | **Stamp.** On a line with no date, adds today's date and the current time at the end, in brackets: `[2026-10-13 Tue 09:30]`, which keeps it grey and out of an open task's bold. On a line with one, changes its date to today and keeps the time. With the cursor on the date (after editing it by hand), keeps the date and only fixes the weekday. A time-log entry's leading time is history, so a fresh stamp is added at the end. A stamp of "now" never fires a reminder; edit it to a later time and it will. With two stamps on the line, the cursor picks which one changes. Doesn't save: the reminder alarm learns the new time once the file is saved, at the next tick (opening the agenda runs one) |
 | `, y` | Toggle `[ ]` ↔ `[Y]` (today) |
@@ -192,9 +230,19 @@ starting Python, so it sees the saved file in practice.
   `:open %sh{cat …}` goes there, then deletes the file so a failed run
   can't send you somewhere old. (`P` used to create the file with `:sh` and
   open it with `%sh{}`, so whether it opened depended on which finished
-  first.) `P` saves with `:update`, not `:write`: todo.md is saved before you
-  leave it (`td` writes it when you change the state in the new file), and
-  the read-only agenda is never written.
+  first.) `td promote` also keeps an inbox bullet's place, and its file,
+  in `~/.cache/td/cut`. `P` then pipes the whole buffer through `td
+  promote --cut -`: in todo.md that takes the bullet's section out of the
+  buffer and adds it to the file on disk; anywhere else the text comes
+  back as it was. Then the conditional undo and `:update`, as the status
+  keys do: on the agenda `:earlier 1` takes the pipe back and nothing is
+  saved; anywhere else `:update` saves, so todo.md is saved before you
+  leave it (`td` writes it when you change the state in the new file).
+  The section goes to the file on disk, not its buffer: a pipe in that
+  buffer would move its cursor to the end even with nothing to add.
+  Auto-reload then shows it in the file's buffer, if you have it open. With
+  unsaved edits there, Helix refuses to save them over the change on disk:
+  `:w!` would drop the moved lines, so copy your edits over first.
 - **`s`, `+`, `-`** need the cursor column, but `extend_to_line_bounds`
   moves the cursor to the line end. So the first command saves
   `%{cursor_column}` to `~/.cache/td/stamp-col`, and `td` reads it. `+`/`-`
@@ -217,15 +265,22 @@ starting Python, so it sees the saved file in practice.
   order:
   1. `:open %sh{tl running --from …}` goes to the file with the latest
      running entry (this buffer if nothing runs); `tl` keeps this
-     buffer's name in `~/.cache/tl/from`.
+     buffer's name and the cursor's line in `~/.cache/tl/from`.
   2. That whole buffer goes through `:pipe tl stop -`, and `:update` saves
      it.
   3. `:open %sh{tl next --skip …}` ends what still runs in the other files
      on disk and goes back to the buffer kept in step 1.
-  4. `tl start`'s output goes on a new last line, and `:write!` saves it.
-     The `!` is needed when this is the buffer step 2 saved: a second save
-     of one buffer in one key otherwise fails with "file modified by an
-     external process", since Helix hasn't recorded the first one yet.
+  4. That whole buffer goes through `:pipe tl start -`, which adds the
+     entry (on a new last line; in todo.md, under the todo the cursor was
+     on) and writes its line to `~/.cache/tl/goto`. `:write!` saves it,
+     and `:open %sh{cat ~/.cache/tl/goto …}` puts the cursor on it. The `!`
+     is needed when this is the buffer step 2 saved: a second save of one
+     buffer in one key otherwise fails with "file modified by an external
+     process", since Helix hasn't recorded the first one yet. The pipe
+     moves the cursor to the end, hence the goto. (The line used to be
+     added with `open_below` and `:insert-output tl start`, but in
+     todo.md `open_below` starts it with `- [ ] `, which makes it a todo:
+     see `q`.)
 - **`I`** is `:open %sh{tl where --from …}`, then `:echo %sh{tl where --say}`.
   With nothing running, `tl where` prints the buffer and line the key was
   pressed on, so `:open` stays there: a failing `%sh{}` would hand `:open`
@@ -236,8 +291,7 @@ starting Python, so it sees the saved file in practice.
   above it, or just `- [ ] ` when the line already is that empty bullet.
   `goto_file_start` then lands on the bullet either way, and
   `insert_at_line_end` types after it. It can't add the line with
-  `open_above` and `:insert-output td new`, as `i` does with `tl start`
-  and `open_below`: languages.toml makes `- [ ]` a markdown comment
+  `open_above` and `:insert-output td new`: languages.toml makes `- [ ]` a markdown comment
   token, so opening a line next to a `- [ ] …` one already starts it with
   `- [ ] `, and the key gave `- [ ] - [ ] `. Enter continues a bullet the
   same way, which is how an empty `- [ ] ` gets left behind. A Helix key
@@ -273,7 +327,9 @@ starting Python, so it sees the saved file in practice.
      buffer and line in `~/.cache/tl/goto`.
   2. That whole buffer goes through `:pipe tl out --edit -`, which ends its
      latest running entry, adds the `# ` (or ` - `) heading, and writes the
-     heading's line to `~/.cache/tl/goto`; `:update` saves it.
+     heading's line to `~/.cache/tl/goto`; `:update` saves it. In todo.md
+     it adds two spaces (or ` - `) after the entry instead, and keeps the
+     entry's line.
   3. `:open %sh{cat ~/.cache/tl/goto …}` goes there (or back, if nothing
      ran), and `insert_at_line_end` types after it. A key has no if, so
      with nothing running it still ends in insert mode.

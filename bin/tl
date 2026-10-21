@@ -11,14 +11,22 @@ The "= 1h 15min" part is only a convenience; totals are always recomputed from
 the start/end times.
 
     tl start            print "YYYY-MM-DD HH:MM - " (no newline)
+    tl start - [--file F]
+                        the last step of `space , i`, on the buffer of F, the file `tl next` printed:
+                        stdin to stdout with a new entry "YYYY-MM-DD HH:MM - " on a new last line.
+                        In td's inbox, at the line `tl running` kept (when F is its file) it goes
+                        at the end of the section of the todo that line is in, lined up with the
+                        todo; on a blank line in no section, on that line; else on a new line below.
+                        Its line goes to ~/.cache/tl/goto, as F:LINE.
     tl close [--file F] stdin = region of text. Every entry line in it gets its end filled with
                         now if missing and its duration refreshed; other lines are untouched
-                        (space , u). F is the file the text came from: if it is td's inbox, the
-                        text passes through unchanged.
+                        (space , u). F is the file the text came from: if it is td's inbox, its
+                        todos are left alone.
     tl out "$BASH_EXECUTION_STRING" # done: TEXT
                         end, at now, the latest-started entry still running (started in the last
                         12h) in the task files on disk. TEXT becomes the "# heading" right above it,
-                        or is added to the one there (" - TEXT"). Comment form, so TEXT needs no quoting
+                        or is added to the one there (" - TEXT"); in td's inbox, the entry's note
+                        (after the one there, " - TEXT"). Comment form, so TEXT needs no quoting
                         (space , O).
     tl out --visit --from F:LINE
                         the first step of `space , o`: print the task file of the latest entry
@@ -27,17 +35,19 @@ the start/end times.
                         the next step, on that file's buffer: stdin to stdout, with the latest entry
                         running in it ended, as `tl out` does, and its heading ready for you to type:
                         "# " on a new line right above it, or " - " after the heading already there.
-                        The heading's line then replaces the goto, as F:LINE. If F is td's inbox, or
-                        nothing runs in it, the text passes through unchanged.
+                        The heading's line then replaces the goto, as F:LINE. In td's inbox, where a
+                        heading would end the todo's section, the entry's line instead, readied for a
+                        note: "  " after it, or " - " after the note there. If nothing runs in F,
+                        the text passes through unchanged.
     tl stop [--skip F]  end, at now, every entry still running that started less than 12h ago, in
                         the task files on disk except F; print where ("stopped ~/tasks/x.md:3").
     tl stop - [--file F]
                         the same for stdin, written to stdout byte for byte otherwise. F is the file
-                        the text came from: if it is td's inbox, the text passes through unchanged.
-    tl running [--from F]
+                        the text came from: if it is td's inbox, its todos are left alone.
+    tl running [--from F[:LINE]]
                         print the task file of the latest entry running on disk (F if none), and
-                        keep F for `tl next`. The first step of `space , i`: the key ends the
-                        entry in that file's buffer, so unsaved edits there are kept.
+                        keep F:LINE for `tl next` and `tl start -`. The first step of `space , i`:
+                        the key ends the entry in that file's buffer, so unsaved edits there are kept.
     tl next [--skip R]  the same as `tl stop --skip R`, then print the file to clock in to: the one
                         `tl running` kept. R if there is none.
     tl where [--from F:LINE]
@@ -55,12 +65,15 @@ the start/end times.
                         Entries with no end time, of any date, are
                         listed first. Locations print as ~/path:line, for gf. Under each day, a
                         line per task (total and title: its file's first line), then the nearest
-                        markdown "# heading" above its entries, as bullets (but the title).
+                        markdown "# heading" above its entries, as bullets (but the title). td's
+                        inbox has no title, and its entries come under the todo they are under.
     tl test [-v]        run the tests at the end of this file (temporary task folders, faked clock).
 
-Task files: $TL_DIR (default ~/tasks), *.txt and *.md. stop (also stop - --file), close --file, out and summary skip td's inbox
-($TD_FILE, default $TL_DIR/todo.md): a `- [ ] 2026-10-12 09:00 - prep slides` there is a todo,
-not a running entry. $TL_NOW="YYYY-MM-DD HH:MM" fakes the clock.
+Task files: $TL_DIR (default ~/tasks), *.txt and *.md, and td's inbox ($TD_FILE, default
+$TL_DIR/todo.md). In the inbox a todo (a line td reads as one, `- [S] `) is never an entry:
+`- [ ] 2026-10-12 09:00 - prep slides` there is a todo, not a running entry. Its entries are the
+other lines, mostly in a todo's section (the lines under it, up to the next todo that is not under
+it), and the summary lists them under that todo's text. $TL_NOW="YYYY-MM-DD HH:MM" fakes the clock.
 """
 import contextlib
 import io
@@ -89,6 +102,9 @@ ATTEMPT = re.compile(rf"^{PREFIX}(\d{{4}}-\d{{2}}-\d{{2}})\s+\d{{1,2}}:\d{{2}}\s
 # Markdown heading; "#+BEGIN_SRC", "#tag" and an empty "# " are not one. The title leaves out td's
 # state ("# [A] fix parser" is "fix parser"), so it stays the same when the state changes.
 HEADING = re.compile(r"^ {0,3}#{1,6}\s+(?:\[[ xXyYaAwW!]\]\s+)?(\S.*?)(?:\s+#+)?\s*$")
+# A todo: a line td reads as one (td's TASK, the same pattern: td's tests check). In td's inbox a
+# todo is never an entry, so `- [ ] 2026-10-12 09:00 - prep slides` there stays a todo.
+TODO = re.compile(r"^(?P<indent>\s*)- \[(?P<state>[ xXyYaAwW!])\]\s+(?P<text>.*?)\s*$")
 # Code block fence (markdown or org); a "# " line inside a block is a comment, not a heading.
 FENCE = re.compile(r"^\s*(?:```|~~~|#\+(?:BEGIN|END)_)", re.I)
 
@@ -140,6 +156,53 @@ def parse(line):
     return Entry(m["prefix"], m["date"], start, end, note), None
 
 
+def parse_in(line, inbox):
+    """parse(line) for a line of a task file; inbox: the file is td's inbox, where a todo is
+    never an entry -> (None, None) for one."""
+    return (None, None) if inbox and TODO.match(line) else parse(line)
+
+
+def width(line):
+    """The columns line is indented by, a tab to 4 as in markdown."""
+    return len(re.match(r"[ \t]*", line)[0].expandtabs(4))
+
+
+# Any markdown heading, an empty "# " too: it ends a todo's section.
+HEADING_LINE = re.compile(r" {0,3}#{1,6}(\s|$)")
+
+
+def section_end(lines, j):
+    """The index of the last line of the section of the todo at lines[j]: the lines after it up
+    to a heading, the next todo at its indent or less, or a line indented less than it (a parent
+    todo's note), blank lines at its end left out. A todo's notes need no indent, but a sub-todo's
+    section holds only the lines indented at least as deep as it."""
+    deep, end = width(lines[j]), j
+    for k in range(j + 1, len(lines)):
+        body = lines[k].rstrip("\r\n")
+        if not body.strip():
+            continue
+        if HEADING_LINE.match(body) or width(body) < deep or (width(body) == deep and TODO.match(body)):
+            break
+        end = k
+    return end
+
+
+def section_of(lines, i):
+    """The todo whose section holds lines[i] (the innermost, when todos nest; a blank line after a
+    section counts as in it) -> (its index, the index of its section's last line), or None: above
+    the first todo, or under a heading with no todo after it yet."""
+    i = min(i, len(lines) - 1)
+    for j in range(i, -1, -1):
+        body = lines[j].rstrip("\r\n")
+        if TODO.match(body):
+            end = section_end(lines, j)
+            if end >= i or not "".join(lines[end + 1:i + 1]).strip():
+                return j, end
+        elif HEADING_LINE.match(body):
+            return None
+    return None
+
+
 # An entry's head, in parts, so td's `+`/`-` can move one of them and keep the rest as it is.
 HEAD = re.compile(
     rf"""^(?P<prefix>{PREFIX})(?P<date>\d{{4}}-\d{{2}}-\d{{2}})(?P<sp>\s+)
@@ -166,21 +229,67 @@ def render(e, end):
     return f"{text}  {e.note}" if e.note else text
 
 
-def cmd_start():
-    sys.stdout.write(now().strftime("%Y-%m-%d %H:%M - "))
+def cmd_start(args):
+    stamp = now().strftime("%Y-%m-%d %H:%M - ")
+    if args[:1] != ["-"]:
+        sys.stdout.write(stamp)
+        return 0
+    # tl start - [--file F]: the last step of `space , i`, on the whole buffer of F, the file `tl
+    # next` printed. The line the key was pressed on is in FROM_PATH, if it was pressed in F.
+    lines = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").splitlines(keepends=True)
+    source = opt(args, "--file") or ""
+    try:
+        kept = FROM_PATH.read_text(encoding="utf-8").strip()
+        FROM_PATH.unlink()
+    except OSError:
+        kept = ""
+    m = re.fullmatch(r"(.+):(\d+)", kept)
+    here = int(m[2]) - 1 if m and source and same_path(m[1], source) else None
+    eol = next((raw[len(raw.rstrip("\r\n")):] for raw in lines if raw.endswith("\n")), "\n")
+
+    def put(i, text):
+        """text, a line of its own, at index i (after lines[i - 1], given its line ending)."""
+        if i and not lines[i - 1].endswith("\n"):
+            lines[i - 1] += eol
+        lines.insert(i, text + eol)
+        return i
+
+    if here is not None and lines and is_td_inbox(Path(source)):
+        here = min(here, len(lines) - 1)
+        section = section_of(lines, here)
+        if section:  # at the end of the todo's section, lined up with the todo
+            j, end = section
+            at = put(end + 1, re.match(r"[ \t]*", lines[j])[0] + stamp)
+        elif not lines[here].strip():  # a blank line in no section: on it
+            lines[here] = stamp + lines[here][len(lines[here].rstrip("\r\n")):]
+            at = here
+        else:
+            at = put(here + 1, stamp)
+    else:
+        at = put(len(lines), stamp)
+    GOTO_PATH.parent.mkdir(parents=True, exist_ok=True)
+    GOTO_PATH.write_text(f"{source}:{at + 1}\n", encoding="utf-8", errors="surrogateescape")
+    sys.stdout.buffer.write("".join(lines).encode("utf-8", "surrogateescape"))
+    return 0
+
+
+def same_path(a, b):
+    """True when paths a and b name the same file, or are the same text (a buffer not on disk yet)."""
+    try:
+        return Path(a).expanduser().samefile(Path(b).expanduser())
+    except OSError:
+        return a == b
 
 
 def cmd_close(args):
     t = now()
     text = sys.stdin.read()
     source = opt(args, "--file")
-    if source and is_td_inbox(Path(source)):  # td's inbox passes through unchanged
-        sys.stdout.write(text)
-        return 0
+    inbox = bool(source and is_td_inbox(Path(source)))
     out = []
     for raw in text.splitlines(keepends=True):
         body = raw.rstrip("\r\n")
-        e, _ = parse(body)  # unparseable and non-entry lines pass through untouched
+        e, _ = parse_in(body, inbox)  # unparseable and non-entry lines pass through untouched
         if e is not None:
             end = e.end if e.end is not None else t.hour * 60 + t.minute
             raw = render(e, end) + raw[len(body):]
@@ -189,12 +298,13 @@ def cmd_close(args):
     return 0
 
 
-def stop_lines(lines, t):
-    """End, in place at t, the running entries in lines started less than MAX_SANE ago -> their line numbers."""
+def stop_lines(lines, t, inbox=False):
+    """End, in place at t, the running entries in lines started less than MAX_SANE ago -> their line
+    numbers. inbox: the lines are td's inbox, whose todos are left alone."""
     stopped = []
     for i, raw in enumerate(lines):
         body = raw.rstrip("\r\n")
-        e, _ = parse(body)
+        e, _ = parse_in(body, inbox)
         if e is None or e.end is not None:
             continue
         if not timedelta(0) <= t - started_at(e) < timedelta(minutes=MAX_SANE):
@@ -210,8 +320,7 @@ def cmd_stop(args):
     if args[:1] == ["-"]:
         lines = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").splitlines(keepends=True)
         source = Path(args[2]) if args[1:2] == ["--file"] and len(args) > 2 else None
-        if not (source and is_td_inbox(source)):  # td's inbox passes through unchanged
-            stop_lines(lines, t)
+        stop_lines(lines, t, bool(source and is_td_inbox(source)))
         sys.stdout.buffer.write("".join(lines).encode("utf-8", "surrogateescape"))
         return 0
     stopped = stop_files(skip_arg(args), t)
@@ -229,18 +338,18 @@ def stop_files(skip, t):
     _, files = recent_files(None)
     stopped = []
     for path in files or []:
-        if (skip and skip.is_file() and path.samefile(skip)) or is_td_inbox(path):
+        if skip and skip.is_file() and path.samefile(skip):
             continue
         lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
-        closed = stop_lines(lines, t)
+        closed = stop_lines(lines, t, is_td_inbox(path))
         if closed:
             path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
             stopped += [f"{tilde(path)}:{n}" for n in closed]
     return stopped
 
 
-# The buffer `space , i` was pressed in, kept by `tl running` for `tl next` while the key is in the
-# running entry's buffer.
+# The buffer `space , i` was pressed in, and its line, as F:LINE, kept by `tl running` for `tl next`
+# and `tl start -` while the key is in the running entry's buffer.
 FROM_PATH = Path("~/.cache/tl/from").expanduser()
 
 
@@ -251,18 +360,16 @@ def opt(args, name):
 
 def entry_starts(t):
     """-> ([(start, mtime, index, path)] of every entry already started, [the same] of those running,
-    started in the last 12h), over the task files on disk but td's inbox; index is the line's, from 0.
+    started in the last 12h), over the task files on disk; index is the line's, from 0.
     The latest (max) is the one started last: entries start on the minute, so for a task switch within
     one, the file written last holds the newer one (the switch writes both: it ends one entry, then
     starts the other), and in one file the lower line."""
     _, files = recent_files(None)
     starts, running = [], []
     for path in files or []:
-        if is_td_inbox(path):
-            continue
-        mtime = path.stat().st_mtime
+        mtime, inbox = path.stat().st_mtime, is_td_inbox(path)
         for i, raw in enumerate(path.read_bytes().decode("utf-8", "surrogateescape").splitlines()):
-            e, _ = parse(raw)
+            e, _ = parse_in(raw, inbox)
             if e is None or started_at(e) > t:
                 continue
             key = (started_at(e), mtime, i, str(path))
@@ -273,26 +380,27 @@ def entry_starts(t):
 
 
 def cmd_running(args):
-    """tl running [--from F]: the first step of `space , i`. Print the task file of the latest
-    entry running on disk, so the key ends it in that file's buffer, where its unsaved edits are;
-    F when nothing runs. F, the buffer the key was pressed in, is kept for `tl next`."""
+    """tl running [--from F[:LINE]]: the first step of `space , i`. Print the task file of the
+    latest entry running on disk, so the key ends it in that file's buffer, where its unsaved edits
+    are; F when nothing runs. F:LINE, the buffer the key was pressed in and its line, is kept for
+    `tl next` and `tl start -`."""
     _, running = entry_starts(now())
     here = opt(args, "--from") or ""
     FROM_PATH.parent.mkdir(parents=True, exist_ok=True)
     FROM_PATH.write_text(here, encoding="utf-8")
-    print(max(running)[-1] if running else here, end="")  # no newline: for :open %sh{}
+    print(max(running)[-1] if running else re.sub(r":\d+$", "", here), end="")  # no newline: for :open %sh{}
     return 0
 
 
 def cmd_next(args):
     """tl next [--skip R]: the last step of `space , i`, once the key has ended the entry in R's
     buffer. End the entries running in the other task files on disk, as `tl stop` does, and print
-    the file to clock in to: the buffer `tl running` kept, else R."""
+    the file to clock in to: the buffer `tl running` kept (it stays kept, with its line, for `tl
+    start -`), else R."""
     t = now()
     skip = opt(args, "--skip")
     try:
-        target = FROM_PATH.read_text(encoding="utf-8").strip() or None
-        FROM_PATH.unlink()
+        target = re.sub(r":\d+$", "", FROM_PATH.read_text(encoding="utf-8").strip()) or None
     except OSError:
         target = None
     stop_files(Path(skip) if skip else None, t)
@@ -340,8 +448,8 @@ def cmd_out(args):
     return 0
 
 
-# Where `space , o` goes last, as path:line: the ended entry's heading, or with nothing running
-# back where the key was pressed.
+# Where `space , o` goes last, as path:line: the ended entry's heading (in td's inbox, its line), or
+# with nothing running back where the key was pressed. `space , i` goes to its new entry the same way.
 GOTO_PATH = Path("~/.cache/tl/goto").expanduser()
 
 
@@ -362,23 +470,30 @@ def cmd_edit(args):
     file `tl out --visit` printed. End the latest entry running in it (started in the last 12h),
     as `tl out` does, and get its heading ready for the note you type next: "# " on a new line
     right above the entry, or " - " added to the heading already there (an empty "# " stays as it
-    is; see add_heading). Keep the heading's line in GOTO_PATH, as F:LINE. If F is td's inbox, or
-    nothing runs in it, the text passes through unchanged and GOTO_PATH stays."""
+    is; see add_heading). Keep the heading's line in GOTO_PATH, as F:LINE. In td's inbox a heading
+    would end the todo's section, so the note goes on the entry's line: "  " after it, or " - " after
+    the note there, and the entry's line is kept instead. If nothing runs in F, the text passes
+    through unchanged and GOTO_PATH stays."""
     t = now()
     # bytes in and out, so line endings and odd bytes survive a whole-buffer :pipe
     lines = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").splitlines(keepends=True)
     source = opt(args, "--file")
+    inbox = bool(source and is_td_inbox(Path(source)))
     running = []
-    if not (source and is_td_inbox(Path(source))):
-        for i, raw in enumerate(lines):
-            e, _ = parse(raw.rstrip("\r\n"))
-            if e and e.end is None and timedelta(0) <= t - started_at(e) < timedelta(minutes=MAX_SANE):
-                running.append((started_at(e), i))
+    for i, raw in enumerate(lines):
+        e, _ = parse_in(raw.rstrip("\r\n"), inbox)
+        if e and e.end is None and timedelta(0) <= t - started_at(e) < timedelta(minutes=MAX_SANE):
+            running.append((started_at(e), i))
     if running:
         _, i = max(running)  # started last; at the same minute, the lower line
         body = lines[i].rstrip("\r\n")
-        lines[i] = render(parse(body)[0], t.hour * 60 + t.minute) + lines[i][len(body):]
-        i = add_heading(lines, i, "")
+        e = parse(body)[0]
+        if inbox:
+            lines[i] = render(e, t.hour * 60 + t.minute) + (" - " if e.note else "  ") + lines[i][len(body):]
+            i += 1
+        else:
+            lines[i] = render(e, t.hour * 60 + t.minute) + lines[i][len(body):]
+            i = add_heading(lines, i, "")
         GOTO_PATH.parent.mkdir(parents=True, exist_ok=True)
         GOTO_PATH.write_text(f"{source}:{i}\n", encoding="utf-8", errors="surrogateescape")
     sys.stdout.buffer.write("".join(lines).encode("utf-8", "surrogateescape"))
@@ -387,15 +502,14 @@ def cmd_edit(args):
 
 def end_latest(t, comment=""):
     """End, at t, the latest-started entry running (started in the last 12h) in the task files on
-    disk, with comment as its heading (see add_heading) -> (path, index of its line), or None when
-    nothing runs."""
+    disk, with comment as its heading (see add_heading), or in td's inbox as its note (after the
+    note there, " - comment") -> (path, index of its line), or None when nothing runs."""
     _, files = recent_files(None)
     running = []  # (start, path, index) of entries running, started in the last 12h
     for path in files or []:
-        if is_td_inbox(path):
-            continue
+        inbox = is_td_inbox(path)
         for i, raw in enumerate(path.read_bytes().decode("utf-8", "surrogateescape").splitlines()):
-            e, _ = parse(raw)
+            e, _ = parse_in(raw, inbox)
             if e and e.end is None and timedelta(0) <= t - started_at(e) < timedelta(minutes=MAX_SANE):
                 running.append((started_at(e), str(path), i))
     if not running:
@@ -404,8 +518,12 @@ def end_latest(t, comment=""):
     path = Path(path)
     lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
     body = lines[i].rstrip("\r\n")
-    lines[i] = render(parse(body)[0], t.hour * 60 + t.minute) + lines[i][len(body):]
-    if comment:
+    e = parse(body)[0]
+    inbox = is_td_inbox(path)
+    if inbox:  # a heading would end the todo's section: the comment goes in the note
+        e = e._replace(note=" - ".join(part for part in (e.note, comment) if part))
+    lines[i] = render(e, t.hour * 60 + t.minute) + lines[i][len(body):]
+    if comment and not inbox:
         i = add_heading(lines, i, comment)
     path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
     return path, i
@@ -416,7 +534,7 @@ def add_heading(lines, i, comment):
     there (" - comment"; an empty "# " is filled) -> the entry's index after."""
     eol = lines[i][len(lines[i].rstrip("\r\n")):]
     above = lines[i - 1].rstrip("\r\n") if i else ""
-    if i and re.match(r" {0,3}#{1,6}(\s|$)", above):  # a heading already: add to it ("# " left empty counts)
+    if i and HEADING_LINE.match(above):  # a heading already: add to it ("# " left empty counts)
         lines[i - 1] = (f"{above} - {comment}" if HEADING.match(above) else f"# {comment}") + lines[i - 1][len(above):]
         return i
     lines.insert(i, f"# {comment}{eol or chr(10)}")
@@ -432,17 +550,29 @@ def recent_files(limit):
     folder = Path(os.environ.get("TL_DIR", "~/tasks")).expanduser()
     if not folder.is_dir():
         return folder, None
+    return folder, sorted(task_files(folder), key=lambda f: f.stat().st_mtime, reverse=True)[:limit]
+
+
+def task_files(folder):
+    """The task files: *.txt and *.md in folder, and td's inbox, wherever $TD_FILE puts it."""
     files = [*folder.glob("*.txt"), *folder.glob("*.md")]
-    return folder, sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)[:limit]
+    inbox = td_inbox()
+    if inbox.is_file() and not any(is_td_inbox(f) for f in files):
+        files.append(inbox)
+    return files
+
+
+def td_inbox():
+    """td's inbox: $TD_FILE, default $TL_DIR/todo.md."""
+    env = os.environ.get("TD_FILE")
+    return Path(env).expanduser() if env else Path(os.environ.get("TL_DIR", "~/tasks")).expanduser() / "todo.md"
 
 
 def is_td_inbox(path):
-    """True for td's inbox ($TD_FILE, default $TL_DIR/todo.md). It holds td bullets, and
-    `- [ ] 2026-10-12 09:00 - prep slides` there is a todo, not a running entry."""
-    env = os.environ.get("TD_FILE")
-    inbox = Path(env).expanduser() if env else Path(os.environ.get("TL_DIR", "~/tasks")).expanduser() / "todo.md"
+    """True for td's inbox. It holds td's todos, and `- [ ] 2026-10-12 09:00 - prep slides` there
+    is a todo, not a running entry (see parse_in)."""
     try:
-        return path.samefile(inbox)
+        return path.samefile(td_inbox())
     except OSError:
         return False
 
@@ -464,7 +594,8 @@ def cmd_recent(args):
     for i, f in enumerate(files, 1):
         shown = tilde(f)
         stamp = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-        entries = [e for e, _ in map(parse, f.read_text(errors="replace").splitlines()) if e]
+        inbox = is_td_inbox(f)
+        entries = [e for e, _ in (parse_in(raw, inbox) for raw in f.read_text(errors="replace").splitlines()) if e]
         last = max(entries, key=lambda e: (e.date, e.start), default=None)
         print(f"{i}  {shown}   {stamp}")
         if last:
@@ -501,24 +632,27 @@ def cmd_summary(arg, week=None):
     running = []                                    # (file, line, entry, heading), whatever the date
     titles = {}                                     # task -> its first line, "# " dropped, unless an entry
 
-    files = sorted(f for f in [*folder.glob("*.txt"), *folder.glob("*.md")] if not is_td_inbox(f))
-    for path in files:
+    for path in sorted(task_files(folder)):
         where = tilde(path)
         heading, fenced = "", False
         lines = path.read_text(errors="replace").splitlines()
         first_line = next((line.strip() for line in lines if line.strip()), "")
         h = HEADING.match(first_line)
-        titles[path.stem] = h.group(1) if h else "" if first_line.startswith("#") or ATTEMPT.match(first_line) else first_line
+        inbox = is_td_inbox(path)  # td's inbox: no title (its first line is a todo), entries under todos
+        titles[path.stem] = "" if inbox else h.group(1) if h else "" if first_line.startswith("#") or ATTEMPT.match(first_line) else first_line
         for n, line in enumerate(lines, 1):
             if FENCE.match(line):
                 fenced = not fenced
             elif not fenced and HEADING.match(line):
                 heading = HEADING.match(line).group(1)
-            e, err = parse(line)
+            e, err = parse_in(line, inbox)
             if e is None and err is None:
                 continue
+            # what the entry was for: the heading above it, or in td's inbox the todo it is under
+            todo = section_of(lines, n - 1) if inbox else None
+            topic = TODO.match(lines[todo[0]])["text"] if todo else heading
             if e and e.end is None:
-                running.append((where, n, e, heading))
+                running.append((where, n, e, topic))
                 continue
             day = e.date if e else ATTEMPT.match(line).group(1)
             if (first and day < first) or (last and day > last):
@@ -528,9 +662,9 @@ def cmd_summary(arg, week=None):
                 continue
             dur = duration(e.start, e.end)
             totals[e.date][path.stem] += dur
-            if heading:
+            if topic:
                 headings = done[e.date][path.stem]
-                headings[heading] = min(headings.get(heading, e.start), e.start)
+                headings[topic] = min(headings.get(topic, e.start), e.start)
             if dur > MAX_SANE:
                 warns.append((where, n, f"duration {dur_text(dur)}, typo?"))
             if e.date > today.isoformat():
@@ -617,7 +751,7 @@ def view_step(n):
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
     if cmd == "start":
-        cmd_start()
+        return cmd_start(argv[2:])
     elif cmd == "close":
         return cmd_close(argv[2:])
     elif cmd == "out":
@@ -719,9 +853,79 @@ def run_tests(verbose=False):
             e, _ = parse("- 2026-10-09 23:30 -  late")
             self.assertEqual(render(e, 15), "- 2026-10-09 23:30 - 00:15 = 0h 45min  late")
 
+        def test_in_td_inbox_a_todo_is_never_an_entry(self):
+            for line in ("- [ ] 2026-10-09 09:00 - prep slides", "  - [x] 2026-10-09 09:00 - 10:00"):
+                self.assertEqual(parse_in(line, True), (None, None))
+                self.assertIsNotNone(parse_in(line, False)[0])
+            for line in ("2026-10-09 09:00 -", "  2026-10-09 09:00 -", "  - 2026-10-09 09:00 -", "* [ ] 2026-10-09 09:00 -"):
+                self.assertIsNotNone(parse_in(line, True)[0], line)
+
+        def test_sections(self):
+            lines = ["- [ ] a\n", "\n", "note at the left\n", "  - [ ] b\n", "\tb's note\n", "  b's too\n",
+                     "a's note\n", "\n", "- [ ] c\n", "# heading\n", "under it\n", "- [ ] d"]
+            self.assertEqual(section_end(lines, 0), 6)  # to the next todo at its indent, blank lines at the end left out
+            self.assertEqual(section_end(lines, 3), 5)  # a sub-todo: to a line indented less (a tab is 4)
+            self.assertEqual(section_end(lines, 8), 8)  # a heading ends it
+            self.assertEqual(section_end(lines, 11), 11)
+            self.assertEqual([section_of(lines, i) for i in range(12)],
+                             [(0, 6), (0, 6), (0, 6), (3, 5), (3, 5), (3, 5), (0, 6), (0, 6), (8, 8), None, None, (11, 11)])
+
     class Commands(Case):
         def test_start(self):
             self.assertEqual(self.tl("start"), "2026-10-09 14:05 - ")
+
+        def goto(self):
+            return (self.home / ".cache" / "tl" / "goto").read_text().strip()
+
+        def start(self, text, name, line=None, kept=None):
+            """tl start - on the buffer of name, as space , i runs it, pressed on line (in name, or
+            in the file kept)."""
+            if line is not None:
+                (self.home / ".cache" / "tl").mkdir(parents=True, exist_ok=True)
+                (self.home / ".cache" / "tl" / "from").write_text(f"{kept or self.tasks / name}:{line}")
+            return self.tl("start", "-", "--file", str(self.tasks / name), stdin=text)
+
+        def test_start_on_a_new_last_line(self):
+            a = self.put("A.md", "")
+            for text, out, line in [("x\n", "x\n2026-10-09 14:05 - \n", 2),
+                                    ("x", "x\n2026-10-09 14:05 - \n", 2),  # no final newline
+                                    ("", "2026-10-09 14:05 - \n", 1),
+                                    ("# A\r\n- [ ] sub\r\n", "# A\r\n- [ ] sub\r\n2026-10-09 14:05 - \r\n", 3)]:
+                self.assertEqual(self.start(text, "A.md", 1), out)  # where it was pressed: the end anyway
+                self.assertEqual(self.goto(), f"{a}:{line}")
+                self.assertFalse((self.home / ".cache" / "tl" / "from").exists())
+
+        def test_start_in_td_inbox_where_it_was_pressed(self):
+            todo = self.put("todo.md", "")
+            text = ("- [ ] prep slides\n\ncheck deck\n  2026-10-09 09:00 - 10:00 = 1h 00min\n\n"
+                    "- [ ] call mom\n\n# later\nplain\n\n")
+            entry = "2026-10-09 14:05 - "
+            lines = text.splitlines(keepends=True)
+            for pressed, at in [(1, 4), (2, 4), (3, 4), (4, 4),  # in its section: at its end, lined up with the todo
+                                (5, 4),  # a blank line after the section counts
+                                (6, 6), (7, 6),  # a todo with nothing under it: right under it
+                                (8, 8), (9, 9)]:  # in no section (a heading ends one): below the line
+                want = "".join(lines[:at] + [entry + "\n"] + lines[at:])
+                self.assertEqual(self.start(text, "todo.md", pressed), want, pressed)
+                self.assertEqual(self.goto(), f"{todo}:{at + 1}")
+            # a blank line in no section: on it (past the end: the last line)
+            for pressed in (10, 99):
+                self.assertEqual(self.start(text, "todo.md", pressed), text[:-1] + entry + "\n")
+                self.assertEqual(self.goto(), f"{todo}:10")
+            # pressed in another buffer (tl next came back to todo.md some other way): the end
+            self.assertEqual(self.start(text, "todo.md", 1, kept=self.tasks / "A.md"), text + entry + "\n")
+            self.assertEqual(self.start(text, "todo.md"), text + entry + "\n")
+
+        def test_start_in_td_inbox_nested_todos(self):
+            self.put("todo.md", "")
+            text = "- [ ] a\n  - [ ] b\n    note b\nnote a\n- [ ] c\n\tnote c"
+            self.assertEqual(self.start(text, "todo.md", 3),  # under b, lined up with it
+                             "- [ ] a\n  - [ ] b\n    note b\n  2026-10-09 14:05 - \nnote a\n- [ ] c\n\tnote c")
+            for pressed in (1, 4):  # a's note comes after b's section
+                self.assertEqual(self.start(text, "todo.md", pressed),
+                                 "- [ ] a\n  - [ ] b\n    note b\nnote a\n2026-10-09 14:05 - \n- [ ] c\n\tnote c")
+            self.assertEqual(self.start(text, "todo.md", 5),
+                             "- [ ] a\n  - [ ] b\n    note b\nnote a\n- [ ] c\n\tnote c\n2026-10-09 14:05 - \n")
 
         def test_close_stamps_and_refreshes_entries_only(self):
             text = "# h\n2026-10-09 13:00 -  open\n2026-10-09 09:00 - 10:30 = 9h 99min\nnot 2026-10-09 10:00 -\n"
@@ -729,11 +933,13 @@ def run_tests(verbose=False):
                              "# h\n2026-10-09 13:00 - 14:05 = 1h 05min  open\n"
                              "2026-10-09 09:00 - 10:30 = 1h 30min\nnot 2026-10-09 10:00 -\n")
 
-        def test_close_from_td_inbox_passes_through(self):
-            # space , u in todo.md: its bullets are todos, not entries
-            text = "- [ ] 2026-10-09 13:00 - prep slides\n"
+        def test_close_in_td_inbox_leaves_its_todos(self):
+            # space , u in todo.md: its todos are not entries, the lines under them can be
+            text = "- [ ] 2026-10-09 13:00 - prep slides\n  2026-10-09 13:30 -\n"
             todo = self.put("todo.md", text)
-            self.assertEqual(self.tl("close", "--file", str(todo), stdin=text), text)
+            self.assertEqual(self.tl("close", "--file", str(todo), stdin=text),
+                             "- [ ] 2026-10-09 13:00 - prep slides\n  2026-10-09 13:30 - 14:05 = 0h 35min\n")
+            text = "- [ ] 2026-10-09 13:00 - prep slides\n"
             other = self.put("A.md", text)
             self.assertEqual(self.tl("close", "--file", str(other), stdin=text),
                              "- [ ] 2026-10-09 13:00 - 14:05 = 1h 05min  prep slides\n")
@@ -759,11 +965,13 @@ def run_tests(verbose=False):
             self.assertEqual(self.tl("stop", "-", stdin=text),
                              text.replace("13:00 -\r", "13:00 - 14:05 = 1h 05min\r"))
 
-        def test_stop_stdin_from_td_inbox_passes_through(self):
-            # space , i in todo.md: its bullets are todos, not running entries
-            text = "- [ ] 2026-10-09 13:00 - prep slides\n"
+        def test_stop_stdin_in_td_inbox_leaves_its_todos(self):
+            # space , i in todo.md: its todos are not running entries, the lines under them can be
+            text = "- [ ] 2026-10-09 13:00 - prep slides\n\t2026-10-09 13:30 -\n"
             todo = self.put("todo.md", text)
-            self.assertEqual(self.tl("stop", "-", "--file", str(todo), stdin=text), text)
+            self.assertEqual(self.tl("stop", "-", "--file", str(todo), stdin=text),
+                             "- [ ] 2026-10-09 13:00 - prep slides\n\t2026-10-09 13:30 - 14:05 = 0h 35min\n")
+            text = "- [ ] 2026-10-09 13:00 - prep slides\n"
             other = self.put("A.md", text)
             self.assertEqual(self.tl("stop", "-", "--file", str(other), stdin=text),
                              "- [ ] 2026-10-09 13:00 - 14:05 = 1h 05min  prep slides\n")
@@ -781,8 +989,11 @@ def run_tests(verbose=False):
             self.assertTrue(lines[0].startswith("1  ~/tasks/A.md   "))
             self.assertEqual(lines[1], "     last: 2026-10-09 13:00 -")
             self.assertTrue(lines[2].startswith("2  ~/tasks/B.txt   "))
+            todo = self.put("todo.md", "- [ ] 2026-10-09 13:00 - call\n  2026-10-09 12:00 - 12:30\n")
+            os.utime(todo, (0, 3000))
+            self.assertEqual(self.tl("recent").splitlines()[1], "     last: 2026-10-09 12:00 - 12:30")
 
-        def test_td_inbox_left_alone(self):
+        def test_td_inbox_todos_left_alone(self):
             # td's inbox holds todos: a bullet that starts with a time there is not a running entry
             todo = "- [ ] 2026-10-09 13:00 - prep slides\n"
             self.put("todo.md", todo)
@@ -795,6 +1006,17 @@ def run_tests(verbose=False):
             inbox = self.put("inbox.md", todo)
             self.assertEqual(self.tl("stop", TD_FILE=str(inbox)), "stopped ~/tasks/todo.md:1")
             self.assertEqual(self.get("inbox.md"), todo)
+
+        def test_td_inbox_entries_are_entries(self):
+            # the lines under a todo in td's inbox can be entries; the inbox counts wherever it is
+            self.put("todo.md", "- [ ] prep slides\n  2026-10-09 13:30 -\n")
+            self.assertEqual(self.tl("where"), f"{self.tasks / 'todo.md'}:2")
+            self.assertEqual(self.tl("stop"), "stopped ~/tasks/todo.md:2")
+            self.assertEqual(self.get("todo.md"), "- [ ] prep slides\n  2026-10-09 13:30 - 14:05 = 0h 35min\n")
+            outside = self.home / "inbox.md"
+            outside.write_text("- [ ] call\n  2026-10-09 13:50 -\n")
+            self.assertEqual(self.tl("where", TD_FILE=str(outside)), f"{outside}:2")
+            self.assertEqual(self.tl("where"), "")  # not the inbox: not a task file
 
     class Out(Case):
         def test_latest_running_entry_gets_a_new_heading(self):
@@ -818,6 +1040,18 @@ def run_tests(verbose=False):
             self.put("A.md", "notes\n2026-10-09 13:00 -\n")
             self.assertEqual(self.out(), "stopped ~/tasks/A.md:2\n")
             self.assertEqual(self.get("A.md"), "notes\n2026-10-09 13:00 - 14:05 = 1h 05min\n")
+
+        def test_in_td_inbox_the_comment_is_the_note(self):
+            self.put("todo.md", "- [ ] prep slides\n  2026-10-09 13:30 -\n- [ ] call\n")
+            self.assertEqual(self.out("outline"), "stopped ~/tasks/todo.md:2  # outline\n")
+            self.assertEqual(self.get("todo.md"),
+                             "- [ ] prep slides\n  2026-10-09 13:30 - 14:05 = 0h 35min  outline\n- [ ] call\n")
+            self.put("todo.md", "- [ ] prep slides\n  2026-10-09 13:30 -  deck\n")
+            self.out("outline")
+            self.assertEqual(self.get("todo.md"), "- [ ] prep slides\n  2026-10-09 13:30 - 14:05 = 0h 35min  deck - outline\n")
+            self.put("todo.md", "- [ ] prep slides\n  2026-10-09 13:30 -\n")
+            self.out()
+            self.assertEqual(self.get("todo.md"), "- [ ] prep slides\n  2026-10-09 13:30 - 14:05 = 0h 35min\n")
 
         def test_entry_on_first_line_without_newline(self):
             self.put("A.md", "2026-10-09 13:00 -")
@@ -884,13 +1118,22 @@ def run_tests(verbose=False):
             self.assertEqual(self.edit(text, "here.md"), text)
             self.assertEqual(self.goto(), "here.md:7")
 
-        def test_inbox_passes_through(self):
+        def test_inbox_todos_pass_through(self):
             # td's inbox: a bullet shaped like an entry is a todo, never ended.
             inbox = self.put("todo.md", "")
             text = "- [ ] 2026-10-09 13:00 - call\n"
             self.visit(f"{inbox}:1")
             self.assertEqual(self.edit(text, "todo.md"), text)
             self.assertEqual(self.goto(), f"{inbox}:1")
+
+        def test_inbox_note_on_the_entrys_line(self):
+            # td's inbox: a heading would end the todo's section, so the note goes on the entry's line
+            inbox = self.put("todo.md", "")
+            self.assertEqual(self.edit("- [ ] prep\n  2026-10-09 13:00 -\n- [ ] call\n", "todo.md"),
+                             "- [ ] prep\n  2026-10-09 13:00 - 14:05 = 1h 05min  \n- [ ] call\n")
+            self.assertEqual(self.goto(), f"{inbox}:2")
+            self.assertEqual(self.edit("- [ ] prep\r\n  2026-10-09 13:00 -  deck\r\n", "todo.md"),
+                             "- [ ] prep\r\n  2026-10-09 13:00 - 14:05 = 1h 05min  deck - \r\n")
 
         def test_keeps_the_files_line_endings(self):
             b = self.put("B.md", "")
@@ -914,11 +1157,14 @@ def run_tests(verbose=False):
             a = self.put("A.md", "2026-10-09 13:00 -\n")
             b = self.put("B.md", "2026-10-09 10:00 - 11:00\n")
             c = self.put("C.md", "2026-10-09 13:30 -\n")  # a second one running: ended on disk
-            self.assertEqual(self.tl("running", "--from", str(b)), str(c))
+            self.assertEqual(self.tl("running", "--from", f"{b}:1"), str(c))
             self.assertEqual(self.tl("next", "--skip", str(c)), str(b))
             self.assertEqual(self.get("A.md"), "2026-10-09 13:00 - 14:05 = 1h 05min\n")
             self.assertEqual(self.get("C.md"), "2026-10-09 13:30 -\n")  # its buffer ends it
-            self.assertFalse((self.home / ".cache" / "tl" / "from").exists())
+            # kept, with its line, for tl start -
+            self.assertEqual((self.home / ".cache" / "tl" / "from").read_text(), f"{b}:1")
+            self.put("C.md", "2026-10-09 13:30 - 14:05\n")
+            self.assertEqual(self.tl("running", "--from", f"{b}:1"), str(b))  # nothing runs: stay
 
         def test_next_without_a_kept_buffer_stays(self):
             self.assertEqual(self.tl("next", "--skip", "nowhere.md"), "nowhere.md")
@@ -964,6 +1210,20 @@ def run_tests(verbose=False):
                              "2026-10-08 Thu   1h 30min\n"
                              "    A   1h 30min  Title A\n      - Second\n"
                              "-----\nTotal (2 days)  4h 40min\n")
+
+        def test_td_inbox_entries_under_their_todos(self):
+            self.put("todo.md", "- [ ] 2026-10-09 08:00 - 09:00 = 1h  not counted\n"
+                                "- [ ] prep slides\n  deck\n  2026-10-09 09:00 - 10:00\n"
+                                "  - [ ] print\n    2026-10-09 10:00 - 10:15\n"
+                                "- [A] call\n\t2026-10-09 13:00 -  bank\n"
+                                "# misc\n2026-10-09 11:00 - 11:30\n")  # under a heading, no todo: the heading
+            self.assertEqual(self.tl("summary", "1"),
+                             "Still running:\n"
+                             "  ~/tasks/todo.md:8  2026-10-09 13:00   1h 05min  call - bank\n\n"
+                             f"Time summary, last 1 day ({self.tasks})\n\n"
+                             "2026-10-09 Fri   1h 45min\n"
+                             "    todo   1h 45min\n      - prep slides\n      - print\n      - misc\n"
+                             "-----\nTotal (1 day)  1h 45min\n")
 
         def test_titles_leave_out_tds_state(self):
             self.put("A.md", "# [A] Title A\n2026-10-09 11:00 - 12:00\n## [x] Second\n2026-10-09 12:00 - 12:30\n")

@@ -420,7 +420,8 @@ is `++0d` (it would never move), so those lines are just marked done.
 | `td uninstall` | cancel the alarm, remove the shim |
 | `td tick` | scan, record future times, fire due ones, arm the alarm for the next one; `--alarm` (from the alarm) also releases the wake lock |
 | `td list [--state todo\|today\|active\|waiting\|done\|all] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout, and the options to `~/.cache/td/agenda-args` |
-| `td promote [--from PATH:LINE]` | stdin: a line. Create or reuse the bullet's task file (not from the agenda), then print where `space , P` goes and write it to `~/.cache/td/open` |
+| `td promote [--from PATH:LINE]` | stdin: a line. Create or reuse the bullet's task file (not from the agenda), then print where `space , P` goes and write it to `~/.cache/td/open`; for a todo.md bullet, keep its place and file in `~/.cache/td/cut` |
+| `td promote --cut - [--file PATH]` | `space , P`'s next step, on the whole buffer: in todo.md, move the kept bullet's section (its notes and time entries, up to the next todo) to the end of its file, without their shared indent; anywhere else, stdin back as it was |
 | `td jump [--from PATH:LINE]` | stdin: a line. Print where `space , p` goes and write it to `~/.cache/td/open` |
 | `td toggle S [--from PATH [--line N \| --row N]]` | toggle the line's state between `[ ]` and `S` (a name like `waiting` works too); stdin to stdout, or with `--line` the file on disk. On an agenda row, the task it shows changes instead, and the agenda is rebuilt; `--row`, the row's line in the agenda, tells which task a subtask row is under. Keeps the task's other copies in step (see [keys.md](keys.md#status-keys-in-other-files)); moves a repeating date instead of marking done |
 | `td set PATH LINE S` | set the checkbox at `PATH:LINE` to `S` |
@@ -462,6 +463,7 @@ each time.
 | `agenda-args` | the `td list` options the agenda was built with, reused when a change rebuilds it |
 | `stamp-col` | the cursor column for `space , s`, `+` and `-` |
 | `open` | where `space , p` / `P` go next |
+| `cut` | the todo.md bullet `space , P` was pressed on, and its file, for `td promote --cut` |
 | `td-alarm.jar` | the alarm helper `td install` builds from `bin/TdAlarm.java` |
 | `alarm.log` | failures to arm the alarm: `when  could not arm TIME: why` |
 | `tick.lock` | held while a tick runs |

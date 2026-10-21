@@ -101,8 +101,8 @@ k = "@:: ryk --send<ret>"
 
 ### Time log (tl) ###
 
-# Clock in: stop the running entry, start a new one at the end of the buffer (normal mode, at its end)
-i = [":open %sh{~/.config/helix/bin/tl running --from %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{~/.config/helix/bin/tl next --skip %{buffer_name}}", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/tl start", ":write!", "goto_line_end"]
+# Clock in: stop the running entry, start a new one at the end of the buffer (in todo.md, at the end of the todo you are on), normal mode at its end
+i = [":open %sh{~/.config/helix/bin/tl running --from %{buffer_name}:%{cursor_line}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{~/.config/helix/bin/tl next --skip %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl start - --file %{buffer_name}", "collapse_selection", ":write!", ":open %sh{cat ~/.cache/tl/goto && rm ~/.cache/tl/goto}", "goto_line_end"]
 # Go to the running time-log entry, in whichever task file it is
 I = [":open %sh{~/.config/helix/bin/tl where --from %{buffer_name}:%{cursor_line}}", ":echo %sh{~/.config/helix/bin/tl where --say}"]
 # Clock out: end the running entry and go to its task file, in insert mode on a "# " heading above it, to type what you did
@@ -142,8 +142,8 @@ a = [":open %sh{~/.config/helix/bin/td list >/dev/null; echo ~/.cache/td/agenda.
 A = [":open %sh{~/.config/helix/bin/td list --sort modified >/dev/null; echo ~/.cache/td/agenda.md}", ":reload", "fold_all"]
 # Done tasks in the agenda, most recently changed first
 D = [":open %sh{~/.config/helix/bin/td list --state done --sort modified >/dev/null; echo ~/.cache/td/agenda.md}", ":reload"]
-# Give the bullet its own file ~/tasks/<slug>.md, and open it
-P = [":update", "extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td promote --from %{buffer_name}:%{cursor_line}", "collapse_selection", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
+# Give the bullet its own file ~/tasks/<slug>.md, and open it; in todo.md, its notes and time entries move there
+P = ["extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td promote --from %{buffer_name}:%{cursor_line}", "select_all", ":pipe ~/.config/helix/bin/td promote --cut - --file %{buffer_name}", "collapse_selection", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
 # Open the bullet's own file; on the agenda, its line in todo.md
 p = ["extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}", "collapse_selection", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
 # Mark done (a ++/.+ repeater moves the date instead, but an hourly one); on the agenda, in todo.md
