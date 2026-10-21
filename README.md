@@ -48,6 +48,14 @@ touch other markdown. Its queries are in `runtime/queries/td` and
 keep td's own colours but lose markdown's inline ones (bold, italics, code,
 links).
 
+Open tasks are bold, and their dates (in backticks or brackets) are grey
+`ui.text.inactive`. Helix lays the date's style over the task's, so the
+date would be grey and bold. `themes/github_light.toml` is stock
+`github_light` with one change, `-bold` on `ui.text.inactive`, which takes
+that bold off (the `-` needs the fork). It applies only while `theme` is
+`github_light`: under another theme the dates are bold again, unless that
+theme gets the same override.
+
 ### Setting up the symlink
 
 Git keeps the link itself. It only needs Helix's runtime at `~/bin/runtime`,
