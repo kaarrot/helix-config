@@ -104,8 +104,8 @@ todo.md bullet: give the file a status on its first line,
 `# [ ] name` on the first line, and `space , N` on its agenda row renames
 it (file and heading). Every name, new or changed, goes through the same
 check: whitespace tidied, and a letter or digit needed for the file name. The agenda
-lists it under that status (`[x]`/`[!]` hide it), with the file's path so
-`space , p` opens it. A file with a todo.md bullet follows the bullet
+lists it under that status (`[x]`/`[!]` hide it), marked ` (*)` like a
+bullet with its own file, and `space , p` opens it. A file with a todo.md bullet follows the bullet
 instead. A file with neither is an orphan.
 
 ### Time-log entries and reminders
@@ -282,11 +282,11 @@ app).
 
 # WAITING
 
-- [W] renew passport  ~/tasks/passport.md:1:1
+- [W] renew passport (*)
 
 # ORPHANS
 
-- old-task  ~/tasks/old-task.md:1:1
+- old-task (*)
 ```
 
 - RESCHEDULE rows, after TODAY, are reminders that went off and still
@@ -329,8 +329,9 @@ app).
   take `"fold_all"` out of `a` and `A` there, and the agenda works
   unfolded.
 - File-task rows (listed under their status) and orphan rows (files with
-  no bullet and no status) end in `path:line:col`, so `space , p` or `gf`
-  opens the file.
+  no bullet and no status) end in ` (*)` too, with no path: `space , p`
+  finds the file, a file task's by its heading's title and state, an
+  orphan's by its name (`~/tasks/old-task.md`).
 - Order within a group: newest added first (`space , a`; when `td` first
   saw the task, in `~/.cache/td/added`), or most recently changed first
   (`space , A`; the bullet's line in `~/.cache/td/changed`, or its file's
@@ -492,6 +493,4 @@ each time.
 - **DST fall-back (02:30 twice)** — `fired` makes it fire once.
 - **A renamed bullet** — its task file becomes a file task or an orphan;
   rename the file to the new slug (or the bullet back) to relink.
-- **`gf` on an orphan row** — the path is at the end of the line: press
-  `gl` first, or use `space , p`.
 - **No tap action** — `termux-open` needs the Termux:API app.

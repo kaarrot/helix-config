@@ -49,7 +49,7 @@ Commands:
                        bullets whose slug has a dedicated file. Files with
                        no matching bullet are listed under their status if
                        their first line is `# [S] title` (done/ignored ones
-                       hidden), else in # ORPHANS. The options are kept
+                       hidden), else in # ORPHANS, " (*)" too, no path. The options are kept
                        in ~/.cache/td/agenda-args, so a rebuild after a
                        change keeps the order.
                        added: newest first-seen first. modified: most
@@ -192,8 +192,6 @@ REPEATER = re.compile(r"(?<!\S)(\+\+|\.\+)(0*[1-9]\d*)([hdwmy])(?!\w)")
 STAMP_BRACKET_TAIL = re.compile(r"\s*(?:" + REPEATER.pattern + r")?\s*\]")
 LINK = re.compile(r"\s*→\s*\S+\s*$")
 MARKER = re.compile(r"\s*\(\*\)\s*$")
-AGENDA_ROW = re.compile(
-    r"^(?P<rest>- \[[ xXyYaAwW!]\].*?)\s{2,}(?P<path>\S+?):(?P<line>\d+):\d+\s*$")
 H1 = re.compile(r"^#\s+(?:\[[ xXyYaAwW!]\]\s+)?(.+?)\s*$")
 H1_STATE = re.compile(r"^#\s+\[([ xXyYaAwW!])\]")
 SLUG_SPLIT = re.compile(r"[^a-z0-9]+")
@@ -1055,9 +1053,8 @@ def _subtask_at(raw, row):
             break
     if parent is None:
         return None
-    frow = AGENDA_ROW.match(parent.group(0))
-    path = (Path(frow["path"]).expanduser() if frow
-            else task_folder() / f"{slugify(MARKER.sub('', parent['text']))}.md")
+    path = (_row_file(parent.group(0))
+            or task_folder() / f"{slugify(MARKER.sub('', parent['text']))}.md")
     try:
         found = path.read_bytes().decode("utf-8", "surrogateescape").splitlines()
     except OSError:
@@ -1140,7 +1137,7 @@ def build_list(args):
 
     def row(b):
         if not _same_file(b.path, inbox):
-            return f"- [{b.state}] {b.text}  {tilde(b.path)}:1:1"
+            return _row(b, True)  # a file task
         return _row(b, slugify(b.text) in existing)
 
     def rows(b):
@@ -1183,8 +1180,7 @@ def build_list(args):
         out.append("# ORPHANS")
         out.append("")
         for slug in orphans:
-            path = task_folder() / f"{slug}.md"
-            out.append(f"- {slug}  {tilde(path)}:1:1")
+            out.append(f"- {slug} (*)")
         out.append("")
     return "\n".join(out).rstrip() + "\n"
 
@@ -1310,8 +1306,28 @@ def cmd_file(args):
     return 0
 
 
-ORPHAN_ROW = re.compile(r"^- (?P<slug>\S+)\s{2,}(?P<path>\S+?):\d+:\d+\s*$")
+ORPHAN_ROW = re.compile(r"^- (?P<slug>[^\s\[]\S*) \(\*\)\s*$")
 RowTask = namedtuple("RowTask", "kind path name state")
+
+
+def _row_file(raw):
+    """The file an agenda row shows as a task of its own -> its path, else None. A file-task
+    row (`- [S] title (*)`, no todo.md bullet): the `# [S] title` file with that title and state
+    (see _file_tasks). An orphan row (`- slug (*)`): ~/tasks/<slug>.md. A bullet row's ` (*)`
+    is its own file, found by the bullet's slug, so it is no file task: None."""
+    om = ORPHAN_ROW.match(raw)
+    if om:
+        path = task_folder() / f"{om['slug']}.md"
+        return path if path.is_file() else None
+    m = TASK.match(raw)
+    if not m or m["indent"] or not MARKER.search(m["text"]):
+        return None
+    title = MARKER.sub("", m["text"]).strip()
+    _, bullets = scan_inbox()
+    for f in _file_tasks({slugify(b.text) for b in bullets}):
+        if f.text == title and f.state == canon(m["state"]):
+            return f.path
+    return None
 
 
 def _agenda_task(raw):
@@ -1322,11 +1338,8 @@ def _agenda_task(raw):
     bm = TASK.match(raw)
     if bm and bm["indent"]:
         return None
-    frow = AGENDA_ROW.match(raw) or ORPHAN_ROW.match(raw)
-    if frow:
-        path = Path(frow["path"]).expanduser()
-        if not path.is_file():
-            return None
+    path = _row_file(raw)
+    if path:
         first = path.read_bytes().decode("utf-8", "surrogateescape").splitlines()[:1]
         hm = H1_PARTS.match(first[0]) if first else None
         return RowTask("file", task_folder() / path.name, hm["title"] if hm else path.stem, None)
@@ -1689,8 +1702,8 @@ def _goto(source, lineno, raw, want_file):
     line lineno of source, whose text is raw -> a path or PATH:LINE.
 
     An agenda subtask row (indented) goes to its bullet in its task's file
-    (see _subtask_at), or stays if it is not there now. A line ending in
-    `path:1:1` (file-task and orphan rows) goes to that file; another
+    (see _subtask_at), or stays if it is not there now. A file-task or
+    orphan row goes to its file (see _row_file); a line ending in
     `path:line:col` (RESCHEDULE rows) to that line and column. A
     bullet goes to its ~/tasks/<slug>.md, if it exists; but p
     on an agenda row goes to the row's line in the inbox, the source of
@@ -1701,12 +1714,13 @@ def _goto(source, lineno, raw, want_file):
     if bm and bm["indent"] and _same_file(source, LIST_PATH):
         found = _subtask_at(raw, lineno)
         return f"{found[0]}:{found[1]}:{found[2]}" if found else here
+    own = _row_file(raw) if _same_file(source, LIST_PATH) else None
+    if own:
+        return str(own)  # a file-task or orphan row: the file
     tail = re.search(r"(\S+):(\d+):(\d+)\s*$", raw)
     if tail:
         candidate = Path(tail[1]).expanduser()
         if candidate.is_file():
-            if f"{tail[2]}:{tail[3]}" == "1:1":
-                return str(candidate)  # a file-task or orphan row: the file
             # A RESCHEDULE row: its reminder's line, found again if the file
             # changed since the agenda was built.
             text = raw[:tail.start(1)].rstrip()
@@ -1958,7 +1972,7 @@ def _toggle_agenda_row(raw, state, row=None):
     rebuild the agenda. A bullet row: its todo.md line (the one with the
     same state and text, as space , p finds it), bumped instead if it
     repeats and state is done; its file's heading follows. A file-task row
-    (ending `path:1:1`): that file's `# [S] title` heading, or done moves
+    (see _row_file): that file's `# [S] title` heading, or done moves
     its repeating date instead (see _set_file_task). A subtask row
     (indented; row, its line in agenda.md, tells which task it is under):
     its line in the task's file, as the key does there (see cmd_toggle).
@@ -1970,11 +1984,9 @@ def _toggle_agenda_row(raw, state, row=None):
             cmd_toggle([state, "--from", str(found[0]), "--line", str(found[1])])
     elif bm:
         wanted = " " if canon(bm["state"]) == state else state
-        frow = AGENDA_ROW.match(raw)
-        if frow:
-            path = Path(frow["path"]).expanduser()
-            lines = (path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
-                     if path.is_file() else [])
+        path = _row_file(raw)
+        if path:
+            lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
             if lines and H1_PARTS.match(_split_eol(lines[0])[0]):
                 new_lines = _set_file_task(lines, 0, wanted)
                 if new_lines != lines:
@@ -2466,7 +2478,7 @@ def run_tests(verbose=False):
                           "  - [Y] test2\n"
                           "    - [ ] nested\n"
                           "- [ ] alpha\n", out)
-            self.assertIn("- [W] renew passport  ~/tasks/passport.md:1:1\n"
+            self.assertIn("- [W] renew passport (*)\n"
                           "  - [ ] photos\n", out)
             for word in ("test\n", "skip", "leftover", "09:00 -"):
                 self.assertNotIn(word, out)
@@ -2490,7 +2502,7 @@ def run_tests(verbose=False):
                           now_="2026-10-10 11:10")
             self.assertIn("# DONE\n\n- [x] alpha\n", out)
             self.assertIn("- [X] bravo", out)
-            self.assertIn("- [x] renew passport  ~/tasks/passport.md:1:1", out)
+            self.assertIn("- [x] renew passport (*)", out)
             for word in ("open", "ignored", "ORPHANS", "TODO"):
                 self.assertNotIn(word, out)
 
@@ -2500,12 +2512,12 @@ def run_tests(verbose=False):
             self.assertIn("- [ ] call jon", out)
             self.assertNotIn("todo.md:", out)
 
-        def test_orphan_rows_keep_path(self):
+        def test_orphan_rows_are_marked(self):
             self.put_inbox("- [ ] alpha\n")
             self.put_dedicated("costco-run.md", "# Costco run!\n")
             out = self.td("list")
             self.assertIn("# ORPHANS", out)
-            self.assertRegex(out, r"- costco-run\s+~/tasks/costco-run\.md:1:1")
+            self.assertIn("- costco-run (*)\n", out)
 
         def test_writes_cache_file(self):
             self.put_inbox("- [ ] call jon\n")
@@ -3588,15 +3600,16 @@ def run_tests(verbose=False):
             # The same subtask under two tasks: the row's line tells which task's file.
             self.put_inbox("- [ ] dom\n")
             dom = self.put_dedicated("dom.md", "# [ ] dom\n\n- [ ] call\n")
-            car = self.put_dedicated("car.md", "# [ ] car\n\n\n- [ ] call\n")
+            # A file task's file goes by its title, not its name.
+            car = self.put_dedicated("my-car.md", "# [ ] car\n\n\n- [ ] call\n")
             self.td("list")
             agenda = self.cache / "agenda.md"
             lines = agenda.read_text().splitlines()
             rows = [i for i, line in enumerate(lines, 1) if line == "  - [ ] call"]
             self.assertEqual(len(rows), 2)
-            want = {lines[r - 2].split("  ")[0]: r for r in rows}  # the task row above each
+            want = {lines[r - 2]: r for r in rows}  # the task row above each
             self.assertEqual(self.go("jump", agenda, want["- [ ] dom (*)"]), f"{dom}:3:7")
-            self.assertEqual(self.go("jump", agenda, want["- [ ] car"]), f"{car}:4:7")
+            self.assertEqual(self.go("jump", agenda, want["- [ ] car (*)"]), f"{car}:4:7")
 
         def test_jump_from_orphan_row(self):
             self.put_inbox("- [ ] alpha\n")
@@ -3698,11 +3711,11 @@ def run_tests(verbose=False):
             self.put_dedicated("day.md", "# Today\n- [ ] read\n")
             self.put_dedicated("late.md", "notes first\n# [W] heading on line 2\n")
             out = self.td("list")
-            passport = f"- [W] renew passport  ~/tasks/passport.md:1:1"
+            passport = f"- [W] renew passport (*)"
             self.assertIn(f"# WAITING\n\n{passport}", out)
-            self.assertIn(f"- [ ] garden plan  ~/tasks/garden.md:1:1", out)
+            self.assertIn(f"- [ ] garden plan (*)", out)
             self.assertIn(f"# ACTIVE\n\n", out)
-            self.assertIn(f"- [A] house move  ~/tasks/move.md:1:1", out)
+            self.assertIn(f"- [A] house move (*)", out)
             # Done/ignored files are hidden, and not orphans either.
             self.assertNotIn("old", out)
             self.assertNotIn("ignored", out)
@@ -3710,8 +3723,8 @@ def run_tests(verbose=False):
             self.assertEqual(out.count("tracked"), 1)
             self.assertIn("- [A] tracked (*)", out)
             orphans = out.split("# ORPHANS")[1]
-            self.assertIn("- day  ", orphans)
-            self.assertIn("- late  ", orphans)
+            self.assertIn("- day (*)\n", orphans)
+            self.assertIn("- late (*)\n", orphans)
             self.assertNotIn("passport", orphans)
             self.td("list", "--sort", "modified")  # file tasks sort too
 
@@ -3956,7 +3969,7 @@ def run_tests(verbose=False):
             self.td("list")
             agenda = self.toggle_row("A", "renew passport")
             self.assertEqual(d.read_bytes(), b"# [A] renew passport\r\n\r\nnotes\r\n")
-            self.assertIn("# ACTIVE\n\n- [A] renew passport  ~/tasks/passport.md:1:1", agenda)
+            self.assertIn("# ACTIVE\n\n- [A] renew passport (*)", agenda)
             self.assertEqual(self.inbox.read_text(), "- [ ] alpha\n")
 
         def test_repeating_file_task_row_moves_its_date(self):
@@ -3968,7 +3981,7 @@ def run_tests(verbose=False):
             agenda = self.toggle_row("x", "haircut")
             self.assertEqual(d.read_bytes(), b"# [ ] haircut\r\n2027-02-15 Mon 11:50 ++2m\r\n\r\n"
                                              b"- [ ] book 2026-12-01 Tue 09:00 ++1m\r\n")
-            self.assertIn("- [ ] haircut  ~/tasks/haircut.md:1:1", agenda)
+            self.assertIn("- [ ] haircut (*)", agenda)
             # The date on the heading line moves the same way.
             d = self.put_dedicated("rent.md", "# [Y] rent 2026-10-01 Thu 09:00 ++1m\n")
             self.td("list")
@@ -4028,7 +4041,7 @@ def run_tests(verbose=False):
             self.assertEqual(out.strip(), f"{path}:2")
             self.assertEqual(path.read_text(), "# [ ] Buy a car!\n\n")
             self.assertEqual(self.inbox.read_text(), "- [ ] alpha\n")  # todo.md untouched
-            self.assertIn("# TODO\n\n- [ ] alpha\n- [ ] Buy a car!  ~/tasks/buy-a-car.md:1:1",
+            self.assertIn("# TODO\n\n- [ ] alpha\n- [ ] Buy a car! (*)",
                           self.read_cache("agenda.md"))
 
         def test_name_from_the_prompt_needs_no_quoting(self):
@@ -4091,7 +4104,7 @@ def run_tests(verbose=False):
             self.assertFalse(old.exists())
             new = self.tasks / "renew-my-passport.md"
             self.assertEqual(new.read_bytes(), b"# [W] Renew my passport!\r\n\r\nnotes\r\n")
-            self.assertIn("- [W] Renew my passport!  ~/tasks/renew-my-passport.md:1:1",
+            self.assertIn("- [W] Renew my passport! (*)",
                           self.read_cache("agenda.md"))
 
         def test_keeps_its_place_in_the_agenda(self):
