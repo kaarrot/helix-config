@@ -101,8 +101,8 @@ k = "@:: ryk --send<ret>"
 
 ### Time log (tl) ###
 
-# Clock in: stop the running entry, start a new one at the end of the buffer
-i = [":open %sh{~/.config/helix/bin/tl running --from %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{~/.config/helix/bin/tl next --skip %{buffer_name}}", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/tl start", ":write!", "insert_at_line_end"]
+# Clock in: stop the running entry, start a new one at the end of the buffer (normal mode, at its end)
+i = [":open %sh{~/.config/helix/bin/tl running --from %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{~/.config/helix/bin/tl next --skip %{buffer_name}}", "goto_last_line", "open_below", "normal_mode", ":insert-output ~/.config/helix/bin/tl start", ":write!", "goto_line_end"]
 # Go to the running time-log entry, in whichever task file it is
 I = [":open %sh{~/.config/helix/bin/tl where --from %{buffer_name}:%{cursor_line}}", ":echo %sh{~/.config/helix/bin/tl where --say}"]
 # Clock out: end the running entry and go to its task file, in insert mode on a "# " heading above it, to type what you did
