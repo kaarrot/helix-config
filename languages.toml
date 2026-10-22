@@ -116,7 +116,7 @@ language-servers = ["polski-ls"]
 [[language]]
 name = "markdown"
 language-servers = ["harper-ls"]
-comment-token = ["-", "+", "*", "- [ ]", ">"]
+# comment-token = ["-", "+", "*", "- [ ]", ">"]
 
 # td task files: markdown plus td's task colours (runtime/queries/td, td.inline).
 # A language of its own keeps those colours out of other markdown (READMEs, PR
