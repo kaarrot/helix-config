@@ -23,8 +23,8 @@ the start/end times.
                         (space , u). F is the file the text came from: if it is td's inbox, its
                         todos are left alone.
     tl out "$BASH_EXECUTION_STRING" # done: TEXT
-                        end, at now, the latest-started entry still running (started in the last
-                        12h) in the task files on disk. TEXT becomes the "# heading" right above it,
+                        end, at now, the latest-started entry still running in the task files on
+                        disk. TEXT becomes the "# heading" right above it,
                         or is added to the one there (" - TEXT"); in td's inbox, the entry's note
                         (after the one there, " - TEXT"). Comment form, so TEXT needs no quoting
                         (space , O).
@@ -39,7 +39,7 @@ the start/end times.
                         heading would end the todo's section, the entry's line instead, readied for a
                         note: "  " after it, or " - " after the note there. If nothing runs in F,
                         the text passes through unchanged.
-    tl stop [--skip F]  end, at now, every entry still running that started less than 12h ago, in
+    tl stop [--skip F]  end, at now, every entry still running, in
                         the task files on disk except F; print where ("stopped ~/tasks/x.md:3").
     tl stop - [--file F]
                         the same for stdin, written to stdout byte for byte otherwise. F is the file
@@ -51,7 +51,7 @@ the start/end times.
     tl next [--skip R]  the same as `tl stop --skip R`, then print the file to clock in to: the one
                         `tl running` kept. R if there is none.
     tl where [--from F:LINE]
-                        print the latest entry running (started in the last 12h) as path:line, for
+                        print the latest entry running as path:line, for
                         `space , I` to go to; F:LINE if none runs.
     tl where --say      print "running since HH:MM", or "nothing running", for :echo %sh{}.
     tl recent [N]       numbered list of the N (default 9) most recently modified task files
@@ -110,7 +110,7 @@ FENCE = re.compile(r"^\s*(?:```|~~~|#\+(?:BEGIN|END)_)", re.I)
 
 Entry = namedtuple("Entry", "prefix date start end note")
 
-MAX_SANE = 12 * 60  # longer entries are reported as probable typos
+MAX_SANE = 12 * 60  # longer ended entries are reported as probable typos
 
 
 def now():
@@ -299,7 +299,7 @@ def cmd_close(args):
 
 
 def stop_lines(lines, t, inbox=False):
-    """End, in place at t, the running entries in lines started less than MAX_SANE ago -> their line
+    """End, in place at t, the running entries in lines (those already started) -> their line
     numbers. inbox: the lines are td's inbox, whose todos are left alone."""
     stopped = []
     for i, raw in enumerate(lines):
@@ -307,8 +307,8 @@ def stop_lines(lines, t, inbox=False):
         e, _ = parse_in(body, inbox)
         if e is None or e.end is not None:
             continue
-        if not timedelta(0) <= t - started_at(e) < timedelta(minutes=MAX_SANE):
-            continue  # older ones are left for `summary` to flag
+        if started_at(e) > t:
+            continue  # not started yet
         lines[i] = render(e, t.hour * 60 + t.minute) + raw[len(body):]
         stopped.append(i + 1)
     return stopped
@@ -333,7 +333,7 @@ def skip_arg(args):
 
 
 def stop_files(skip, t):
-    """End, at t, the running entries started less than MAX_SANE ago in the task files on disk,
+    """End, at t, the running entries in the task files on disk,
     but skip (its buffer gets `tl stop -`) -> where, as ["~/tasks/x.md:3", ...]."""
     _, files = recent_files(None)
     stopped = []
@@ -359,8 +359,8 @@ def opt(args, name):
 
 
 def entry_starts(t):
-    """-> ([(start, mtime, index, path)] of every entry already started, [the same] of those running,
-    started in the last 12h), over the task files on disk; index is the line's, from 0.
+    """-> ([(start, mtime, index, path)] of every entry already started, [the same] of those running),
+    over the task files on disk; index is the line's, from 0.
     The latest (max) is the one started last: entries start on the minute, so for a task switch within
     one, the file written last holds the newer one (the switch writes both: it ends one entry, then
     starts the other), and in one file the lower line."""
@@ -374,7 +374,7 @@ def entry_starts(t):
                 continue
             key = (started_at(e), mtime, i, str(path))
             starts.append(key)
-            if e.end is None and t - started_at(e) < timedelta(minutes=MAX_SANE):
+            if e.end is None:
                 running.append(key)
     return starts, running
 
@@ -409,8 +409,8 @@ def cmd_next(args):
 
 
 def cmd_where(args):
-    """tl where [--from F:LINE]: `space , I`. Print the latest entry running (started in the last
-    12h) as path:line, for :open %sh{}; F:LINE, where the key was pressed, if none runs. With
+    """tl where [--from F:LINE]: `space , I`. Print the latest entry running
+    as path:line, for :open %sh{}; F:LINE, where the key was pressed, if none runs. With
     --say, what the key echoes after: "running since HH:MM", or "nothing running"."""
     _, running = entry_starts(now())
     if "--say" in args:
@@ -441,7 +441,7 @@ def cmd_out(args):
     comment = done_text(" ".join(args))
     ended = end_latest(now(), comment)
     if not ended:
-        print("nothing running (older open entries are left for the summary to flag)")
+        print("nothing running")
         return 0
     path, i = ended
     print(f"stopped {tilde(path)}:{i + 1}" + (f"  # {comment}" if comment else ""))
@@ -467,7 +467,7 @@ def cmd_visit(args):
 
 def cmd_edit(args):
     """tl out --edit - [--file F]: the next step of `space , o`, on the whole buffer of F, the
-    file `tl out --visit` printed. End the latest entry running in it (started in the last 12h),
+    file `tl out --visit` printed. End the latest entry running in it,
     as `tl out` does, and get its heading ready for the note you type next: "# " on a new line
     right above the entry, or " - " added to the heading already there (an empty "# " stays as it
     is; see add_heading). Keep the heading's line in GOTO_PATH, as F:LINE. In td's inbox a heading
@@ -482,7 +482,7 @@ def cmd_edit(args):
     running = []
     for i, raw in enumerate(lines):
         e, _ = parse_in(raw.rstrip("\r\n"), inbox)
-        if e and e.end is None and timedelta(0) <= t - started_at(e) < timedelta(minutes=MAX_SANE):
+        if e and e.end is None and started_at(e) <= t:
             running.append((started_at(e), i))
     if running:
         _, i = max(running)  # started last; at the same minute, the lower line
@@ -501,16 +501,16 @@ def cmd_edit(args):
 
 
 def end_latest(t, comment=""):
-    """End, at t, the latest-started entry running (started in the last 12h) in the task files on
+    """End, at t, the latest-started entry running in the task files on
     disk, with comment as its heading (see add_heading), or in td's inbox as its note (after the
     note there, " - comment") -> (path, index of its line), or None when nothing runs."""
     _, files = recent_files(None)
-    running = []  # (start, path, index) of entries running, started in the last 12h
+    running = []  # (start, path, index) of entries running
     for path in files or []:
         inbox = is_td_inbox(path)
         for i, raw in enumerate(path.read_bytes().decode("utf-8", "surrogateescape").splitlines()):
             e, _ = parse_in(raw, inbox)
-            if e and e.end is None and timedelta(0) <= t - started_at(e) < timedelta(minutes=MAX_SANE):
+            if e and e.end is None and started_at(e) <= t:
                 running.append((started_at(e), str(path), i))
     if not running:
         return None
@@ -947,16 +947,17 @@ def run_tests(verbose=False):
         def test_stop_files(self):
             self.put("A.md", "# A\r\n2026-10-09 13:00 -  a\r\n")
             self.put("B.txt", "2026-10-09 13:30 -")  # no final newline
-            self.put("C.md", "2026-09-01 10:00 -  forgotten\n")  # over 12h ago: left for the summary
+            self.put("C.md", "2026-09-01 10:00 -  forgotten\n")  # however long ago, it is running
             self.put("E.log", "2026-10-09 13:00 -\n")  # not a task file
             skip = self.put("D.md", "2026-10-09 13:45 -\n")
             out = self.tl("stop", "--skip", str(skip))
             self.assertTrue(out.startswith("stopped "))
-            self.assertEqual(sorted(out[len("stopped "):].split(", ")), ["~/tasks/A.md:2", "~/tasks/B.txt:1"])
+            self.assertEqual(sorted(out[len("stopped "):].split(", ")),
+                             ["~/tasks/A.md:2", "~/tasks/B.txt:1", "~/tasks/C.md:1"])
             self.assertEqual(self.get("A.md"), "# A\r\n2026-10-09 13:00 - 14:05 = 1h 05min  a\r\n")
             self.assertEqual(self.get("B.txt"), "2026-10-09 13:30 - 14:05 = 0h 35min")
-            for name, text in [("C.md", "2026-09-01 10:00 -  forgotten\n"), ("E.log", "2026-10-09 13:00 -\n"),
-                               ("D.md", "2026-10-09 13:45 -\n")]:
+            self.assertEqual(self.get("C.md"), "2026-09-01 10:00 - 14:05 = 4h 05min  forgotten\n")  # the time of day
+            for name, text in [("E.log", "2026-10-09 13:00 -\n"), ("D.md", "2026-10-09 13:45 -\n")]:
                 self.assertEqual(self.get(name), text)
             self.assertEqual(self.tl("stop", "--skip", str(skip)), "")
 
@@ -999,7 +1000,7 @@ def run_tests(verbose=False):
             self.put("todo.md", todo)
             self.put("A.md", "2026-10-09 13:30 -\n")
             self.assertEqual(self.tl("stop"), "stopped ~/tasks/A.md:1")
-            self.assertEqual(self.out("x"), "nothing running (older open entries are left for the summary to flag)\n")
+            self.assertEqual(self.out("x"), "nothing running\n")
             self.assertNotIn("todo.md", self.tl("summary"))
             self.assertEqual(self.get("todo.md"), todo)
             # $TD_FILE moves the inbox; todo.md is then an ordinary task file
@@ -1059,9 +1060,9 @@ def run_tests(verbose=False):
             self.assertEqual(self.get("A.md"), "# top\n2026-10-09 13:00 - 14:05 = 1h 05min")
 
         def test_nothing_running(self):
-            text = "2026-09-01 10:00 -  forgotten\n2026-10-09 15:00 -  not started yet\n2026-10-09 09:00 - 10:00\n"
+            text = "2026-10-09 15:00 -  not started yet\n2026-10-09 09:00 - 10:00\n"
             self.put("A.md", text)
-            self.assertEqual(self.out("x"), "nothing running (older open entries are left for the summary to flag)\n")
+            self.assertEqual(self.out("x"), "nothing running\n")
             self.assertEqual(self.get("A.md"), text)
 
         @unittest.skipUnless(shutil.which("bash"), "needs bash")
@@ -1179,9 +1180,16 @@ def run_tests(verbose=False):
         def test_where_with_nothing_running_stays(self):
             self.put("todo.md", "- [ ] 2026-10-09 13:50 - prep slides\n")  # a todo, not an entry
             self.put("A.md", "2026-10-09 09:00 - 10:00\n2026-10-09 18:00 -\n")  # 18:00: future
-            self.put("C.md", "2026-10-08 01:00 -\n")  # running 37h: forgotten, not current
             self.assertEqual(self.tl("where", "--from", "here.md:7"), "here.md:7")
             self.assertEqual(self.tl("where", "--say"), "nothing running")
+
+        def test_an_entry_running_for_days_is_running(self):
+            self.put("C.md", "# C\n2026-10-06 01:00 -\n")
+            self.assertEqual(self.tl("where", "--say"), "running since 01:00")
+            self.assertEqual(self.tl("where", "--from", "here.md:7"), f"{self.tasks / 'C.md'}:2")
+            self.assertEqual(self.tl("out", "--visit", "--from", "here.md:7"), str(self.tasks / "C.md"))
+            self.assertEqual(self.out("x"), "stopped ~/tasks/C.md:2  # x\n")
+            self.assertEqual(self.get("C.md"), "# C - x\n2026-10-06 01:00 - 14:05 = 13h 05min\n")
 
         def test_same_minute_running_goes_by_the_file_written_last(self):
             a = self.put("A.md", "2026-10-09 14:00 - 14:05\n")
