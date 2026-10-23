@@ -130,7 +130,6 @@ grammar = "markdown"
 language-id = "markdown"
 file-types = [{ glob = "tasks/*.md" }, { glob = ".cache/td/agenda.md" }]
 language-servers = ["harper-ls"]
-comment-token = ["-", "+", "*", "- [ ]", ">"]
 block-comment-tokens = { start = "<!--", end = "-->" }
 indent = { tab-width = 2, unit = "  " }
 word-completion.trigger-length = 4
