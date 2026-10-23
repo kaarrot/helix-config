@@ -38,7 +38,7 @@ Commands:
                        `td stamp` wrote them as "now"), then arm one exact
                        Android alarm for the next one. `td list` and the
                        commands that change tasks on disk (toggle, set,
-                       rename, file, promote) start a tick in the
+                       rename, file, promote, day) start a tick in the
                        background when they finish, so the alarm follows.
                        Not stamp, shift and new: their keys don't save,
                        so the next tick sees their change.
@@ -79,6 +79,20 @@ Commands:
                        heading: notes, time entries, subtodos) moves to the
                        end of the bullet's file, without the indent its
                        lines share.
+  td day [--from PATH:LINE]
+                       stdin: a line, at PATH:LINE. The first step of `space ,
+                       ret`: a bullet's place is kept in ~/.cache/td/day, for
+                       --cut. Prints PATH:LINE and writes it to
+                       ~/.cache/td/open, where the key ends (the agenda, which
+                       is a view, keeps nothing).
+  td day --cut - [--file PATH]
+                       the next step, on the whole buffer of PATH: stdin to
+                       stdout, but if PATH holds the bullet `td day` kept, the
+                       bullet and its section (the lines under it, up to the
+                       next bullet not under it or a heading: notes, time
+                       entries, subtodos) move to the end of ~/tasks/day.md,
+                       without the indent the bullet has. The key then goes
+                       back to the line the bullet was on (~/.cache/td/open).
   td jump [--from PATH:LINE]
                        stdin: a line, at PATH:LINE. Prints where `space , p`
                        goes, and writes it to ~/.cache/td/open: a bullet's
@@ -237,6 +251,8 @@ OPEN_PATH = CACHE / "open"
 # The inbox bullet `space , P` was pressed on, as PATH:LINE, and the file it got: `td promote` keeps
 # them for `td promote --cut -`, the key's next step.
 CUT_PATH = CACHE / "cut"
+# The bullet `space , ret` was pressed on, as PATH:LINE: `td day` keeps it for `td day --cut -`.
+DAY_PATH = CACHE / "day"
 TICK_SHIM = Path("~/.config/helix/bin/td-tick").expanduser()
 TICK_LOCK = CACHE / "tick.lock"
 # The reminder alarm (see bin/TdAlarm.java): built by `td install`, run
@@ -1753,11 +1769,16 @@ def _goto(source, lineno, raw, want_file):
     return str(target) if target.is_file() else here
 
 
+def _set_open(target):
+    """Write target to ~/.cache/td/open, where the key :opens it."""
+    CACHE.mkdir(parents=True, exist_ok=True)
+    OPEN_PATH.write_text(target + "\n", encoding="utf-8", errors="surrogateescape")
+
+
 def _hand_back(target):
     """Print target and write it to ~/.cache/td/open: the p and P keys send
     the line with :pipe-to, which drops stdout, then :open that file."""
-    CACHE.mkdir(parents=True, exist_ok=True)
-    OPEN_PATH.write_text(target + "\n", encoding="utf-8", errors="surrogateescape")
+    _set_open(target)
     print(target)
 
 
@@ -1833,6 +1854,81 @@ def _cut_section(args):
                 text += "\n"
             path.write_bytes((old + text).encode("utf-8", "surrogateescape"))
             del lines[i + 1:end + 1]
+    sys.stdout.buffer.write("".join(lines).encode("utf-8", "surrogateescape"))
+    return 0
+
+
+def _dedent(raw, deep):
+    """raw without the first `deep` columns of its leading whitespace (a tab to 4, as tl's
+    width), or without all of it when it has less. A tab that reaches past `deep` leaves the
+    columns over as spaces."""
+    col = 0
+    for k, ch in enumerate(raw):
+        if col >= deep or ch not in " \t":
+            return raw[k:]
+        col = col + 1 if ch == " " else (col // 4 + 1) * 4
+        if col > deep:
+            return " " * (col - deep) + raw[k + 1:]
+    return ""
+
+
+def cmd_day(args):
+    """stdin: a line; --from PATH:LINE says where it is. The `space , ret` key pipes the line
+    from the buffer, so a bullet not saved yet counts. A bullet is kept in DAY_PATH for --cut
+    (see _cut_to_day); the agenda, a view, and day.md itself keep nothing. Prints PATH:LINE
+    and writes it to ~/.cache/td/open: where the key ends, back on its line."""
+    if "--cut" in args:
+        return _cut_to_day(args)
+    DAY_PATH.unlink(missing_ok=True)  # an old one, from a key that stopped half-way
+    source, lineno = _from_spec(args)
+    raw = sys.stdin.read().rstrip("\r\n")
+    if (lineno and TASK.match(raw) and not _same_file(source, LIST_PATH)
+            and not _same_file(source, task_folder() / "day.md")):
+        CACHE.mkdir(parents=True, exist_ok=True)
+        DAY_PATH.write_text(f"{source}:{lineno}\n", encoding="utf-8", errors="surrogateescape")
+    _hand_back(f"{source}:{lineno}" if source and lineno else str(source or td_file()))
+    return 0
+
+
+def _cut_to_day(args):
+    """td day --cut - [--file PATH]: the next step of `space , ret`, on the whole buffer of
+    PATH, after `td day` kept the bullet in DAY_PATH. If the bullet is still a bullet on that
+    line of PATH, move it and its section (the lines under it, up to the next bullet not under
+    it or a heading: notes, time entries, subtodos; see tl's section_end) out of the text and
+    to the end of ~/tasks/day.md, on disk, without the indent the bullet has, so a sub-bullet
+    comes out at the left. Blank lines at the end of day.md are dropped first, and a heading
+    last there gets one blank line under it. Else the text passes through. Either way
+    ~/.cache/td/open gets the line the key ends on: where the bullet was."""
+    lines = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").splitlines(keepends=True)
+    source = Path(args[args.index("--file") + 1]).expanduser() if "--file" in args[:-1] else None
+    try:
+        kept = DAY_PATH.read_text(encoding="utf-8", errors="surrogateescape").splitlines()[0]
+        DAY_PATH.unlink()
+    except (OSError, IndexError):
+        kept = ""
+    m = re.fullmatch(r"(.+):(\d+)", kept)
+    i = int(m[2]) - 1 if m and _same_file(Path(m[1]).expanduser(), source) else None
+    day = task_folder() / "day.md"
+    if (i is not None and 0 <= i < len(lines) and TASK.match(lines[i].rstrip("\r\n"))
+            and not _same_file(source, day)):
+        tl = _tl()
+        end = tl.section_end(lines, i)
+        deep = tl.width(lines[i])
+        moved = [_dedent(raw, deep) for raw in lines[i:end + 1]]
+        old = day.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True) if day.is_file() else []
+        while old and not old[-1].strip():
+            old.pop()
+        if old and not old[-1].endswith("\n"):
+            old[-1] += "\n"
+        if old and tl.HEADING_LINE.match(old[-1]):
+            old.append("\n")
+        if not moved[-1].endswith("\n"):
+            moved[-1] += "\n"
+        day.parent.mkdir(parents=True, exist_ok=True)
+        day.write_bytes("".join(old + moved).encode("utf-8", "surrogateescape"))
+        del lines[i:end + 1]
+    if i is not None:
+        _set_open(f"{source}:{max(1, min(i + 1, len(lines)))}")
     sys.stdout.buffer.write("".join(lines).encode("utf-8", "surrogateescape"))
     return 0
 
@@ -2303,7 +2399,7 @@ def cmd_uninstall():
 # after a reboot. Not `stamp`, `shift` and `new`: their keys don't save the
 # buffer, so a tick would only see the file as it was. Their change is
 # armed like a hand edit, once saved: by the next tick.
-RETICK = {"list", "file", "rename", "promote", "set", "toggle"}
+RETICK = {"list", "file", "rename", "promote", "day", "set", "toggle"}
 
 
 def main(argv):
@@ -2333,6 +2429,8 @@ def main(argv):
         return cmd_shift(rest)
     if cmd == "promote":
         return cmd_promote(rest)
+    if cmd == "day":
+        return cmd_day(rest)
     if cmd == "jump":
         return cmd_jump(rest)
     if cmd == "set":
@@ -3515,6 +3613,107 @@ def run_tests(verbose=False):
             self.assertEqual(sorted(x.name for x in self.tasks.iterdir()),
                              ["this-is-a-1hr-test.md"])
 
+    class Day(Case):
+        def press(self, text, lineno, path=None):
+            """space , ret on line lineno of the buffer text of path (the inbox): td day with the
+            line, then td day --cut - with the whole buffer -> the buffer after."""
+            path = path or self.inbox
+            line = text.splitlines(keepends=True)[lineno - 1]
+            self.td("day", "--from", f"{path}:{lineno}", stdin=line)
+            return self.td("day", "--cut", "-", "--file", str(path), stdin=text)
+
+        def day(self):
+            return (self.tasks / "day.md").read_text()
+
+        def test_moves_the_bullet_and_its_section_to_the_end_of_day_md(self):
+            self.put_dedicated("day.md", "# Today\n\n\n\n")
+            self.put_inbox("")
+            text = ("- [ ] alpha\n- [ ] prep slides\n  deck\n\n  2026-10-10 09:00 - 10:00\n"
+                    "  - [ ] print\n    2026-10-10 10:00 -\n\n- [ ] call\n")
+            # not saved yet: the buffer counts
+            self.assertEqual(self.press(text, 2), "- [ ] alpha\n\n- [ ] call\n")
+            self.assertEqual(self.day(), "# Today\n\n- [ ] prep slides\n  deck\n\n  2026-10-10 09:00 - 10:00\n"
+                                         "  - [ ] print\n    2026-10-10 10:00 -\n")
+            self.assertFalse((self.cache / "day").exists())
+            # the next one goes under it, with no blank line between
+            self.assertEqual(self.press("- [ ] call\n  bank\n", 1), "")
+            self.assertTrue(self.day().endswith("    2026-10-10 10:00 -\n- [ ] call\n  bank\n"))
+
+        def test_day_md_without_a_final_newline_or_missing(self):
+            self.put_inbox("")
+            self.assertFalse((self.tasks / "day.md").exists())
+            self.assertEqual(self.press("- [ ] a\n- [ ] b\n", 1), "- [ ] b\n")
+            self.assertEqual(self.day(), "- [ ] a\n")  # no heading made up
+            self.put_dedicated("day.md", "\n\n")  # empty, or only blank lines: no heading either
+            self.press("- [ ] b\n", 1)
+            self.assertEqual(self.day(), "- [ ] b\n")
+            self.put_dedicated("day.md", "# Today\n- [ ] x")
+            self.press("- [ ] b\n", 1)
+            self.assertEqual(self.day(), "# Today\n- [ ] x\n- [ ] b\n")
+
+        def test_notes_need_no_indent(self):
+            self.put_inbox("")
+            text = "- [ ] this is a test\n\nsomething to remember\n\n\n- [ ] Spanish\n"
+            self.assertEqual(self.press(text, 1), "\n\n- [ ] Spanish\n")
+            self.assertEqual(self.day(), "- [ ] this is a test\n\nsomething to remember\n")
+            # a heading ends the section too
+            self.assertEqual(self.press("- [ ] beta\nnote\n# later\nnot beta's\n", 1), "# later\nnot beta's\n")
+            self.assertTrue(self.day().endswith("- [ ] beta\nnote\n"))
+
+        def test_a_sub_bullet_comes_out_at_the_left_with_only_its_own_lines(self):
+            self.put_inbox("")
+            text = "- [ ] a\n  - [ ] b\n    note b\n\tmore b\nnote a\n"
+            self.assertEqual(self.press(text, 2), "- [ ] a\nnote a\n")
+            self.assertEqual(self.day(), "- [ ] b\n  note b\n  more b\n")
+
+        def test_works_in_any_task_file(self):
+            self.put_inbox("")
+            other = self.put_dedicated("project.md", "# [ ] project\n\n- [ ] step\n  detail\n- [ ] last\n")
+            text = other.read_text()
+            self.assertEqual(self.press(text, 3, other), "# [ ] project\n\n- [ ] last\n")
+            self.assertEqual(self.day(), "- [ ] step\n  detail\n")
+
+        def test_the_key_ends_on_the_line_the_bullet_was_on(self):
+            self.put_inbox("")
+            text = "- [ ] a\n- [ ] b\n  note\n- [ ] c\n"
+            self.press(text, 2)
+            self.assertEqual(self.read_cache("open"), f"{self.inbox}:2\n")
+            self.press("- [ ] a\n- [ ] c\n", 2)  # the last line: the one before
+            self.assertEqual(self.read_cache("open"), f"{self.inbox}:1\n")
+            self.press("- [ ] a\n", 1)  # nothing left
+            self.assertEqual(self.read_cache("open"), f"{self.inbox}:1\n")
+
+        def test_only_a_bullet_moves(self):
+            self.put_inbox("")
+            for text in ("# notes\n  under a heading, not a bullet\n", "plain\n- [ ] a\n"):
+                self.assertEqual(self.press(text, 1), text)
+                self.assertEqual(self.read_cache("open"), f"{self.inbox}:1\n")  # stays
+            self.assertFalse((self.tasks / "day.md").exists())
+            # the bullet is not on that line any more: nothing moves
+            self.td("day", "--from", f"{self.inbox}:1", stdin="- [ ] a\n")
+            self.assertEqual(self.td("day", "--cut", "-", "--file", str(self.inbox), stdin="x\n- [ ] a\n"),
+                             "x\n- [ ] a\n")
+            self.assertFalse((self.tasks / "day.md").exists())
+
+        def test_not_from_day_md_the_agenda_or_another_buffer(self):
+            self.put_inbox("")
+            day = self.put_dedicated("day.md", "# Today\n\n- [ ] a\n  note\n")
+            self.assertEqual(self.press(day.read_text(), 3, day), day.read_text())
+            self.assertEqual(self.day(), "# Today\n\n- [ ] a\n  note\n")
+            agenda = self.cache / "agenda.md"
+            agenda.parent.mkdir(parents=True, exist_ok=True)
+            agenda.write_text("TODO\n- [ ] a\n")
+            self.assertEqual(self.press(agenda.read_text(), 2, agenda), agenda.read_text())
+            self.assertEqual(self.read_cache("open"), f"{agenda}:2\n")
+            self.assertEqual(self.day(), "# Today\n\n- [ ] a\n  note\n")
+            # kept for one buffer, but the next step is in another: no move there
+            text = "- [ ] sub task\n  its note\n"
+            self.td("day", "--from", f"{self.inbox}:1", stdin="- [ ] sub task\n")
+            other = self.put_dedicated("project.md", "")
+            self.assertEqual(self.td("day", "--cut", "-", "--file", str(other), stdin=text), text)
+            self.assertFalse((self.cache / "day").exists())
+            self.assertEqual(self.day(), "# Today\n\n- [ ] a\n  note\n")
+
     class Marker(Case):
         def test_bullet_with_dedicated_file_gets_marker(self):
             self.put_inbox("- [A] refactor td parser\n- [ ] call jon\n")
@@ -4604,7 +4803,7 @@ def run_tests(verbose=False):
     loader = unittest.defaultTestLoader
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
                                for c in (Parse, List, Tick, New, Stamp, Next,
-                                         Promote, Marker, Reschedule, Jump, SetToggle,
+                                         Promote, Day, Marker, Reschedule, Jump, SetToggle,
                                          AgendaToggle, File, WeekView, Rename, Fire, Recurring,
                                          TlAgrees,
                                          KeysDoc))

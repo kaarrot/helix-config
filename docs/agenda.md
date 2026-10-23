@@ -217,8 +217,8 @@ wake lock you took yourself.
 
 A tick also runs in the background, 2 s after `td list` (the agenda keys)
 and the commands that change tasks on disk, or whose key saves next:
-`toggle`, `set`, `rename`, `file` and `promote`. So the alarm follows the
-status keys, `n`, `N` and `P`, and opening the agenda re-arms it after a
+`toggle`, `set`, `rename`, `file`, `promote` and `day`. So the alarm follows the
+status keys, `n`, `N`, `P` and `space , ret`, and opening the agenda re-arms it after a
 reboot. The 2 s let a key's trailing `:update` save the buffer first, and
 running in the background hides the helper's ~1.3 s start-up.
 
@@ -422,6 +422,8 @@ is `++0d` (it would never move), so those lines are just marked done.
 | `td list [--state todo\|today\|active\|waiting\|done\|all] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout, and the options to `~/.cache/td/agenda-args` |
 | `td promote [--from PATH:LINE]` | stdin: a line. Create or reuse the bullet's task file (not from the agenda), then print where `space , P` goes and write it to `~/.cache/td/open`; for a todo.md bullet, keep its place and file in `~/.cache/td/cut` |
 | `td promote --cut - [--file PATH]` | `space , P`'s next step, on the whole buffer: in todo.md, move the kept bullet's section (its notes and time entries, up to the next todo) to the end of its file, without their shared indent; anywhere else, stdin back as it was |
+| `td day [--from PATH:LINE]` | stdin: a line. `space , ret`'s first step: keep a bullet's place in `~/.cache/td/day` (not from the agenda or day.md), then print where the key ends, the same line, and write it to `~/.cache/td/open` |
+| `td day --cut - [--file PATH]` | `space , ret`'s next step, on the whole buffer: move the kept bullet and its section (its notes, time entries and sub-todos, up to the next todo not under it or a heading) to the end of `~/tasks/day.md`, without the bullet's indent, and write the line it was on to `~/.cache/td/open`; anywhere else, stdin back as it was |
 | `td jump [--from PATH:LINE]` | stdin: a line. Print where `space , p` goes and write it to `~/.cache/td/open` |
 | `td toggle S [--from PATH [--line N \| --row N]]` | toggle the line's state between `[ ]` and `S` (a name like `waiting` works too); stdin to stdout, or with `--line` the file on disk. On an agenda row, the task it shows changes instead, and the agenda is rebuilt; `--row`, the row's line in the agenda, tells which task a subtask row is under. Keeps the task's other copies in step (see [keys.md](keys.md#status-keys-in-other-files)); moves a repeating date instead of marking done |
 | `td set PATH LINE S` | set the checkbox at `PATH:LINE` to `S` |
@@ -462,8 +464,9 @@ each time.
 | `agenda.md` | the agenda, read-only |
 | `agenda-args` | the `td list` options the agenda was built with, reused when a change rebuilds it |
 | `stamp-col` | the cursor column for `space , s`, `+` and `-` |
-| `open` | where `space , p` / `P` go next |
+| `open` | where `space , p` / `P` / `ret` go next |
 | `cut` | the todo.md bullet `space , P` was pressed on, and its file, for `td promote --cut` |
+| `day` | the bullet `space , ret` was pressed on, as `PATH:LINE`, for `td day --cut` |
 | `td-alarm.jar` | the alarm helper `td install` builds from `bin/TdAlarm.java` |
 | `alarm.log` | failures to arm the alarm: `when  could not arm TIME: why` |
 | `tick.lock` | held while a tick runs |
