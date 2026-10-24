@@ -18,9 +18,10 @@ Two tiers of tasks:
   Inbox bullets fire while they are open: [ ]/[Y]/[A]/[W]. A dedicated
   file fires while its bullet is open; a file with no bullet, unless its
   first H1 is `# [x]`/`# [X]`/`# [!]`. A done or ignored subtask bullet in
-  a file doesn't fire. A timestamp with a ++/.+ repeater fires again every
-  N units (date + N, + 2N, ...) for as long as its task stays open; the
-  file isn't touched. The agenda marks a bullet with
+  a file doesn't fire. A reminder in a task file says its line and then the
+  file: `fugi [dom]`; one in the inbox says just the bullet. A timestamp
+  with a ++/.+ repeater fires again every N units (date + N, + 2N, ...) for
+  as long as its task stays open; the file isn't touched. The agenda marks a bullet with
   " (*)" when a dedicated file with the same slug exists.
 
       # refactor td parser
@@ -271,8 +272,10 @@ LEGEND = ("# td VIEW ONLY (status keys change the task itself; space , p "
           "goes there): [ ] todo  [Y] today  [A] active  [W] waiting")
 
 Bullet = namedtuple("Bullet", "path line raw indent state text hash")
-# raw: the line; col: where the stamp starts in it (0-based).
-Scheduled = namedtuple("Scheduled", "path line due title hash raw col")
+# raw: the line; col: where the stamp starts in it (0-based). title: the inbox
+# bullet's text, or a task file's heading; label: what the reminder says (see
+# scan_schedules).
+Scheduled = namedtuple("Scheduled", "path line due title hash raw col label")
 
 
 def now():
@@ -514,6 +517,14 @@ def scan_inbox():
     return p, out
 
 
+def _reminder_text(path, lineno, raw):
+    """The words of a stamped line, without its bullet, checkbox, heading
+    marks, link, marker, stamps or repeater."""
+    b = parse_bullet(path, lineno, raw)
+    return _identity_text(b.text if b else re.sub(
+        r"^\s*(?:[-*+]|#+)\s+(?:\[[ xXyYaAwW!]\]\s+)?", "", raw))
+
+
 def scan_schedules():
     """All schedule candidates across $TL_DIR files + inbox bullets.
 
@@ -568,8 +579,13 @@ def scan_schedules():
             if is_inbox:
                 line_title = (LINK.sub("", MARKER.sub("", b.text)).strip()
                               or f.stem)
+                label = line_title
             else:
                 line_title = file_title
+                # The line, then the file it is in: `fugi [dom]`. A line of
+                # nothing but its stamp has no words, so the heading stands.
+                words = _reminder_text(f, i, raw)
+                label = f"{words} [{f.stem}]" if words else file_title
             for ts in stamps:
                 try:
                     due = datetime.strptime(f"{ts[1]} {ts[2]}", "%Y-%m-%d %H:%M")
@@ -578,7 +594,7 @@ def scan_schedules():
                 iso = due.isoformat(timespec="minutes")
                 out.append(Scheduled(f, i, due, line_title,
                                      schedule_hash(str(f), iso, text),
-                                     raw, ts.start()))
+                                     raw, ts.start(), label))
     return out
 
 
@@ -930,7 +946,7 @@ def _tick():
             key = (s.hash, future.isoformat(timespec="minutes"))
             if key not in scheduled:
                 new_scheduled.append((t.isoformat(timespec="minutes"),
-                                      s.hash, key[1], s.title[:80]))
+                                      s.hash, key[1], s.label[:80]))
                 scheduled.add(key)
             if key not in fired:
                 upcoming.append(future - lead)
@@ -947,15 +963,15 @@ def _tick():
                 continue
         if key in fired:
             continue
-        if fire_notification("TODO", s.title, s.path):
-            _append_sidecar(FIRED_PATH, [(due_iso, s.hash, s.title[:80])])
+        if fire_notification("TODO", s.label, s.path):
+            _append_sidecar(FIRED_PATH, [(due_iso, s.hash, s.label[:80])])
             fired.add(key)
         else:
             failed = True
             if key not in scheduled:
                 # Past due by the next tick: only `scheduled` lets it retry.
                 new_scheduled.append((t.isoformat(timespec="minutes"),
-                                      s.hash, due_iso, s.title[:80]))
+                                      s.hash, due_iso, s.label[:80]))
                 scheduled.add(key)
     if new_scheduled:
         _append_sidecar(SCHEDULED_PATH, new_scheduled)
@@ -1280,7 +1296,7 @@ def cmd_next():
         print("")
         return 0
     nxt = min(future, key=lambda s: s.due)
-    print(f"{nxt.due.strftime('%Y-%m-%d %H:%M')}  {nxt.title}")
+    print(f"{nxt.due.strftime('%Y-%m-%d %H:%M')}  {nxt.label}")
     return 0
 
 
@@ -2875,6 +2891,28 @@ def run_tests(verbose=False):
             self.td("tick")
             out = self.td("tick", now_="2026-10-10 12:00")
             self.assertIn("stemmed", out)
+
+        def test_task_file_reminder_says_its_line_then_the_file(self):
+            # `fugi [dom]`, not just `dom`; stamp, checkbox and repeater out.
+            self.put_dedicated("dom.md", "# [ ] dom\n\n"
+                               "- [ ] fugi [2026-10-10 Sat 12:00 ++1w]\n"
+                               "flight 2026-10-10 Sat 12:00\n"
+                               "# heading 2026-10-10 12:00\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 12:00")
+            self.assertIn("TODO: fugi [dom]\n", out)
+            self.assertIn("TODO: flight [dom]\n", out)
+            self.assertIn("TODO: heading [dom]\n", out)
+            self.assertIn("fugi [dom]", self.read_cache("fired"))
+            self.assertEqual(self.td("next", now_="2026-10-10 11:00").strip(),
+                             "2026-10-10 12:00  fugi [dom]")
+
+        def test_inbox_reminder_has_no_file_suffix(self):
+            self.put_inbox("- [ ] call bank 2026-10-10 12:00\n")
+            self.td("tick")
+            out = self.td("tick", now_="2026-10-10 12:00")
+            self.assertIn("TODO: call bank", out)
+            self.assertNotIn("[todo]", out)
 
         def test_note_after_time_still_fires(self):
             # " - " after a stamp mid-line is text, not a tl entry.
