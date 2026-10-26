@@ -43,11 +43,6 @@ left = ["mode", "spinner", "completion-suggestions", "file-name", "read-only-ind
 C-4 = ":run-shell-command echo -n \"%(buffer_name)\" | xclip -selection clipboard"
 "}" = "goto_next_paragraph"
 "{" = "goto_prev_paragraph"
-# ryk rewind: poke the live --serve daemon (~10s of already-played PCM).
-# Same script Grok/Claude `/rr` will run. Needs ~/.local/bin/ryk-rewind and a
-# warm daemon (first `space+. k` / `ryk --send` auto-starts it). Helix stays
-# free because speak uses --send, not one-shot ryk. See kukuryku docs/rewind-plan.md.
-A-r = ":sh ryk-rewind"
 
 # td stamp keys (docs/keys.md): move the line's stamp, or a time-log entry's date/start/end, later / earlier by the part under
 # the cursor; on the week summary view (space , L), show the next / previous week
@@ -88,10 +83,9 @@ a = "@:: agy -c --dangerously-skip-permissions -p 2<gt>/dev/null<ret>"
 A = "@:: agy --dangerously-skip-permissions -p 2<gt>/dev/null<ret>"
 
 # ryk TTS: pipe the selection to the warm daemon (`ryk --send`), not one-shot
-# `ryk`. One-shot blocks Helix until playback ends, so Alt-r rewind cannot
-# fire while audio is playing. --send returns once queued; --serve owns pacat.
-# `/spk` in Grok/Claude already --sends into the same daemon, so Alt-r also
-# rewinds that speech if Helix can take the key.
+# `ryk`. One-shot blocks Helix until playback ends. --send returns once queued
+# and auto-starts the daemon; --serve owns pacat. Helix only runs the ryk binary:
+# pause / rewind / cancel live in ryk-ctl (ryk-skills), not bound here.
 k = "@:: ryk --send<ret>"
 
 # tl/td keys live under `space ,` (`space .` holds the AI tools). One line each
