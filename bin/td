@@ -90,8 +90,9 @@ Commands:
                        the next step, on the whole buffer of PATH: stdin to
                        stdout, but if PATH holds the bullet `td day` kept, the
                        bullet and its section (the lines under it, up to the
-                       next bullet not under it or a heading: notes, time
-                       entries, subtodos) move to the end of ~/tasks/day.md,
+                       next bullet not under it or a heading, one right above
+                       a time entry excepted: notes, time entries, subtodos)
+                       move to the end of ~/tasks/day.md,
                        without the indent the bullet has. The key then goes
                        back to the line the bullet was on (~/.cache/td/open).
   td jump [--from PATH:LINE]
@@ -3568,6 +3569,15 @@ def run_tests(verbose=False):
             self.assertEqual(self.press("- [ ] beta\nnote\n# later\nnot beta's\n", 1), "- [ ] beta\n# later\nnot beta's\n")
             self.assertEqual((self.tasks / "beta.md").read_text(), "# [ ] beta\n\nnote\n")
 
+        def test_cut_takes_a_heading_right_above_an_entry(self):
+            # `o`'s heading is in the section; one with text under it still ends it
+            self.put_inbox("")
+            text = ("- [ ] gamma\nnote\n# did x\n2026-10-10 09:00 - 10:00 = 1h 00min\n\n# later\nnot gamma's\n"
+                    "- [ ] call\n")
+            self.assertEqual(self.press(text, 1), "- [ ] gamma\n\n# later\nnot gamma's\n- [ ] call\n")
+            self.assertEqual((self.tasks / "gamma.md").read_text(),
+                             "# [ ] gamma\n\nnote\n# did x\n2026-10-10 09:00 - 10:00 = 1h 00min\n")
+
         def test_cut_with_nothing_under_it_passes_through(self):
             self.put_inbox("")
             for text in ("- [ ] alpha\n- [ ] beta\n", "- [ ] alpha\n\n\n- [ ] beta\n",
@@ -3676,6 +3686,12 @@ def run_tests(verbose=False):
             # the next one goes under it, with no blank line between
             self.assertEqual(self.press("- [ ] call\n  bank\n", 1), "")
             self.assertTrue(self.day().endswith("    2026-10-10 10:00 -\n- [ ] call\n  bank\n"))
+
+        def test_takes_a_heading_right_above_an_entry(self):
+            self.put_inbox("")
+            text = "- [ ] a\nnote\n# did x\n2026-10-10 09:00 - 10:00 = 1h 00min\n- [ ] b\n"
+            self.assertEqual(self.press(text, 1), "- [ ] b\n")
+            self.assertEqual(self.day(), "- [ ] a\nnote\n# did x\n2026-10-10 09:00 - 10:00 = 1h 00min\n")
 
         def test_day_md_without_a_final_newline_or_missing(self):
             self.put_inbox("")

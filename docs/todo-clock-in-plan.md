@@ -11,6 +11,15 @@ also ends at a line indented less than it. `space , i` lines the entry up
 with the todo. The rules below still say "block"; docs/keys.md has the
 current ones.
 
+Changed again (2026-10-26): `o` and `O` in todo.md put a `# heading` above
+the entry like anywhere else, not a note on the entry's line (the user
+tested the note and wanted the `#`). The `o` / `O` bullet in "Keys" and the
+`cmd_edit` / `end_latest` line under "Changes" describe the first design.
+A heading right above a time entry is then part of the todo's section
+(`heads_entry` in tl), so the `# heading` that `o`/`O` add doesn't cut the
+todo's section short: `i`, `P`, `Enter` and the summary (which lists such an
+entry under its heading) go by it.
+
 The workflow it is for: `space , q` adds a todo, you jot notes under it,
 track time on it, and later `space , P` turns it into a file task that takes
 the notes and the time along.
