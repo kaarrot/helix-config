@@ -162,8 +162,9 @@ tick, that is, it was added since then (the previous tick's time is in
 - Old dates in notes never fire: they were already past at the previous
   tick. On the very first tick nothing past fires.
 - A `space , s` stamp of "now" never fires: `td stamp` records the times it
-  writes that are already due (`~/.cache/td/stamped-now`), and the tick
-  skips them. Edit the stamp to a later time and it fires as usual.
+  writes that are already due, with their file (`~/.cache/td/stamped-now`), and
+  the tick skips them. Edit the stamp to a later time and it fires as usual; so
+  does another file's reminder for the same minute.
 - The price: a time typed by hand after it passed, but after the previous
   tick (a note like "called 10:05" written at 10:10), fires once.
 - A reboot clears the alarm. The next tick (opening the agenda is enough)
@@ -370,7 +371,7 @@ and keeps it `[ ]`; the rest of the line is kept.
 
 | repeater | new date |
 |----------|----------|
-| `++Nu` | **anchored**: old date + N units, repeated until it is after now. Missed cycles don't pile up, and "rent on the 1st" stays on the 1st however late you tick it |
+| `++Nu` | **anchored**: the first of old date + N, 2N, 3N... units that is after now. Missed cycles don't pile up, and "rent on the 1st" stays on the 1st however late you tick it |
 | `.+Nu` | **floating**: today + N units, at the stamp's time. "Water the plants about 2 weeks after I last did" |
 
 Until you mark it done, it reminds you again at each of its times: the
@@ -407,7 +408,10 @@ On the heading inside the file, `space , x` moves only a date on the
 heading line: the key gets that line alone, so with the date on another
 line it leaves the task as it is.
 
-Months clamp the day: Jan 31 + 1m → Feb 28/29; Feb 29 + 1y → Feb 28. The
+Months clamp the day: Jan 31 + 1m → Feb 28/29; Feb 29 + 1y → Feb 28. Each time
+is counted from the date in the file, as the reminders are, so a Jan 31 `++1m`
+done in March is due Mar 31; but once a done has moved it to Feb 28, the 28th
+is the date it counts from. The
 repeater must be a word of its own: `C++1d` and `++1days` are text, and so
 is `++0d` (it would never move), so those lines are just marked done.
 `space . x` ignores repeaters.
@@ -420,7 +424,7 @@ is `++0d` (it would never move), so those lines are just marked done.
 | `td uninstall` | cancel the alarm, remove the shim |
 | `td tick` | scan, record future times, fire due ones, arm the alarm for the next one; `--alarm` (from the alarm) also releases the wake lock |
 | `td list [--state todo\|today\|active\|waiting\|done\|all] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout, and the options to `~/.cache/td/agenda-args` |
-| `td promote [--from PATH:LINE]` | stdin: a line. Create or reuse the bullet's task file (not from the agenda), then print where `space , P` goes and write it to `~/.cache/td/open`; for a todo.md bullet, keep its place and file in `~/.cache/td/cut` |
+| `td promote [--from PATH:LINE]` | stdin: a line. Create or reuse the bullet's task file (not from the agenda; a task named `todo`, whose file would be the inbox or the file it is in, stays as it is), then print where `space , P` goes and write it to `~/.cache/td/open`; for a todo.md bullet, keep its place and file in `~/.cache/td/cut` |
 | `td promote --cut - [--file PATH]` | `space , P`'s next step, on the whole buffer: in todo.md, move the kept bullet's section (its notes and time entries, up to the next todo) to the end of its file, without their shared indent; anywhere else, stdin back as it was |
 | `td day [--from PATH:LINE]` | stdin: a line. `space , ret`'s first step: keep a bullet's place in `~/.cache/td/day` (not from the agenda or day.md), then print where the key ends, the same line, and write it to `~/.cache/td/open` |
 | `td day --cut - [--file PATH]` | `space , ret`'s next step, on the whole buffer: move the kept bullet and its section (its notes, time entries and sub-todos, up to the next todo not under it or a heading, one right above a time entry excepted) to the end of `~/tasks/day.md`, without the bullet's indent, and write the line it was on to `~/.cache/td/open`; anywhere else, stdin back as it was |
@@ -433,7 +437,7 @@ is `++0d` (it would never move), so those lines are just marked done.
 | `td rename --from SOURCE:LINE NAME` | rename the task on an agenda row, or the task whose file SOURCE is: a file task's file and heading, or a bullet's todo.md text and its file (`space , N`). Prints the path for `:move`: the agenda's own, or the renamed file's, which the key's buffer then follows |
 | `td rename --focus --from SOURCE:LINE` | the line `space , N` goes to first (`:goto`): `1` in a task file (its heading), else LINE |
 | `td file NAME` | create the file task `~/tasks/<slug>.md` headed `# [ ] NAME` (an existing file is left alone) and print the path to open (`space , n`) |
-| `td next` | print the next time due (for a status line) |
+| `td next` | print the next time due (for a status line); a repeating reminder counts at its next time |
 | `td fire PATH` | fire a file's notification now (testing) |
 | `td test [-v]` | run the tests |
 
@@ -459,7 +463,7 @@ each time.
 | `scheduled` | times a tick saw in the future: `first_seen \t key \t due \t text` |
 | `fired` | reminders fired: `due \t key \t text` |
 | `last-tick` | when the previous tick ran |
-| `stamped-now` | stamps `td stamp` wrote that were already due: `written \t due` |
+| `stamped-now` | stamps `td stamp` wrote that were already due: `written \t due \t file` |
 | `added` | when each task was first seen (the agenda's newest-added order) |
 | `changed` | when each bullet's line last changed (`space , A`'s order) |
 | `agenda.md` | the agenda, read-only |

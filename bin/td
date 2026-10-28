@@ -461,11 +461,22 @@ def _repeat_around(due, n, unit, t):
     return _add_period(due, k * n, unit), _add_period(due, (k + 1) * n, unit)
 
 
+def _repeater(s):
+    """-> (N, unit) when the reminder s (see scan_schedules) is the stamp a ++/.+ repeater follows,
+    so that it comes again, else None. tick and `td next` both go by this."""
+    found = _repeat_stamp(s.raw)
+    if found and found[0].start() == s.col:
+        return int(found[1].group(2)), found[1].group(3)
+    return None
+
+
 def _bump_recurring(raw, today):
     """If raw has both a SCHEDULE_TS and a ++/.+ repeater token, return
     raw with the date advanced. Otherwise return None.
 
-    ++Nu: new = old + N*unit, repeated until >today (anchored).
+    ++Nu: new = old + k*N*unit for the first k whose time is >today (anchored),
+          counted from old as _repeat_around does for tick, so a month end
+          clamps afresh (Jan 31 ++1m in March is Mar 31, not Mar 28).
     .+Nu: new = today + N*unit (floating).
     The stamp is the one the repeater follows (see _repeat_stamp).
     An hourly repeater is None too: it reminds every N hours until done
@@ -488,9 +499,8 @@ def _bump_recurring(raw, today):
                              second=0, microsecond=0)
         new = _add_period(base, n, unit)
     else:
-        new = _add_period(old, n, unit)
-        while new <= today:
-            new = _add_period(new, n, unit)
+        # One step even when old is still to come (max): done early moves it on.
+        new = _repeat_around(old, n, unit, max(today, old))[1]
     new_ts = f"{new.strftime('%Y-%m-%d %a %H:%M')}"
     return raw[:m_ts.start()] + new_ts + raw[m_ts.end():]
 
@@ -784,13 +794,22 @@ def save_last_tick(t):
                               encoding="utf-8")
 
 
+def _resolved(path):
+    """path as one string whichever way it is spelled, for comparing in a sidecar."""
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
+
 def load_stamped_now():
-    """-> set of due_iso that `td stamp` wrote when they were already now/past."""
+    """-> set of (file, due_iso) that `td stamp` wrote when they were already now/past; file is
+    "" when the stamp did not say where (a row from before files were kept counts for any)."""
     out = set()
     for line in _read_sidecar(STAMPED_NOW_PATH):
         parts = line.split("\t")
         if len(parts) >= 2:
-            out.add(parts[1])
+            out.add((parts[2] if len(parts) > 2 else "", parts[1]))
     return out
 
 
@@ -931,11 +950,12 @@ def _tick():
         `scheduled` sidecar), or
       • it was still to come at the previous tick — a reminder added
         between two ticks (or inside the TD_LEAD_MIN window) — and is not
-        a stamp `td stamp` wrote as "now" (the `stamped-now` sidecar).
+        a stamp `td stamp` wrote as "now" in that file (the `stamped-now`
+        sidecar), so another file's reminder at the same minute still fires.
     Rule:
       • new timestamp with due − lead > now  →  add (hash, iso) to `scheduled`
       • timestamp with due − lead ≤ now, ∉ fired, AND (∈ scheduled OR
-        (previous tick < due AND due ∉ stamped-now))  →  fire
+        (previous tick < due AND (file, due) ∉ stamped-now))  →  fire
 
     `tl` log entries are excluded by find_stamp(). Old past-date mentions
     never fire: they were already past at the previous tick. The cost of
@@ -965,10 +985,9 @@ def _tick():
     failed = False
     for s in items:
         # past: the time that may fire now; future: the next one to come.
-        found = _repeat_stamp(s.raw)
-        if found and found[0].start() == s.col:
-            past, future = _repeat_around(s.due, int(found[1].group(2)),
-                                          found[1].group(3), t + lead)
+        rep = _repeater(s)
+        if rep:
+            past, future = _repeat_around(s.due, *rep, t + lead)
         elif s.due - lead > t:
             past, future = None, s.due
         else:
@@ -990,7 +1009,9 @@ def _tick():
             # previous tick (an old date was already past then) and is not
             # a stamp of "now" from `td stamp`.
             if (last_tick is None or past <= last_tick
-                    or (past == s.due and due_iso in stamped_now)):
+                    or (past == s.due and any(
+                        (where, due_iso) in stamped_now
+                        for where in ("", _resolved(s.path))))):
                 continue
         if key in fired:
             continue
@@ -1336,14 +1357,24 @@ def _echo_if_agenda(args, data):
     return True
 
 
+def _next_due(s, t):
+    """The first time of reminder s at or after t, or None: a repeating reminder's next time
+    (see _repeat_around, as tick goes by), not just its stamp."""
+    rep = _repeater(s)
+    if not rep:
+        return s.due if s.due >= t else None
+    past, future = _repeat_around(s.due, *rep, t)
+    return past if past == t else future
+
+
 def cmd_next():
     t = now()
-    future = [s for s in scan_schedules() if s.due >= t]
+    future = [(due, s) for s in scan_schedules() if (due := _next_due(s, t))]
     if not future:
         print("")
         return 0
-    nxt = min(future, key=lambda s: s.due)
-    print(f"{nxt.due.strftime('%Y-%m-%d %H:%M')}  {nxt.label}")
+    due, nxt = min(future, key=lambda f: f[0])
+    print(f"{due.strftime('%Y-%m-%d %H:%M')}  {nxt.label}")
     return 0
 
 
@@ -1804,15 +1835,17 @@ def cmd_stamp(args):
             stamped = t.strftime("%Y-%m-%d %H:%M")
 
     sys.stdout.write(rewritten + eol)
-    _record_stamped_now(stamped, t)
+    _record_stamped_now(stamped, t, _from_arg(args))
     return 0
 
 
-def _record_stamped_now(stamped, t):
+def _record_stamped_now(stamped, t, source=None):
     """Remember a stamp this run wrote that was already due (a stamp of
     "now", or today at a time already past), so `td tick` doesn't take it
     for a reminder added between ticks. A stamp later moved to another time
-    no longer matches and fires as usual."""
+    no longer matches and fires as usual. It is remembered with the file it
+    is in (source, the --from of the key), so that it hides no other file's
+    reminder at that minute; without it, any file's."""
     if stamped is None:
         return
     try:
@@ -1823,7 +1856,8 @@ def _record_stamped_now(stamped, t):
         return
     try:
         _append_sidecar(STAMPED_NOW_PATH, [(t.isoformat(timespec="minutes"),
-                                            due.isoformat(timespec="minutes"))])
+                                            due.isoformat(timespec="minutes"),
+                                            _resolved(source) if source else "")])
     except OSError:
         pass
 
@@ -1883,7 +1917,7 @@ def _goto(source, lineno, raw, want_file):
                 return f"{inbox}:{hits[0] + 1}"
         return here
     target = dedicated_path(bm["text"])
-    return str(target) if target.is_file() else here
+    return str(target) if target.is_file() and not _is_own_file(target, source) else here
 
 
 def _set_open(target):
@@ -1899,6 +1933,17 @@ def _hand_back(target):
     print(target)
 
 
+def _is_own_file(dedicated, source):
+    """True when a bullet's dedicated file is the file the bullet is in, or the inbox: a task
+    named `todo` in ~/tasks/todo.md. Its notes would be written to the file the editor then
+    saves its shortened buffer over. `Todo` counts too: a task name is its slug in lowercase (see
+    slugify), and on a filesystem that ignores case Todo.md is todo.md."""
+    inbox = td_file()
+    return (_same_file(dedicated, source) or _same_file(dedicated, inbox)
+            or (dedicated.name.lower() == inbox.name.lower()
+                and _same_file(dedicated.parent, inbox.parent)))
+
+
 def cmd_promote(args):
     """stdin: a line; --from PATH:LINE says where it is. The `space , P` key
     pipes the line from the buffer, so a bullet not saved yet counts.
@@ -1911,7 +1956,9 @@ def cmd_promote(args):
     a second time and never move with a repeater bump. From the agenda
     nothing is written (it is a view). Then prints where P goes (see _goto):
     the dedicated file, or the line itself. A bullet in the inbox, and its
-    file, are kept in CUT_PATH for --cut (see _cut_section)."""
+    file, are kept in CUT_PATH for --cut (see _cut_section). A bullet whose
+    file would be the inbox or the file it is in (a task named `todo`) is not
+    promoted: nothing is written, and P stays on the line."""
     if "--cut" in args:
         return _cut_section(args)
     CUT_PATH.unlink(missing_ok=True)  # an old one, from a P that stopped half-way
@@ -1924,16 +1971,20 @@ def cmd_promote(args):
         folder = task_folder()
         folder.mkdir(parents=True, exist_ok=True)
         dedicated = _task_file(slug)
-        if not dedicated.exists():
-            dedicated.write_text(f"# [{canon(m['state'])}] {_identity_text(core)}\n\n",
-                                 encoding="utf-8", errors="surrogateescape")
+        if _is_own_file(dedicated, source):
+            print(f"td: a task named {core!r} would be its own file {dedicated}: not promoted",
+                  file=sys.stderr)
         else:
-            _retag_dedicated_h1(core, canon(m["state"]))
-        if lineno and _same_file(source, td_file()):
-            CACHE.mkdir(parents=True, exist_ok=True)
-            CUT_PATH.write_text(f"{source}:{lineno}\n{dedicated}\n", encoding="utf-8",
-                                errors="surrogateescape")
-        refresh_list()
+            if not dedicated.exists():
+                dedicated.write_text(f"# [{canon(m['state'])}] {_identity_text(core)}\n\n",
+                                     encoding="utf-8", errors="surrogateescape")
+            else:
+                _retag_dedicated_h1(core, canon(m["state"]))
+            if lineno and _same_file(source, td_file()):
+                CACHE.mkdir(parents=True, exist_ok=True)
+                CUT_PATH.write_text(f"{source}:{lineno}\n{dedicated}\n", encoding="utf-8",
+                                    errors="surrogateescape")
+            refresh_list()
     _hand_back(_goto(source, lineno, raw, want_file=True))
     return 0
 
@@ -3328,6 +3379,33 @@ def run_tests(verbose=False):
             out = self.td("tick", now_="2026-10-10 11:15")
             self.assertNotIn("would fire", out)
 
+        def test_stamp_of_now_hides_no_other_files_reminder(self):
+            # Stamped in the inbox at 11:07; another file's reminder for 11:07, typed by hand
+            # before the next tick, is a reminder still.
+            self.td("tick")
+            line = self.td("stamp", "--from", str(self.inbox), stdin="- [ ] did it\n",
+                           now_="2026-10-10 11:07")
+            self.put_inbox(line)
+            self.put_dedicated("call-back.md", "# call back\n2026-10-10 11:07\n")
+            out = self.td("tick", now_="2026-10-10 11:15")
+            self.assertEqual(out.count("would fire"), 1)
+            self.assertIn("call back", out)
+            self.assertEqual(self.read_cache("stamped-now").split("\t")[1:],
+                             ["2026-10-10T11:07", str(self.inbox.resolve()) + "\n"])
+
+        def test_stamp_of_now_in_its_file_doesnt_fire(self):
+            self.td("tick")
+            line = self.td("stamp", "--from", str(self.inbox), stdin="- [ ] did it\n",
+                           now_="2026-10-10 11:07")
+            self.put_inbox(line)
+            self.assertNotIn("would fire", self.td("tick", now_="2026-10-10 11:15"))
+            # The row is found through another spelling of the path.
+            self.td("tick", now_="2026-10-10 11:16")
+            line = self.td("stamp", "--from", f"{self.tasks}/../tasks/{self.inbox.name}",
+                           stdin="- [ ] again\n", now_="2026-10-10 11:17")
+            self.put_inbox(line)
+            self.assertNotIn("would fire", self.td("tick", now_="2026-10-10 11:20"))
+
         def test_stamp_moved_to_later_time_fires(self):
             # Stamp at 11:07, then the time edited to 11:10: a reminder.
             self.td("tick")
@@ -3608,6 +3686,27 @@ def run_tests(verbose=False):
             self.put_inbox("- [ ] no stamp\n")
             self.assertEqual(self.td("next").strip(), "")
 
+        def test_repeating_reminder_counts_at_its_next_time(self):
+            # Stamped at 09:00 ++1h: at 11:15 it comes at 12:00, as tick arms it.
+            self.put_inbox("- [ ] stretch 2026-10-10 Sat 09:00 ++1h\n")
+            self.assertTrue(self.td("next", now_="2026-10-10 11:15").startswith("2026-10-10 12:00  stretch"))
+            self.assertIn("would arm: 2026-10-10 12:00:00", self.td("tick", now_="2026-10-10 11:15"))
+            # A time that is now still counts, as a one-off's does.
+            self.assertTrue(self.td("next", now_="2026-10-10 12:00").startswith("2026-10-10 12:00  stretch"))
+            self.assertTrue(self.td("next", now_="2026-10-10 12:01").startswith("2026-10-10 13:00  stretch"))
+
+        def test_repeating_reminder_among_others(self):
+            self.put_inbox("- [ ] rent 2026-01-31 Sat 09:00 ++1m\n"
+                           "- [ ] later 2026-04-01 Wed 09:00\n")
+            self.put_dedicated("a.md", "# a\n2026-03-16 09:00\n")
+            # Months count from the stamp: the 31st comes back in March.
+            self.assertTrue(self.td("next", now_="2026-03-15 12:00").startswith("2026-03-16 09:00  a"))
+            self.assertTrue(self.td("next", now_="2026-03-16 10:00").startswith("2026-03-31 09:00  rent"))
+            # Done, it is no reminder; a repeater that is still to come is its stamp.
+            self.put_inbox("- [x] rent 2026-01-31 Sat 09:00 ++1m\n"
+                           "- [ ] later 2026-04-01 Wed 09:00 ++1d\n")
+            self.assertTrue(self.td("next", now_="2026-03-16 10:00").startswith("2026-04-01 09:00  later"))
+
     class Promote(Case):
         def test_creates_dedicated_file(self):
             inbox = self.put_inbox("- [ ] alpha\n- [ ] Costco run!\n")
@@ -3624,6 +3723,27 @@ def run_tests(verbose=False):
             out = self.td("promote", "--from", f"{inbox}:1", stdin="- [ ] new text\n")
             self.assertEqual(out.strip(), str(self.tasks / "new-text.md"))
             self.assertFalse((self.tasks / "old-text.md").exists())
+
+        def test_task_named_todo_is_not_promoted(self):
+            # Its file would be the inbox: the notes went there on disk, then the editor saved the
+            # shortened buffer over them.
+            text = "- [ ] alpha\n- [ ] todo\n  my notes\n"
+            inbox = self.put_inbox(text)
+            for name in ("todo", "Todo"):
+                line = f"- [ ] {name}\n"
+                out = self.td("promote", "--from", f"{inbox}:2", stdin=line)
+                self.assertEqual(out.strip(), f"{inbox}:2")
+                self.assertFalse((self.cache / "cut").exists())
+                self.assertEqual(self.td("promote", "--cut", "-", "--file", str(inbox), stdin=text), text)
+                self.assertEqual(inbox.read_text(), text)
+            self.assertEqual(sorted(p.name for p in self.tasks.iterdir()), ["todo.md"])
+
+        def test_task_named_like_its_own_file_is_not_promoted(self):
+            # A bullet in a task file whose slug is that file: its heading is left alone.
+            p = self.put_dedicated("loop.md", "# [ ] loop\n\n- [ ] loop\n")
+            out = self.td("promote", "--from", f"{p}:3", stdin="- [W] loop\n")
+            self.assertEqual(out.strip(), f"{p}:3")
+            self.assertEqual(p.read_text(), "# [ ] loop\n\n- [ ] loop\n")
 
         def test_non_bullet_stays(self):
             inbox = self.put_inbox("# notes\n")
@@ -4599,6 +4719,17 @@ def run_tests(verbose=False):
             self.assertEqual(weeks, ["2026-09-28", "2026-10-05", "2026-10-12"])
             self.assertEqual(self.td("shift", "+1", "--from", str(view), stdin=""), " ")
 
+        def test_steps_while_an_entry_is_running(self):
+            # "Still running:" is printed above the week's heading: the view still knows its week.
+            self.put_dedicated("a.md", "# A\n2026-10-06 09:00 - 10:30\n2026-10-10 10:00 -  now\n")
+            view = Path(self.td_tl("summary", "--week", "--view"))
+            self.assertTrue(view.read_text().startswith("Still running:\n"))
+            weeks = []
+            for n in ("-1", "-1", "+1", "+2"):
+                self.td("shift", n, "--from", str(view), stdin="x\n")
+                weeks.append(re.search(r"^Time summary, week (\S+)", view.read_text(), re.M)[1])
+            self.assertEqual(weeks, ["2026-09-28", "2026-09-21", "2026-09-28", "2026-10-12"])
+
         def td_tl(self, *args):
             e = {**os.environ, "HOME": str(self.home), "TL_DIR": str(self.tasks), "TL_NOW": NOW}
             tl = str(Path(TD).with_name("tl"))
@@ -4831,6 +4962,34 @@ def run_tests(verbose=False):
             out = _bump_recurring(
                 "- [ ] rent 2026-10-15 Thu 09:00 ++1m", today)
             self.assertIn("2026-11-15 Sun 09:00", out)
+
+        def test_bump_counts_months_from_the_stamp(self):
+            # Done in mid-March, Jan 31 ++1m is due Mar 31, as tick has it; stepping from Feb 28
+            # (Jan 31's clamp) landed on Mar 28.
+            out = _bump_recurring("- [ ] rent 2026-01-31 Sat 09:00 ++1m",
+                                  datetime(2026, 3, 15, 12, 0))
+            self.assertEqual(out, "- [ ] rent 2026-03-31 Tue 09:00 ++1m")
+            # Every other month, and a leap day by years.
+            out = _bump_recurring("- [ ] rent 2026-01-31 Sat 09:00 ++2m", datetime(2026, 6, 1))
+            self.assertEqual(out, "- [ ] rent 2026-07-31 Fri 09:00 ++2m")
+            out = _bump_recurring("- [ ] car 2024-02-29 Thu 09:00 ++1y", datetime(2027, 6, 1))
+            self.assertEqual(out, "- [ ] car 2028-02-29 Tue 09:00 ++1y")
+            # Done on the day, after its time or exactly at it: the next one.
+            for today in (datetime(2026, 1, 31, 9, 0), datetime(2026, 1, 31, 12, 0)):
+                out = _bump_recurring("- [ ] rent 2026-01-31 Sat 09:00 ++1m", today)
+                self.assertEqual(out, "- [ ] rent 2026-02-28 Sat 09:00 ++1m")
+
+        def test_bump_agrees_with_what_tick_arms(self):
+            # The stamp a done moves to is the time tick would have armed from the old one.
+            old = datetime(2026, 1, 31, 9, 0)
+            for today in (datetime(2026, 1, 31, 8, 0), datetime(2026, 2, 28, 9, 0),
+                          datetime(2026, 3, 15, 12, 0), datetime(2026, 3, 31, 9, 0),
+                          datetime(2026, 11, 1, 0, 0)):
+                out = _bump_recurring("- [ ] rent 2026-01-31 Sat 09:00 ++1m", today)
+                due = datetime.strptime(find_stamps(out)[0][1] + " " + find_stamps(out)[0][2],
+                                        "%Y-%m-%d %H:%M")
+                self.assertEqual(due, _repeat_around(old, 1, "m", max(today, old))[1], today)
+                self.assertGreater(due, today)
 
         def test_bump_floating_from_today(self):
             today = datetime(2026, 10, 10, 11, 0)

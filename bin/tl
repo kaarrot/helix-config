@@ -395,7 +395,8 @@ def entry_starts(t):
     over the task files on disk; index is the line's, from 0.
     The latest (max) is the one started last: entries start on the minute, so for a task switch within
     one, the file written last holds the newer one (the switch writes both: it ends one entry, then
-    starts the other), and in one file the lower line."""
+    starts the other), and in one file the later line. Whatever picks an entry from these (running, where,
+    out) takes this max, so that they agree."""
     _, files = recent_files(None)
     starts, running = [], []
     for path in files or []:
@@ -572,19 +573,12 @@ def cmd_edit(args):
 
 def end_latest(t, comment=""):
     """End, at t, the latest-started entry running in the task files on
-    disk, with comment as its heading (see add_heading) -> (path, index of its line), or None when
-    nothing runs."""
-    _, files = recent_files(None)
-    running = []  # (start, path, index) of entries running
-    for path in files or []:
-        inbox = is_td_inbox(path)
-        for i, raw in enumerate(path.read_bytes().decode("utf-8", "surrogateescape").splitlines()):
-            e, _ = parse_in(raw, inbox)
-            if e and e.end is None and started_at(e) <= t:
-                running.append((started_at(e), str(path), i))
+    disk (the one `tl where` finds: see entry_starts), with comment as its heading (see
+    add_heading) -> (path, index of its line), or None when nothing runs."""
+    _, running = entry_starts(t)
     if not running:
         return None
-    _, path, i = max(running)
+    _, _, i, path = max(running)
     path = Path(path)
     lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
     body = lines[i].rstrip("\r\n")
@@ -805,10 +799,11 @@ def write_view(text):
 
 def view_step(n):
     """For `+`/`-` on the summary view (td shift calls this): rewrite the view for the week n weeks
-    after the one it shows, read from its first line; this week's when it shows no week."""
+    after the one it shows, read from its "Time summary" line (not always the first: entries still
+    running are listed above it); this week's when it shows no week."""
     shown = None
     if VIEW_PATH.is_file():
-        m = re.match(r"Time summary, week (\d{4}-\d{2}-\d{2}) ", VIEW_PATH.read_text(errors="replace"))
+        m = re.search(r"^Time summary, week (\d{4}-\d{2}-\d{2}) ", VIEW_PATH.read_text(errors="replace"), re.M)
         shown = date.fromisoformat(m[1]) if m else None
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
@@ -1145,6 +1140,19 @@ def run_tests(verbose=False):
             self.assertEqual(self.out("did b"), "stopped ~/tasks/B.md:4  # did b\n")
             self.assertEqual(self.get("B.md"), "# B\nx\n# did b\n2026-10-09 13:30 - 14:05 = 0h 35min  note\nmore\n")
             self.assertEqual(self.get("A.md"), "# A\nnotes\n2026-10-09 13:00 -\n")
+
+        def test_ends_the_entry_where_finds_when_two_start_in_a_minute(self):
+            # Same minute: the file written last holds the later entry, whatever the file names.
+            a = self.put("A.md", "# A\n2026-10-09 13:30 -  a\n")
+            b = self.put("B.md", "# B\n2026-10-09 13:30 -  b\n")
+            os.utime(b, (1_700_000_000, 1_700_000_000))
+            os.utime(a, (1_700_000_100, 1_700_000_100))
+            self.assertEqual(self.tl("where"), f"{a}:2")
+            self.assertEqual(self.out("did a"), "stopped ~/tasks/A.md:2  # did a\n")
+            self.assertEqual(self.get("A.md"), "# A - did a\n2026-10-09 13:30 - 14:05 = 0h 35min  a\n")
+            self.assertEqual(self.get("B.md"), "# B\n2026-10-09 13:30 -  b\n")
+            # B was the older: now it is the one running.
+            self.assertEqual(self.tl("where"), f"{b}:2")
 
         def test_adds_to_the_heading_above(self):
             self.put("A.md", "# Title\n2026-10-09 13:00 -\n")
