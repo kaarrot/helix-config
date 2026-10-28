@@ -22,7 +22,9 @@ Two tiers of tasks:
   file: `fugi [dom]`; one in the inbox says just the bullet. A timestamp
   with a ++/.+ repeater fires again every N units (date + N, + 2N, ...) for
   as long as its task stays open; the file isn't touched. The agenda marks a bullet with
-  " (*)" when a dedicated file with the same slug exists.
+  " (*)" when a dedicated file with the same slug exists. A file is named
+  with the capitals of the text (`Fix iPhone bug` -> `Fix-iPhone-bug.md`);
+  the slug that links the two ignores them.
 
       # refactor td parser
       2026-11-01 10:00
@@ -224,7 +226,7 @@ LINK = re.compile(r"\s*→\s*\S+\s*$")
 MARKER = re.compile(r"\s*\(\*\)\s*$")
 H1 = re.compile(r"^#\s+(?:\[[ xXyYaAwW!]\]\s+)?(.+?)\s*$")
 H1_STATE = re.compile(r"^#\s+\[([ xXyYaAwW!])\]")
-SLUG_SPLIT = re.compile(r"[^a-z0-9]+")
+SLUG_SPLIT = re.compile(r"[^A-Za-z0-9]+")
 CHECKBOX = re.compile(r"- \[[ xXyYaAwW!]\]")
 
 STATE_NAMES = {" ": "todo", "Y": "today", "A": "active", "W": "waiting",
@@ -491,10 +493,17 @@ def _bump_recurring(raw, today):
     return raw[:m_ts.start()] + new_ts + raw[m_ts.end():]
 
 
+def file_slug(text):
+    """The name of a task's own file, capitals kept: `Fix iPhone bug!` -> `Fix-iPhone-bug`.
+    "" when the text has no letter or digit."""
+    return SLUG_SPLIT.sub("-", _identity_text(text)).strip("-")
+
+
 def slugify(text):
-    s = _identity_text(text).lower()
-    s = SLUG_SPLIT.sub("-", s).strip("-")
-    return s or "untitled"
+    """What links a bullet to its file: file_slug in lowercase, so `Pay rent` and `pay rent` are
+    one task, and a file made before capitals were kept is still found. A file stem is compared
+    to it as `stem.lower()`."""
+    return file_slug(text).lower() or "untitled"
 
 
 def parse_bullet(path, lineno, raw):
@@ -569,8 +578,8 @@ def scan_schedules():
                 file_state = sm[1] if sm else None
                 break
         if not is_inbox:
-            if f.stem in has_bullet:
-                if f.stem not in open_bullet:
+            if f.stem.lower() in has_bullet:
+                if f.stem.lower() not in open_bullet:
                     continue
             elif file_state in ("x", "X", "!"):
                 continue
@@ -1022,7 +1031,7 @@ def _file_tasks(skip_slugs):
         return []
     out = []
     for f in sorted(folder.glob("*.md")):
-        if f.stem in skip_slugs or _same_file(f, td_file()):
+        if f.stem.lower() in skip_slugs or _same_file(f, td_file()):
             continue
         try:
             with open(f, "rb") as fh:
@@ -1039,23 +1048,39 @@ def _file_tasks(skip_slugs):
 
 
 def _existing_slugs():
-    """-> set of file-stem slugs under $TL_DIR (dedicated files, inbox excluded)."""
+    """-> {slug: file stem} for the files under $TL_DIR (dedicated files, inbox excluded). The
+    slug is the stem in lowercase (see slugify), the stem as it is on disk."""
     folder = task_folder()
     if not folder.is_dir():
-        return set()
+        return {}
     try:
         inbox = td_file().resolve()
     except OSError:
         inbox = None
-    out = set()
-    for f in folder.glob("*.md"):
+    out = {}
+    for f in sorted(folder.glob("*.md")):
         try:
             if inbox and f.resolve() == inbox:
                 continue
         except OSError:
             continue
-        out.add(f.stem.lower())
+        out.setdefault(f.stem.lower(), f.stem)
     return out
+
+
+def _task_file(slug):
+    """~/tasks/<slug>.md for a slug that keeps its capitals (file_slug): the file already there
+    under that name, or under the same one in other capitals, else the path a new one gets."""
+    path = task_folder() / f"{slug}.md"
+    if path.exists():
+        return path
+    return task_folder() / f"{_existing_slugs().get(slug.lower(), slug)}.md"
+
+
+def dedicated_path(text):
+    """The own file of the task whose text is text: found whatever its capitals, else the new
+    file's path, named with the text's capitals."""
+    return _task_file(file_slug(text) or "untitled")
 
 
 def _subtasks(path):
@@ -1104,7 +1129,7 @@ def _subtask_at(raw, row):
     if parent is None:
         return None
     path = (_row_file(parent.group(0))
-            or task_folder() / f"{slugify(MARKER.sub('', parent['text']))}.md")
+            or dedicated_path(MARKER.sub("", parent["text"])))
     try:
         found = path.read_bytes().decode("utf-8", "surrogateescape").splitlines()
     except OSError:
@@ -1121,7 +1146,7 @@ def _modified_iso(b, changed):
     file was written, whichever is later."""
     iso = changed.get(b.hash, "0")
     # A file task (see _file_tasks) is its own file.
-    dedicated = (task_folder() / f"{slugify(b.text)}.md"
+    dedicated = (dedicated_path(b.text)
                  if _same_file(b.path, td_file()) else b.path)
     try:
         mtime = datetime.fromtimestamp(dedicated.stat().st_mtime)
@@ -1193,8 +1218,7 @@ def build_list(args):
     def rows(b):
         """b's row, then, if it is open, the open subtasks in its own file."""
         if _same_file(b.path, inbox):
-            own = (task_folder() / f"{slugify(b.text)}.md"
-                   if slugify(b.text) in existing else None)
+            own = dedicated_path(b.text) if slugify(b.text) in existing else None
         else:
             own = b.path  # a file task is its own file
         subs = _subtasks(own) if own and b.state in VISIBLE else []
@@ -1225,12 +1249,13 @@ def build_list(args):
             out.extend(rows(b))
         out.append("")
 
-    orphans = sorted(existing - bullet_slugs - {b.path.stem for b in file_tasks})
+    orphans = sorted((existing[k] for k in existing.keys() - bullet_slugs
+                      - {b.path.stem.lower() for b in file_tasks}), key=str.lower)
     if orphans and state == "all":
         out.append("# ORPHANS")
         out.append("")
-        for slug in orphans:
-            out.append(f"- {slug} (*)")
+        for stem in orphans:
+            out.append(f"- {stem} (*)")
         out.append("")
     return "\n".join(out).rstrip() + "\n"
 
@@ -1314,9 +1339,10 @@ NAME_MARK = '"$BASH_EXECUTION_STRING" # name:'
 def _task_name(text):
     """The check every task name goes through, whether it names a new file (space , n, P) or a
     new name for one (space , N): runs of whitespace become one space, and the name needs a
-    letter or digit to make a file name from. -> (name, slug), or None."""
+    letter or digit to make a file name from. -> (name, slug with its capitals: file_slug), or
+    None."""
     name = re.sub(r"\s+", " ", text).strip()
-    slug = SLUG_SPLIT.sub("-", _identity_text(name).lower()).strip("-")
+    slug = file_slug(name)
     return (name, slug) if slug else None
 
 
@@ -1346,7 +1372,7 @@ def cmd_file(args):
     name, slug = named
     folder = task_folder()
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{slug}.md"
+    path = _task_file(slug)
     if path.exists():
         print(path)
         return 0
@@ -1495,9 +1521,10 @@ def cmd_rename(args):
         sys.exit("td: no task name (type it after # name:)")
     name, slug = named
     new_file = task_folder() / f"{slug}.md"
+    taken = _task_file(slug)  # the same name in any capitals is taken too
     if task.kind == "file":
-        if new_file.exists() and not _same_file(task.path, new_file):
-            sys.exit(f"td: {tilde(new_file)} already exists")
+        if taken.exists() and not _same_file(task.path, taken):
+            sys.exit(f"td: {tilde(taken)} already exists")
         _set_heading_title(task.path, name)
         if not _same_file(task.path, new_file):
             task.path.rename(new_file)
@@ -1508,9 +1535,9 @@ def cmd_rename(args):
         if not hits:
             sys.exit("td: no such bullet in todo.md now (space , a rebuilds the agenda)")
         m = TASK.match(_split_eol(lines[hits[0]])[0])
-        old_file = task_folder() / f"{slugify(m['text'])}.md"
-        if new_file.exists() and not _same_file(old_file, new_file):
-            sys.exit(f"td: {tilde(new_file)} already exists")
+        old_file = dedicated_path(m["text"])
+        if taken.exists() and not _same_file(old_file, taken):
+            sys.exit(f"td: {tilde(taken)} already exists")
         text = _with_stamps_of(task.name, name) if in_file else name
         _write_line(inbox, lines, hits[0], f"{m['indent']}- [{m['state']}] {text}")
         if old_file.is_file():
@@ -1837,7 +1864,7 @@ def _goto(source, lineno, raw, want_file):
             if hits:
                 return f"{inbox}:{hits[0] + 1}"
         return here
-    target = task_folder() / f"{slugify(bm['text'])}.md"
+    target = dedicated_path(bm["text"])
     return str(target) if target.is_file() else here
 
 
@@ -1878,7 +1905,7 @@ def cmd_promote(args):
         core, slug = named
         folder = task_folder()
         folder.mkdir(parents=True, exist_ok=True)
-        dedicated = folder / f"{slug}.md"
+        dedicated = _task_file(slug)
         if not dedicated.exists():
             dedicated.write_text(f"# [{canon(m['state'])}] {_identity_text(core)}\n\n",
                                  encoding="utf-8", errors="surrogateescape")
@@ -2289,8 +2316,8 @@ def _in_task_folder(path):
 
 
 def _dedicated_slug(path):
-    """The slug when path is a dedicated file (~/tasks/<slug>.md other than
-    the inbox), else None."""
+    """The slug (see slugify) when path is a dedicated file (~/tasks/<slug>.md
+    other than the inbox), else None."""
     if path is None or path.suffix != ".md" or _same_file(path, td_file()):
         return None
     try:
@@ -2298,7 +2325,7 @@ def _dedicated_slug(path):
             return None
     except OSError:
         return None
-    return path.stem
+    return path.stem.lower()
 
 
 def _set_inbox_state(inbox, slug, new_state):
@@ -2370,7 +2397,7 @@ def _retag_dedicated_h1(text, new_state):
     core = LINK.sub("", MARKER.sub("", text)).strip()
     if not core:
         return False
-    path = task_folder() / f"{slugify(core)}.md"
+    path = dedicated_path(core)
     if not path.is_file():
         return False
     data = path.read_bytes().decode("utf-8", "surrogateescape")
@@ -3567,7 +3594,7 @@ def run_tests(verbose=False):
         def test_creates_dedicated_file(self):
             inbox = self.put_inbox("- [ ] alpha\n- [ ] Costco run!\n")
             out = self.td("promote", "--from", f"{inbox}:2", stdin="- [ ] Costco run!\n")
-            p = self.tasks / "costco-run.md"
+            p = self.tasks / "Costco-run.md"
             # Where P goes: printed, and in ~/.cache/td/open for the key.
             self.assertEqual(out, f"{p}\n")
             self.assertEqual(self.read_cache("open"), f"{p}\n")
@@ -3684,12 +3711,12 @@ def run_tests(verbose=False):
 
         def test_indented_bullet(self):
             self.td("promote", stdin="  - [A] refactor TD parser\n")
-            self.assertEqual((self.tasks / "refactor-td-parser.md").read_text(),
+            self.assertEqual((self.tasks / "refactor-TD-parser.md").read_text(),
                              "# [A] refactor TD parser\n\n")
 
         def test_heading_leaves_out_an_old_link(self):
             self.td("promote", stdin="- [Y] Pay rent → ~/tasks/pay-rent.md\n")
-            self.assertEqual((self.tasks / "pay-rent.md").read_text(), "# [Y] Pay rent\n\n")
+            self.assertEqual((self.tasks / "Pay-rent.md").read_text(), "# [Y] Pay rent\n\n")
 
         def test_promote_stamped_bullet_uses_unstamped_slug(self):
             self.td("promote",
@@ -3711,10 +3738,49 @@ def run_tests(verbose=False):
             # the file name keeps the brackets or the ++1h.
             self.td("promote",
                     stdin="- [ ] THis is a 1hr test [2026-10-16 Fri 09:50 ++1h]\n")
-            p = self.tasks / "this-is-a-1hr-test.md"
+            p = self.tasks / "THis-is-a-1hr-test.md"
             self.assertEqual(p.read_text(), "# [ ] THis is a 1hr test\n\n")
             self.assertEqual(sorted(x.name for x in self.tasks.iterdir()),
-                             ["this-is-a-1hr-test.md"])
+                             ["THis-is-a-1hr-test.md"])
+
+        def test_file_name_keeps_the_capitals(self):
+            for text, name in (("Fix iPhone bug!", "Fix-iPhone-bug.md"),
+                               ("buy MilkShake", "buy-MilkShake.md"),
+                               ("CALL Bank", "CALL-Bank.md")):
+                self.td("promote", stdin=f"- [ ] {text}\n")
+                self.assertTrue((self.tasks / name).is_file(), name)
+                self.assertEqual((self.tasks / name).read_text(), f"# [ ] {text}\n\n")
+
+        def test_capitals_only_differ_is_one_task_and_one_file(self):
+            # Written in other capitals the bullet is the same task, so it finds the file
+            # that is there, whatever its capitals, instead of making a second one.
+            lower = self.put_dedicated("pay-rent.md", "# pay rent\n\nnotes\n")
+            self.td("promote", stdin="- [A] Pay Rent\n")
+            self.assertEqual(sorted(x.name for x in self.tasks.iterdir()), ["pay-rent.md"])
+            self.assertEqual(lower.read_text(), "# [A] pay rent\n\nnotes\n")
+            made = self.td("promote", stdin="- [ ] Soccer Notes\n")
+            self.td("promote", stdin="- [ ] soccer notes\n")
+            self.assertEqual(sorted(x.name for x in self.tasks.iterdir()),
+                             ["Soccer-Notes.md", "pay-rent.md"])
+            self.assertEqual(made.strip(), str(self.tasks / "Soccer-Notes.md"))
+
+        def test_a_file_in_capitals_is_the_bullets_file(self):
+            # The bullet is found from its file, the agenda marks it (*), the file's
+            # reminders follow the bullet's state, and it is not listed as an orphan.
+            self.put_inbox("- [x] Fix iPhone bug\n- [ ] alpha\n")
+            self.put_dedicated("Fix-iPhone-bug.md", "# Fix iPhone bug\n2026-10-10 12:00\n")
+            agenda = self.td("list")
+            self.assertNotIn("ORPHANS", agenda)
+            self.assertNotIn("Fix-iPhone-bug", agenda)
+            self.assertEqual(self.td("next").strip(), "")  # done bullet: its file stays quiet
+            self.put_inbox("- [ ] Fix iPhone bug\n- [ ] alpha\n")
+            self.assertIn("- [ ] Fix iPhone bug (*)", self.td("list"))
+            self.assertIn("2026-10-10 12:00", self.td("next"))
+
+        def test_orphan_row_names_the_file_as_it_is(self):
+            self.put_inbox("- [ ] alpha\n")
+            self.put_dedicated("Old-Notes.md", "just notes\n")
+            self.assertIn("# ORPHANS\n\n- Old-Notes (*)\n", self.td("list"))
 
     class Day(Case):
         def press(self, text, lineno, path=None):
@@ -4473,7 +4539,7 @@ def run_tests(verbose=False):
         def test_creates_a_file_task(self):
             self.put_inbox("- [ ] alpha\n")
             out = self.td("file", "Buy a car!")
-            path = self.tasks / "buy-a-car.md"
+            path = self.tasks / "Buy-a-car.md"
             self.assertEqual(out.strip(), f"{path}:2")
             self.assertEqual(path.read_text(), "# [ ] Buy a car!\n\n")
             self.assertEqual(self.inbox.read_text(), "- [ ] alpha\n")  # todo.md untouched
@@ -4487,7 +4553,7 @@ def run_tests(verbose=False):
                     f'"$BASH_EXECUTION_STRING" # name: {name}')
             e = {**os.environ, "HOME": str(self.home), "TL_DIR": str(self.tasks)}
             out = sp.run(["bash", "-c", line], env=e, capture_output=True, check=True).stdout.decode()
-            path = self.tasks / "it-s-part-2-q-home-id-done.md"
+            path = self.tasks / "it-s-part-2-q-HOME-id-done.md"
             self.assertEqual(out.strip(), f"{path}:2")
             self.assertEqual(path.read_text(), f"# [ ] {name}\n\n")
 
@@ -4538,7 +4604,7 @@ def run_tests(verbose=False):
             out, agenda, lineno = self.rename("renew passport", "Renew  my passport!")
             self.assertEqual(out, f"{agenda}:{lineno}")
             self.assertFalse(old.exists())
-            new = self.tasks / "renew-my-passport.md"
+            new = self.tasks / "Renew-my-passport.md"
             self.assertEqual(new.read_bytes(), b"# [W] Renew my passport!\r\n\r\nnotes\r\n")
             self.assertIn("- [W] Renew my passport! (*)",
                           self.read_cache("agenda.md"))
@@ -4586,7 +4652,18 @@ def run_tests(verbose=False):
             self.put_inbox("- [ ] alpha\n")
             self.put_dedicated("old-notes.md", "just notes\n")
             self.rename("- old-notes", "Old notes!")
-            self.assertEqual((self.tasks / "old-notes.md").read_text(), "# Old notes!\njust notes\n")
+            self.assertFalse((self.tasks / "old-notes.md").exists())
+            self.assertEqual((self.tasks / "Old-notes.md").read_text(), "# Old notes!\njust notes\n")
+
+        def test_a_new_name_in_other_capitals_is_taken(self):
+            self.put_inbox("- [ ] alpha\n")
+            self.put_dedicated("Old-Notes.md", "# Old Notes\n")
+            self.put_dedicated("other.md", "# other\n")
+            r = self.td_run("rename", "--from", f"{self.tasks / 'other.md'}:1",
+                            '... "$BASH_EXECUTION_STRING" # name: old notes')
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("already exists", r.stderr.decode())
+            self.assertTrue((self.tasks / "other.md").exists())
 
         def test_refused_without_changes(self):
             p = self.put_inbox("- [ ] alpha\n- [ ] bravo\n")
@@ -4613,7 +4690,7 @@ def run_tests(verbose=False):
             self.put_inbox("- [ ] alpha\n")
             old = self.put_dedicated("passport.md", "# [W] renew passport\r\n\r\nnotes\r\n")
             out = self.rename_in(old, 1, "Renew  my passport!")
-            new = self.tasks / "renew-my-passport.md"
+            new = self.tasks / "Renew-my-passport.md"
             self.assertEqual(out, str(new))
             self.assertFalse(old.exists())
             self.assertEqual(new.read_bytes(), b"# [W] Renew my passport!\r\n\r\nnotes\r\n")
