@@ -101,8 +101,8 @@ file task or an orphan (below), and `space , p` no longer finds it.
 A long-lived or clearly defined task can live in its file alone, with no
 todo.md bullet: give the file a status on its first line,
 `# [W] renew passport`. `space , n` creates one from a name you type, with
-`# [ ] name` on the first line, and `space , N` on its agenda row renames
-it (file and heading). Every name, new or changed, goes through the same
+`# [ ] name` on the first line, and `space , N` on its agenda row, or inside
+the file, renames it (file and heading together). Every name, new or changed, goes through the same
 check: whitespace tidied, and a letter or digit needed for the file name. The agenda
 lists it under that status (`[x]`/`[!]` hide it), marked ` (*)` like a
 bullet with its own file, and `space , p` opens it. A file with a todo.md bullet follows the bullet
@@ -430,7 +430,8 @@ is `++0d` (it would never move), so those lines are just marked done.
 | `td stamp [--restamp] [--col N]` | stdin: a line. Add a stamp, or move its date to today keeping the time; `--restamp`, or `--col N` on the stamp, only fixes the weekday |
 | `td shift +N\|-N [--col N]` | stdin: a line. Move its stamp by the part under column N (the day without `--col`); on a time-log line, its date, start or end time, in `tl`'s format, duration redone; on the week summary view, the week. With `--col`, save the part's new column to `~/.cache/td/stamp-col` |
 | `td new [--state S]` | print `- [S] ` (`space , q` inserts it) |
-| `td rename --from AGENDA:LINE NAME` | rename the task on an agenda row: a file task's file and heading, or a bullet's todo.md text and its file (`space , N`) |
+| `td rename --from SOURCE:LINE NAME` | rename the task on an agenda row, or the task whose file SOURCE is: a file task's file and heading, or a bullet's todo.md text and its file (`space , N`) |
+| `td rename --focus --from SOURCE:LINE` | where `space , N` goes first: `PATH:1` in a task file (its heading), else SOURCE:LINE |
 | `td file NAME` | create the file task `~/tasks/<slug>.md` headed `# [ ] NAME` (an existing file is left alone) and print the path to open (`space , n`) |
 | `td next` | print the next time due (for a status line) |
 | `td fire PATH` | fire a file's notification now (testing) |

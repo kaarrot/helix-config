@@ -138,6 +138,11 @@ Commands:
                        name, checked as td file checks it: a file task's
                        (or orphan's) file and first-line heading, or a
                        bullet's todo.md text and its own file, if any.
+                       Inside a task's own file (--from FILE:LINE): the same
+                       for that file, and the new path is printed to open.
+  td rename --focus --from SOURCE:LINE
+                       print where space , N goes first: PATH:1 in a task file
+                       (the heading, which the prompt copies), else SOURCE:LINE.
   td stamp [--restamp] [--col N]
                        stdin: a line. If it contains a date (the one at
                        column N with --col N, else the first), replace (default)
@@ -1416,9 +1421,48 @@ def _set_heading_title(path, title):
                          + "".join(lines).encode("utf-8", "surrogateescape"))
 
 
+def _file_buffer_task(path):
+    """The task a dedicated file (~/tasks/<slug>.md) is, for a rename from inside it -> RowTask:
+    kind "bullet" when todo.md has a bullet with its slug (name: the bullet's text; an open
+    bullet before a done one), else kind "file" (name: its first-line heading's title, else its
+    file name). None for todo.md, the agenda, a file outside ~/tasks, or no file."""
+    slug = _dedicated_slug(path)
+    if slug is None or not path.is_file():
+        return None
+    bullets = [b for b in scan_inbox()[1] if slugify(b.text) == slug]
+    if bullets:
+        b = next((b for b in bullets if b.state in VISIBLE), bullets[0])
+        return RowTask("bullet", None, MARKER.sub("", b.text).strip(), b.state)
+    first = path.read_bytes().decode("utf-8", "surrogateescape").splitlines()[:1]
+    hm = H1_PARTS.match(first[0]) if first else None
+    return RowTask("file", task_folder() / path.name, hm["title"] if hm else path.stem, None)
+
+
+def _with_stamps_of(old, name):
+    """name followed by the stamps, repeater and link of the bullet text old. Renaming from inside
+    the task's file the prompt shows the heading's title, which has none of them, and they are
+    the bullet's reminders: leaving them out would drop the reminder with the old name."""
+    s = MARKER.sub("", old).strip()
+    link = LINK.search(s)
+    if link:
+        s = s[:link.start()]
+    tail = ""
+    stamps = find_stamps(s)
+    if stamps:
+        start = _with_stamp_brackets(s, stamps[0].start(), stamps[0].end())[0]
+        end = _with_stamp_brackets(s, stamps[-1].start(), stamps[-1].end())[1]
+        rep = re.compile(r"\s*(?:" + REPEATER.pattern + ")").match(s, end)
+        tail = s[start:rep.end() if rep else end]
+    return " ".join(part for part in (name, tail, link.group(0).strip() if link else "") if part)
+
+
 def cmd_rename(args):
-    """td rename --from AGENDA:LINE NAME...: for space , N, on an agenda row (the key copies the
-    row's name into the prompt itself, from the row's text).
+    """td rename --from SOURCE:LINE NAME...: for space , N, on an agenda row (the key copies the
+    row's name into the prompt itself, from the row's text) or inside a task's own file
+    (the key puts the cursor on its first line, the heading, and copies the title).
+
+    With --focus and no NAME: print where the key goes first, PATH:1 for a task file (so that its
+    heading is the line the prompt copies), else SOURCE:LINE as it was.
 
     The task gets NAME (after NAME_MARK when the key passes it), checked as a new file task's
     name is (_task_name), and the agenda is rebuilt: a file-task or orphan row's file
@@ -1426,16 +1470,26 @@ def cmd_rename(args):
     with no heading gets `# NAME`); a bullet row's todo.md bullet gets the name as its text, and
     its own file, if any, is renamed and retitled with it, so the two stay linked (the title
     without the bullet's stamps: they are the bullet's reminders, not the file's). Prints
-    AGENDA:LINE for :open. A file already there under the new name, an unusable name, or a row
-    with no task: exit 1, nothing changed."""
+    AGENDA:LINE for :open, or from inside a task's file, the file's new path (the heading, the
+    file name and a todo.md bullet of that file change together; the bullet keeps its stamps). A
+    file already there under the new name, an unusable name, or a row or file with no task:
+    exit 1, nothing changed."""
     source, lineno = _from_spec(args)
+    if "--focus" in args:
+        if source and _dedicated_slug(source) and source.is_file():
+            print(f"{source}:1")
+        else:
+            print(f"{source}:{lineno}" if lineno else source)
+        return 0
     raw = ""
     if source and lineno and source.is_file():
         lines = source.read_bytes().decode("utf-8", "surrogateescape").splitlines()
         raw = lines[lineno - 1] if 1 <= lineno <= len(lines) else ""
-    task = _agenda_task(raw) if _same_file(source, LIST_PATH) else None
+    in_file = source is not None and not _same_file(source, LIST_PATH)
+    task = _file_buffer_task(source) if in_file else (
+        _agenda_task(raw) if _same_file(source, LIST_PATH) else None)
     if task is None:
-        sys.exit("td: space , N renames the task on an agenda row")
+        sys.exit("td: space , N renames the task on an agenda row, or in its own file")
     named = _task_name(_name_arg(args))
     if named is None:
         sys.exit("td: no task name (type it after # name:)")
@@ -1457,14 +1511,15 @@ def cmd_rename(args):
         old_file = task_folder() / f"{slugify(m['text'])}.md"
         if new_file.exists() and not _same_file(old_file, new_file):
             sys.exit(f"td: {tilde(new_file)} already exists")
-        _write_line(inbox, lines, hits[0], f"{m['indent']}- [{m['state']}] {name}")
+        text = _with_stamps_of(task.name, name) if in_file else name
+        _write_line(inbox, lines, hits[0], f"{m['indent']}- [{m['state']}] {text}")
         if old_file.is_file():
             _set_heading_title(old_file, _identity_text(name))
             if not _same_file(old_file, new_file):
                 old_file.rename(new_file)
-        _carry_over(bullet_hash(str(inbox), m["text"]), bullet_hash(str(inbox), name), name)
+        _carry_over(bullet_hash(str(inbox), m["text"]), bullet_hash(str(inbox), text), text)
     refresh_list()
-    print(f"{source}:{lineno}")
+    print(new_file if in_file else f"{source}:{lineno}")
     return 0
 
 
@@ -2422,7 +2477,7 @@ RETICK = {"list", "file", "rename", "promote", "day", "set", "toggle"}
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
     rest = argv[2:]
-    if cmd in RETICK:
+    if cmd in RETICK and "--focus" not in rest:
         atexit.register(_tick_later)
     if cmd == "install":
         return cmd_install()
@@ -4548,6 +4603,63 @@ def run_tests(verbose=False):
             self.assertEqual(task.read_text(), "# [W] renew passport\n")
             with self.assertRaises(sp.CalledProcessError):  # not the agenda
                 self.td("rename", "--from", f"{p}:1", "x")
+
+        def rename_in(self, path, line, name):
+            """space , N inside the task's own file: the cursor is on its heading by then."""
+            return self.td("rename", "--from", f"{path}:{line}",
+                           f'... "$BASH_EXECUTION_STRING" # name: {name}').strip()
+
+        def test_inside_a_file_task_heading_and_file_change_together(self):
+            self.put_inbox("- [ ] alpha\n")
+            old = self.put_dedicated("passport.md", "# [W] renew passport\r\n\r\nnotes\r\n")
+            out = self.rename_in(old, 1, "Renew  my passport!")
+            new = self.tasks / "renew-my-passport.md"
+            self.assertEqual(out, str(new))
+            self.assertFalse(old.exists())
+            self.assertEqual(new.read_bytes(), b"# [W] Renew my passport!\r\n\r\nnotes\r\n")
+            self.assertIn("- [W] Renew my passport! (*)", self.read_cache("agenda.md"))
+
+        def test_inside_a_bullets_file_the_bullet_follows_and_keeps_its_stamps(self):
+            p = self.put_inbox("- [ ] alpha\n  - [A] bravo [2026-10-20 Tue 09:00 ++1w]\n")
+            d = self.put_dedicated("bravo.md", "# [A] bravo\n\nnotes\n")
+            out = self.rename_in(d, 3, "bravo two")
+            self.assertEqual(out, str(self.tasks / "bravo-two.md"))
+            self.assertEqual(p.read_text(),
+                             "- [ ] alpha\n  - [A] bravo two [2026-10-20 Tue 09:00 ++1w]\n")
+            self.assertFalse(d.exists())
+            self.assertEqual((self.tasks / "bravo-two.md").read_text(),
+                             "# [A] bravo two\n\nnotes\n")
+
+        def test_inside_a_file_the_stamp_may_sit_in_the_middle(self):
+            p = self.put_inbox("- [ ] call bank 2026-10-12 10:00 - bring docs\n")
+            d = self.put_dedicated("call-bank-bring-docs.md", "# [ ] call bank - bring docs\n")
+            self.rename_in(d, 1, "call the bank - bring docs")
+            self.assertEqual(p.read_text(), "- [ ] call the bank - bring docs 2026-10-12 10:00\n")
+            self.assertTrue((self.tasks / "call-the-bank-bring-docs.md").is_file())
+
+        def test_inside_a_file_refused_without_changes(self):
+            p = self.put_inbox("- [ ] alpha\n")
+            task = self.put_dedicated("passport.md", "# [W] renew passport\n")
+            self.put_dedicated("bravo.md", "# bravo\n")
+            for name in ("bravo", "!!"):  # its file exists; no usable name
+                with self.subTest(name=name):
+                    with self.assertRaises(sp.CalledProcessError):
+                        self.rename_in(task, 1, name)
+            with self.assertRaises(sp.CalledProcessError):  # not a file there
+                self.rename_in(self.tasks / "nothing.md", 1, "x")
+            self.assertEqual(task.read_text(), "# [W] renew passport\n")
+            self.assertEqual(p.read_text(), "- [ ] alpha\n")
+
+        def test_focus_puts_a_task_file_on_its_heading(self):
+            p = self.put_inbox("- [ ] alpha\n")
+            d = self.put_dedicated("passport.md", "# [W] renew passport\n\nnotes\n")
+            self.td("list")
+            agenda = self.cache / "agenda.md"
+            for source, line, want in ((d, 3, f"{d}:1"), (p, 1, f"{p}:1"), (agenda, 6, f"{agenda}:6")):
+                with self.subTest(source=source):
+                    self.assertEqual(self.td("rename", "--focus", "--from", f"{source}:{line}").strip(),
+                                     want)
+            self.assertEqual(d.read_text(), "# [W] renew passport\n\nnotes\n")
 
         def test_promote_checks_the_name_too(self):
             self.td("promote", stdin="- [ ] !!\n")
