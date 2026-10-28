@@ -86,7 +86,9 @@ A = "@:: agy --dangerously-skip-permissions -p 2<gt>/dev/null<ret>"
 # `ryk`. One-shot blocks Helix until playback ends. --send returns once queued
 # and auto-starts the daemon; --serve owns pacat. Helix only runs the ryk binary:
 # pause / rewind / cancel live in ryk-ctl (ryk-skills), not bound here.
-k = "@:: ryk --send<ret>"
+# :pipe-to drops the output, so nothing lands in the buffer (`::` would write the
+# command line and its output into it).
+k = ":pipe-to ryk --send"
 
 # tl/td keys live under `space ,` (`space .` holds the AI tools). One line each
 # here; docs/keys.md explains every key in detail, and why each is built as it is.
