@@ -430,8 +430,8 @@ is `++0d` (it would never move), so those lines are just marked done.
 | `td stamp [--restamp] [--col N]` | stdin: a line. Add a stamp, or move its date to today keeping the time; `--restamp`, or `--col N` on the stamp, only fixes the weekday |
 | `td shift +N\|-N [--col N]` | stdin: a line. Move its stamp by the part under column N (the day without `--col`); on a time-log line, its date, start or end time, in `tl`'s format, duration redone; on the week summary view, the week. With `--col`, save the part's new column to `~/.cache/td/stamp-col` |
 | `td new [--state S]` | print `- [S] ` (`space , q` inserts it) |
-| `td rename --from SOURCE:LINE NAME` | rename the task on an agenda row, or the task whose file SOURCE is: a file task's file and heading, or a bullet's todo.md text and its file (`space , N`) |
-| `td rename --focus --from SOURCE:LINE` | where `space , N` goes first: `PATH:1` in a task file (its heading), else SOURCE:LINE |
+| `td rename --from SOURCE:LINE NAME` | rename the task on an agenda row, or the task whose file SOURCE is: a file task's file and heading, or a bullet's todo.md text and its file (`space , N`). Prints the path for `:move`: the agenda's own, or the renamed file's, which the key's buffer then follows |
+| `td rename --focus --from SOURCE:LINE` | the line `space , N` goes to first (`:goto`): `1` in a task file (its heading), else LINE |
 | `td file NAME` | create the file task `~/tasks/<slug>.md` headed `# [ ] NAME` (an existing file is left alone) and print the path to open (`space , n`) |
 | `td next` | print the next time due (for a status line) |
 | `td fire PATH` | fire a file's notification now (testing) |

@@ -141,10 +141,12 @@ Commands:
                        (or orphan's) file and first-line heading, or a
                        bullet's todo.md text and its own file, if any.
                        Inside a task's own file (--from FILE:LINE): the same
-                       for that file, and the new path is printed to open.
+                       for that file. Prints the path the buffer is on now, for
+                       :move: the new file's, or the agenda's own.
   td rename --focus --from SOURCE:LINE
-                       print where space , N goes first: PATH:1 in a task file
-                       (the heading, which the prompt copies), else SOURCE:LINE.
+                       print the line space , N goes to first, for :goto: 1 in
+                       a task file (the heading, which the prompt copies), else
+                       LINE.
   td stamp [--restamp] [--col N]
                        stdin: a line. If it contains a date (the one at
                        column N with --col N, else the first), replace (default)
@@ -878,6 +880,20 @@ def _tick_later():
         pass
 
 
+def _nudge_later(path):
+    """Touch path a second from now (an existing file only), in a detached process: stdio to
+    /dev/null and a new session, so a %sh{} doesn't wait for it. `space , N` in a task file ends in
+    :move, which takes the buffer to be in step with the renamed file as it is then, though the
+    buffer still has the old heading; a later mtime is what makes Helix's auto-reload read the
+    file again and show the new one."""
+    try:
+        subprocess.Popen(["sh", "-c", 'sleep 1; touch -c "$1"', "sh", str(path)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------- commands
 
 def cmd_tick(args=()):
@@ -1487,8 +1503,9 @@ def cmd_rename(args):
     row's name into the prompt itself, from the row's text) or inside a task's own file
     (the key puts the cursor on its first line, the heading, and copies the title).
 
-    With --focus and no NAME: print where the key goes first, PATH:1 for a task file (so that its
-    heading is the line the prompt copies), else SOURCE:LINE as it was.
+    With --focus and no NAME: print the line the key goes to first, for :goto (a key that switched
+    buffers would lose its prompt): 1 for a task file (so that its heading is the line the prompt
+    copies), else LINE as it was.
 
     The task gets NAME (after NAME_MARK when the key passes it), checked as a new file task's
     name is (_task_name), and the agenda is rebuilt: a file-task or orphan row's file
@@ -1496,16 +1513,15 @@ def cmd_rename(args):
     with no heading gets `# NAME`); a bullet row's todo.md bullet gets the name as its text, and
     its own file, if any, is renamed and retitled with it, so the two stay linked (the title
     without the bullet's stamps: they are the bullet's reminders, not the file's). Prints
-    AGENDA:LINE for :open, or from inside a task's file, the file's new path (the heading, the
-    file name and a todo.md bullet of that file change together; the bullet keeps its stamps). A
+    the path of the buffer the key is in, for :move: the agenda's own (a no-op: the buffer stays), or
+    from inside a task's file, the file's new path (the buffer follows it, and the file is touched
+    a second later, _nudge_later, so that it shows the new heading; the heading, the file name and
+    a todo.md bullet of that file change together; the bullet keeps its stamps). A
     file already there under the new name, an unusable name, or a row or file with no task:
     exit 1, nothing changed."""
     source, lineno = _from_spec(args)
     if "--focus" in args:
-        if source and _dedicated_slug(source) and source.is_file():
-            print(f"{source}:1")
-        else:
-            print(f"{source}:{lineno}" if lineno else source)
+        print(1 if source and _dedicated_slug(source) and source.is_file() else lineno or 1)
         return 0
     raw = ""
     if source and lineno and source.is_file():
@@ -1546,7 +1562,9 @@ def cmd_rename(args):
                 old_file.rename(new_file)
         _carry_over(bullet_hash(str(inbox), m["text"]), bullet_hash(str(inbox), text), text)
     refresh_list()
-    print(new_file if in_file else f"{source}:{lineno}")
+    if in_file:
+        _nudge_later(new_file)
+    print(new_file if in_file else source)
     return 0
 
 
@@ -4602,7 +4620,7 @@ def run_tests(verbose=False):
             self.put_inbox("- [ ] alpha\n")
             old = self.put_dedicated("passport.md", "# [W] renew passport\r\n\r\nnotes\r\n")
             out, agenda, lineno = self.rename("renew passport", "Renew  my passport!")
-            self.assertEqual(out, f"{agenda}:{lineno}")
+            self.assertEqual(out, str(agenda))  # the buffer stays: :move to its own path does nothing
             self.assertFalse(old.exists())
             new = self.tasks / "Renew-my-passport.md"
             self.assertEqual(new.read_bytes(), b"# [W] Renew my passport!\r\n\r\nnotes\r\n")
@@ -4696,6 +4714,18 @@ def run_tests(verbose=False):
             self.assertEqual(new.read_bytes(), b"# [W] Renew my passport!\r\n\r\nnotes\r\n")
             self.assertIn("- [W] Renew my passport! (*)", self.read_cache("agenda.md"))
 
+        def test_inside_a_file_the_new_file_is_touched_a_second_later(self):
+            # Helix has the old heading when :move takes its buffer there; a newer mtime makes it reload
+            self.put_inbox("- [ ] alpha\n")
+            old = self.put_dedicated("passport.md", "# [W] renew passport\n\nnotes\n")
+            new = Path(self.rename_in(old, 1, "renew my passport"))
+            text, before = new.read_bytes(), new.stat().st_mtime_ns
+            deadline = time.time() + 5
+            while new.stat().st_mtime_ns == before and time.time() < deadline:
+                time.sleep(0.1)
+            self.assertGreater(new.stat().st_mtime_ns, before)
+            self.assertEqual(new.read_bytes(), text)
+
         def test_inside_a_bullets_file_the_bullet_follows_and_keeps_its_stamps(self):
             p = self.put_inbox("- [ ] alpha\n  - [A] bravo [2026-10-20 Tue 09:00 ++1w]\n")
             d = self.put_dedicated("bravo.md", "# [A] bravo\n\nnotes\n")
@@ -4727,12 +4757,13 @@ def run_tests(verbose=False):
             self.assertEqual(task.read_text(), "# [W] renew passport\n")
             self.assertEqual(p.read_text(), "- [ ] alpha\n")
 
-        def test_focus_puts_a_task_file_on_its_heading(self):
+        def test_focus_goes_to_the_heading_of_a_task_file(self):
             p = self.put_inbox("- [ ] alpha\n")
             d = self.put_dedicated("passport.md", "# [W] renew passport\n\nnotes\n")
             self.td("list")
             agenda = self.cache / "agenda.md"
-            for source, line, want in ((d, 3, f"{d}:1"), (p, 1, f"{p}:1"), (agenda, 6, f"{agenda}:6")):
+            # a line number, for :goto: the key must not switch buffers, or its prompt closes
+            for source, line, want in ((d, 3, "1"), (p, 2, "2"), (agenda, 6, "6")):
                 with self.subTest(source=source):
                     self.assertEqual(self.td("rename", "--focus", "--from", f"{source}:{line}").strip(),
                                      want)
