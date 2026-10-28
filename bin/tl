@@ -38,6 +38,9 @@ the start/end times.
                         the text passes through unchanged.
     tl stop [--skip F]  end, at now, every entry still running, in
                         the task files on disk except F; print where ("stopped ~/tasks/x.md:3").
+                        An entry that has run over 12h was forgotten, and has no end date to say
+                        when it really ended: it is ended one minute after it started (this goes
+                        for every way of ending an entry here).
     tl stop - [--file F]
                         the same for stdin, written to stdout byte for byte otherwise. F is the file
                         the text came from: if it is td's inbox, its todos are left alone.
@@ -141,6 +144,16 @@ def dur_text(minutes):
 
 def duration(start, end):
     return (end - start) % 1440  # end before start = crossed midnight
+
+
+def end_minute(e, t):
+    """The end, as minutes of the day, to close the running entry e at t. One that has run longer
+    than MAX_SANE was forgotten: an entry has no end date, so its real end can't be written, and
+    the time of day would give a wrong duration. It gets one minute instead, to show on the timeline
+    that something was there."""
+    if t - started_at(e) > timedelta(minutes=MAX_SANE):
+        return (e.start + 1) % 1440
+    return t.hour * 60 + t.minute
 
 
 def parse(line):
@@ -310,7 +323,7 @@ def cmd_close(args):
         body = raw.rstrip("\r\n")
         e, _ = parse_in(body, inbox)  # unparseable and non-entry lines pass through untouched
         if e is not None:
-            end = e.end if e.end is not None else t.hour * 60 + t.minute
+            end = e.end if e.end is not None else end_minute(e, t)
             raw = render(e, end) + raw[len(body):]
         out.append(raw)
     sys.stdout.write("".join(out))
@@ -328,7 +341,7 @@ def stop_lines(lines, t, inbox=False):
             continue
         if started_at(e) > t:
             continue  # not started yet
-        lines[i] = render(e, t.hour * 60 + t.minute) + raw[len(body):]
+        lines[i] = render(e, end_minute(e, t)) + raw[len(body):]
         stopped.append(i + 1)
     return stopped
 
@@ -549,7 +562,7 @@ def cmd_edit(args):
     if i is not None:
         body = lines[i].rstrip("\r\n")
         e = parse(body)[0]
-        lines[i] = render(e, t.hour * 60 + t.minute) + lines[i][len(body):]
+        lines[i] = render(e, end_minute(e, t)) + lines[i][len(body):]
         i = add_heading(lines, i, "")
         GOTO_PATH.parent.mkdir(parents=True, exist_ok=True)
         GOTO_PATH.write_text(f"{source}:{i}\n", encoding="utf-8", errors="surrogateescape")
@@ -576,7 +589,7 @@ def end_latest(t, comment=""):
     lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
     body = lines[i].rstrip("\r\n")
     e = parse(body)[0]
-    lines[i] = render(e, t.hour * 60 + t.minute) + lines[i][len(body):]
+    lines[i] = render(e, end_minute(e, t)) + lines[i][len(body):]
     if comment:
         i = add_heading(lines, i, comment)
     path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
@@ -1032,7 +1045,7 @@ def run_tests(verbose=False):
         def test_stop_files(self):
             self.put("A.md", "# A\r\n2026-10-09 13:00 -  a\r\n")
             self.put("B.txt", "2026-10-09 13:30 -")  # no final newline
-            self.put("C.md", "2026-09-01 10:00 -  forgotten\n")  # however long ago, it is running
+            self.put("C.md", "2026-09-01 10:00 -  forgotten\n")  # however long ago, it is running; ended at one minute
             self.put("E.log", "2026-10-09 13:00 -\n")  # not a task file
             skip = self.put("D.md", "2026-10-09 13:45 -\n")
             out = self.tl("stop", "--skip", str(skip))
@@ -1041,10 +1054,31 @@ def run_tests(verbose=False):
                              ["~/tasks/A.md:2", "~/tasks/B.txt:1", "~/tasks/C.md:1"])
             self.assertEqual(self.get("A.md"), "# A\r\n2026-10-09 13:00 - 14:05 = 1h 05min  a\r\n")
             self.assertEqual(self.get("B.txt"), "2026-10-09 13:30 - 14:05 = 0h 35min")
-            self.assertEqual(self.get("C.md"), "2026-09-01 10:00 - 14:05 = 4h 05min  forgotten\n")  # the time of day
+            self.assertEqual(self.get("C.md"), "2026-09-01 10:00 - 10:01 = 0h 01min  forgotten\n")  # one minute
             for name, text in [("E.log", "2026-10-09 13:00 -\n"), ("D.md", "2026-10-09 13:45 -\n")]:
                 self.assertEqual(self.get(name), text)
             self.assertEqual(self.tl("stop", "--skip", str(skip)), "")
+
+        def test_a_forgotten_entry_is_closed_at_one_minute(self):
+            # over MAX_SANE (12h) at 14:05: the end has no date, so only a mark on the timeline is kept
+            for start, end in [("2026-10-09 02:04", "02:05 = 0h 01min"),  # 12h 01min: forgotten
+                               ("2026-10-09 02:05", "14:05 = 12h 00min"),  # 12h exactly: still counts
+                               ("2026-10-08 14:05", "14:06 = 0h 01min"),  # a day
+                               ("2026-10-08 23:59", "00:00 = 0h 01min"),  # one minute over midnight
+                               ("2026-09-01 10:00", "10:01 = 0h 01min")]:
+                with self.subTest(start=start):
+                    self.assertEqual(self.tl("close", stdin=f"{start} -  x\n"), f"{start} - {end}  x\n")
+                    self.assertEqual(self.tl("stop", "-", stdin=f"{start} -  x\n"), f"{start} - {end}  x\n")
+            # an entry with an end is left alone, however long
+            self.assertEqual(self.tl("close", stdin="2026-09-01 10:00 - 23:00 = 9h 99min\n"),
+                             "2026-09-01 10:00 - 23:00 = 13h 00min\n")
+
+        def test_out_and_edit_close_a_forgotten_entry_at_one_minute(self):
+            self.put("A.md", "2026-10-06 01:00 -\n")
+            self.assertEqual(self.out("left open"), "stopped ~/tasks/A.md:2  # left open\n")
+            self.assertEqual(self.get("A.md"), "# left open\n2026-10-06 01:00 - 01:01 = 0h 01min\n")
+            self.assertEqual(self.tl("out", "--edit", "-", "--file", str(self.tasks / "B.md"),
+                                     stdin="2026-10-06 01:00 -\n"), "# \n2026-10-06 01:00 - 01:01 = 0h 01min\n")
 
         def test_stop_stdin_changes_only_running_lines(self):
             text = "caf\udce9 \r\n2026-10-09 13:00 -\r\n2026-10-09 12:00 - 12:30 = 9h\nend"  # \udce9: a non-UTF-8 byte
@@ -1296,7 +1330,7 @@ def run_tests(verbose=False):
             self.assertEqual(self.tl("where", "--from", "here.md:7"), f"{self.tasks / 'C.md'}:2")
             self.assertEqual(self.tl("out", "--visit", "--from", "here.md:7"), str(self.tasks / "C.md"))
             self.assertEqual(self.out("x"), "stopped ~/tasks/C.md:2  # x\n")
-            self.assertEqual(self.get("C.md"), "# C - x\n2026-10-06 01:00 - 14:05 = 13h 05min\n")
+            self.assertEqual(self.get("C.md"), "# C - x\n2026-10-06 01:00 - 01:01 = 0h 01min\n")  # forgotten: one minute
 
         def test_same_minute_running_goes_by_the_file_written_last(self):
             a = self.put("A.md", "2026-10-09 14:00 - 14:05\n")
