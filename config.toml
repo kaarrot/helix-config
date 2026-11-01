@@ -144,7 +144,7 @@ D = [":open %sh{~/.config/helix/bin/td list --state done --sort modified >/dev/n
 P = ["extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td promote --from %{buffer_name}:%{cursor_line}", "select_all", ":pipe ~/.config/helix/bin/td promote --cut - --file %{buffer_name}", "collapse_selection", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
 # Open the bullet's own file; on the agenda, its line in todo.md
 p = ["extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}", "collapse_selection", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
-# Move the bullet and its section (notes, time entries, subtodos) to the end of ~/tasks/day.md; the buffer is saved and the cursor stays on the line it was on
+# Move the bullet and its section (notes, time entries, subtodos) to the end of ~/tasks/day.md, dated by a # heading and a zero-minute time entry that `space , l` lists; the buffer is saved and the cursor stays on the line it was on
 ret = ["extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td day --from %{buffer_name}:%{cursor_line}", "select_all", ":pipe ~/.config/helix/bin/td day --cut - --file %{buffer_name}", "collapse_selection", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
 # Mark done (a ++/.+ repeater moves the date instead, but an hourly one); on the agenda, in todo.md
 x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{buffer_name} --row %{cursor_line}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
