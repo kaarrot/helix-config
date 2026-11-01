@@ -96,10 +96,9 @@ Commands:
                        a time entry excepted: notes, time entries, subtodos)
                        move to the end of ~/tasks/day.md,
                        without the indent the bullet has, and end with a
-                       `# heading` (the bullet's words) and a time entry of
-                       no length at this minute, so `space , l` lists the
-                       move. The key then goes back to the line the bullet
-                       was on (~/.cache/td/open).
+                       time entry of no length at this minute, so `space , l`
+                       lists the bullet on that day. The key then goes back
+                       to the line the bullet was on (~/.cache/td/open).
   td jump [--from PATH:LINE]
                        stdin: a line, at PATH:LINE. Prints where `space , p`
                        goes, and writes it to ~/.cache/td/open: a bullet's
@@ -2061,14 +2060,13 @@ def cmd_day(args):
     return 0
 
 
-def _moved_entry(tl, text):
-    """The two lines that date a move to day.md: the bullet's text as a `# heading`, and under
-    it a time entry of no length at this minute, as `tl out` writes one for `space , i` then
-    `O`. `space , l` then lists the bullet under the day it was moved."""
+def _moved_entry(tl):
+    """The line that dates a move to day.md: a time entry of no length at this minute, as `tl
+    out` writes one for `space , i` then `O`. Under the bullet's section, it is the bullet's
+    own: `space , l` lists the bullet under the day it was moved."""
     t = now()
     start = t.hour * 60 + t.minute
-    entry = tl.Entry("", t.strftime("%Y-%m-%d"), start, start, "")
-    return [f"# {_identity_text(text) or 'moved'}\n", tl.render(entry, start) + "\n"]
+    return tl.render(tl.Entry("", t.strftime("%Y-%m-%d"), start, start, ""), start) + "\n"
 
 
 def _cut_to_day(args):
@@ -2077,7 +2075,7 @@ def _cut_to_day(args):
     line of PATH, move it and its section (the lines under it, up to the next bullet not under
     it or a heading: notes, time entries, subtodos; see tl's section_end) out of the text and
     to the end of ~/tasks/day.md, on disk, without the indent the bullet has, so a sub-bullet
-    comes out at the left, and end it with a heading and a time entry that date the move (see
+    comes out at the left, and end it with a time entry that dates the move (see
     _moved_entry). Blank lines at the end of day.md are dropped first, and a heading
     last there gets one blank line under it. Else the text passes through. Either way
     ~/.cache/td/open gets the line the key ends on: where the bullet was."""
@@ -2106,7 +2104,7 @@ def _cut_to_day(args):
             old.append("\n")
         if not moved[-1].endswith("\n"):
             moved[-1] += "\n"
-        moved += _moved_entry(tl, TASK.match(lines[i].rstrip("\r\n"))["text"])
+        moved.append(_moved_entry(tl))
         day.parent.mkdir(parents=True, exist_ok=True)
         day.write_bytes("".join(old + moved).encode("utf-8", "surrogateescape"))
         del lines[i:end + 1]
@@ -3947,10 +3945,10 @@ def run_tests(verbose=False):
         def day(self):
             return (self.tasks / "day.md").read_text()
 
-        def dated(self, text, at="2026-10-10 11:00"):
-            """The two lines a move adds under the section: the text as a heading, and a time
-            entry of no length at the minute of the move (NOW), the way `tl` writes one."""
-            return f"# {text}\n{at} - {at[11:]} = 0h 00min\n"
+        def dated(self, at="2026-10-10 11:00"):
+            """The line a move adds at the end of the section: a time entry of no length at the
+            minute of the move (NOW), the way `tl` writes one."""
+            return f"{at} - {at[11:]} = 0h 00min\n"
 
         def test_moves_the_bullet_and_its_section_to_the_end_of_day_md(self):
             self.put_dedicated("day.md", "# Today\n\n\n\n")
@@ -3960,55 +3958,55 @@ def run_tests(verbose=False):
             # not saved yet: the buffer counts
             self.assertEqual(self.press(text, 2), "- [ ] alpha\n\n- [ ] call\n")
             self.assertEqual(self.day(), "# Today\n\n- [ ] prep slides\n  deck\n\n  2026-10-10 09:00 - 10:00\n"
-                                         "  - [ ] print\n    2026-10-10 10:00 -\n" + self.dated("prep slides"))
+                                         "  - [ ] print\n    2026-10-10 10:00 -\n" + self.dated())
             self.assertFalse((self.cache / "day").exists())
             # the next one goes under it, with no blank line between
             self.assertEqual(self.press("- [ ] call\n  bank\n", 1), "")
-            self.assertTrue(self.day().endswith(self.dated("prep slides") + "- [ ] call\n  bank\n" + self.dated("call")))
+            self.assertTrue(self.day().endswith(self.dated() + "- [ ] call\n  bank\n" + self.dated()))
 
         def test_takes_a_heading_right_above_an_entry(self):
             self.put_inbox("")
             text = "- [ ] a\nnote\n# did x\n2026-10-10 09:00 - 10:00 = 1h 00min\n- [ ] b\n"
             self.assertEqual(self.press(text, 1), "- [ ] b\n")
-            self.assertEqual(self.day(), "- [ ] a\nnote\n# did x\n2026-10-10 09:00 - 10:00 = 1h 00min\n" + self.dated("a"))
+            self.assertEqual(self.day(), "- [ ] a\nnote\n# did x\n2026-10-10 09:00 - 10:00 = 1h 00min\n" + self.dated())
 
         def test_day_md_without_a_final_newline_or_missing(self):
             self.put_inbox("")
             self.assertFalse((self.tasks / "day.md").exists())
             self.assertEqual(self.press("- [ ] a\n- [ ] b\n", 1), "- [ ] b\n")
-            self.assertEqual(self.day(), "- [ ] a\n" + self.dated("a"))  # no heading made up above it
+            self.assertEqual(self.day(), "- [ ] a\n" + self.dated())  # no heading made up above it
             self.put_dedicated("day.md", "\n\n")  # empty, or only blank lines: no heading either
             self.press("- [ ] b\n", 1)
-            self.assertEqual(self.day(), "- [ ] b\n" + self.dated("b"))
+            self.assertEqual(self.day(), "- [ ] b\n" + self.dated())
             self.put_dedicated("day.md", "# Today\n- [ ] x")
             self.press("- [ ] b\n", 1)
-            self.assertEqual(self.day(), "# Today\n- [ ] x\n- [ ] b\n" + self.dated("b"))
+            self.assertEqual(self.day(), "# Today\n- [ ] x\n- [ ] b\n" + self.dated())
             # a heading last, as when the file is only a title: it gets its blank line
             self.put_dedicated("day.md", "# Today\n")
             self.press("- [ ] b\n", 1)
-            self.assertEqual(self.day(), "# Today\n\n- [ ] b\n" + self.dated("b"))
+            self.assertEqual(self.day(), "# Today\n\n- [ ] b\n" + self.dated())
 
         def test_notes_need_no_indent(self):
             self.put_inbox("")
             text = "- [ ] this is a test\n\nsomething to remember\n\n\n- [ ] Spanish\n"
             self.assertEqual(self.press(text, 1), "\n\n- [ ] Spanish\n")
-            self.assertEqual(self.day(), "- [ ] this is a test\n\nsomething to remember\n" + self.dated("this is a test"))
+            self.assertEqual(self.day(), "- [ ] this is a test\n\nsomething to remember\n" + self.dated())
             # a heading ends the section too
             self.assertEqual(self.press("- [ ] beta\nnote\n# later\nnot beta's\n", 1), "# later\nnot beta's\n")
-            self.assertTrue(self.day().endswith("- [ ] beta\nnote\n" + self.dated("beta")))
+            self.assertTrue(self.day().endswith("- [ ] beta\nnote\n" + self.dated()))
 
         def test_a_sub_bullet_comes_out_at_the_left_with_only_its_own_lines(self):
             self.put_inbox("")
             text = "- [ ] a\n  - [ ] b\n    note b\n\tmore b\nnote a\n"
             self.assertEqual(self.press(text, 2), "- [ ] a\nnote a\n")
-            self.assertEqual(self.day(), "- [ ] b\n  note b\n  more b\n" + self.dated("b"))
+            self.assertEqual(self.day(), "- [ ] b\n  note b\n  more b\n" + self.dated())
 
         def test_works_in_any_task_file(self):
             self.put_inbox("")
             other = self.put_dedicated("project.md", "# [ ] project\n\n- [ ] step\n  detail\n- [ ] last\n")
             text = other.read_text()
             self.assertEqual(self.press(text, 3, other), "# [ ] project\n\n- [ ] last\n")
-            self.assertEqual(self.day(), "- [ ] step\n  detail\n" + self.dated("step"))
+            self.assertEqual(self.day(), "- [ ] step\n  detail\n" + self.dated())
 
         def test_the_key_ends_on_the_line_the_bullet_was_on(self):
             self.put_inbox("")
@@ -4037,14 +4035,14 @@ def run_tests(verbose=False):
             tl = Path(TD).with_name("tl")
             if not tl.exists():
                 self.skipTest("no tl next to td")
-            # the heading is the task's words only: its stamp stays on the bullet
+            # no heading of its own: the entry is under the bullet, which `l` lists it under
             self.press("- [ ] call bank [2026-10-12 Mon 09:30]\n  note\n", 1)
-            self.assertEqual(self.day(), "- [ ] call bank [2026-10-12 Mon 09:30]\n  note\n" + self.dated("call bank"))
+            self.assertEqual(self.day(), "- [ ] call bank [2026-10-12 Mon 09:30]\n  note\n" + self.dated())
             e = {**os.environ, "HOME": str(self.home), "TL_DIR": str(self.tasks), "TL_NOW": NOW}
             out = sp.run([sys.executable, str(tl), "summary"], env=e, capture_output=True, check=True).stdout.decode()
             self.assertIn("2026-10-10 Sat", out)
             self.assertIn("    day  ", out)
-            self.assertIn("      - call bank\n", out)
+            self.assertIn("      - call bank [2026-10-12 Mon 09:30]\n", out)
             self.assertNotIn("Check by hand", out)
             # the stamp that was on the bullet still fires; the entry is no reminder
             self.td("tick")  # sees it as still to come

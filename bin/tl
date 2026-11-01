@@ -74,15 +74,18 @@ the start/end times.
                         Entries with no end time, of any date, are
                         listed first. Locations print as ~/path:line, for gf. Under each day, a
                         line per task (total and title: its file's first line), then the nearest
-                        markdown "# heading" above its entries, as bullets (but the title). td's
-                        inbox has no title, and its entries come under the todo they are under.
+                        todo (`- [ ] ...`) whose section holds its entries, else the nearest
+                        markdown "# heading" above them, as bullets (but the title); a heading right
+                        above an entry comes first. td's inbox has no title.
     tl test [-v]        run the tests at the end of this file (temporary task folders, faked clock).
 
 Task files: $TL_DIR (default ~/tasks), *.txt and *.md, and td's inbox ($TD_FILE, default
 $TL_DIR/todo.md). In the inbox a todo (a line td reads as one, `- [S] `) is never an entry:
 `- [ ] 2026-10-12 09:00 - prep slides` there is a todo, not a running entry. Its entries are the
 other lines, mostly in a todo's section (the lines under it, up to the next todo that is not under
-it), and the summary lists them under that todo's text. $TL_NOW="YYYY-MM-DD HH:MM" fakes the clock.
+it), and the summary lists them under that todo's text, as it does in any task file for the
+entries under a todo (`space , ret` ends what it moves to day.md with one).
+$TL_NOW="YYYY-MM-DD HH:MM" fakes the clock.
 """
 import contextlib
 import io
@@ -709,9 +712,13 @@ def cmd_summary(arg, week=None):
             e, err = parse_in(line, inbox)
             if e is None and err is None:
                 continue
-            # what the entry was for: the heading above it, or in td's inbox the todo it is under
-            todo = section_of(lines, n - 1) if inbox else None
-            above = HEADING.match(lines[n - 2]) if inbox and n >= 2 else None  # what you did, typed by `o`/`O`
+            # what the entry was for: the heading right above it (what you did, typed by `o`/`O`), else
+            # the todo whose section it is in, else the nearest heading above. A todo-shaped entry
+            # (`- [ ] 2026-10-12 09:00 - 10:00`) outside the inbox is no todo, and is under none.
+            todo = section_of(lines, n - 1) if inbox or not TODO.match(line) else None
+            if todo and not inbox and ATTEMPT.match(lines[todo[0]]):
+                todo = None
+            above = HEADING.match(lines[n - 2]) if n >= 2 else None
             topic = above[1] if above else TODO.match(lines[todo[0]])["text"] if todo else heading
             if e and e.end is None:
                 running.append((where, n, e, topic))
@@ -1391,6 +1398,20 @@ def run_tests(verbose=False):
                              "2026-10-09 Fri   1h 30min\n"
                              "    todo   1h 30min\n      - outline\n      - prep slides\n"
                              "-----\nTotal (1 day)  1h 30min\n")
+
+        def test_in_a_task_file_an_entry_comes_under_its_todo(self):
+            self.put("A.md", "# [ ] Title A\n- [ ] first\n  note\n2026-10-09 09:00 - 09:30\n"
+                             "- [ ] second\n# outline\n2026-10-09 10:00 - 10:30\n"
+                             "2026-10-09 11:00 - 11:15\n"
+                             "# Later\n- [ ] third\n  2026-10-09 12:00 - 12:05\n"
+                             "## Free\n2026-10-09 13:00 - 13:05\n"
+                             "- [ ] 2026-10-09 14:00 - 14:10  todo-shaped\n")
+            self.assertEqual(self.tl("summary", "1"),
+                             f"Time summary, last 1 day ({self.tasks})\n\n"
+                             "2026-10-09 Fri   1h 35min\n"
+                             "    A   1h 35min  Title A\n      - first\n      - outline\n      - second\n"
+                             "      - third\n      - Free\n"
+                             "-----\nTotal (1 day)  1h 35min\n")
 
         def test_titles_leave_out_tds_state(self):
             self.put("A.md", "# [A] Title A\n2026-10-09 11:00 - 12:00\n## [x] Second\n2026-10-09 12:00 - 12:30\n")
