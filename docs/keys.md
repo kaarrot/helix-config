@@ -124,6 +124,10 @@ it from its file.
 | `, x` | Toggle `[ ]` ↔ `[x]` (done), the same as `x` |
 | `, space` | Set `[ ]` (todo); on a heading, `# [ ]` |
 
+`Enter` first collapses any selection to the cursor's line, so selected notes
+do not prevent the move. Keep the cursor on the bullet itself; its section
+still moves with it.
+
 Each `, ` status key is the letter its checkbox gets: `, y` writes `[Y]`,
 `, x` writes `[x]`, and `, space` the empty `[ ]`.
 
