@@ -1,3 +1,5 @@
+use-grammars = { only = ["markdown", "markdown_inline", "python", "cpp", "rust"] }
+
 [language-server.clangd]
 command = "clangd"
 # these flags make clangd robust in real projects
@@ -116,7 +118,7 @@ language-servers = ["polski-ls"]
 [[language]]
 name = "markdown"
 language-servers = ["harper-ls"]
-# comment-token = ["-", "+", "*", "- [ ]", ">"]
+comment-tokens = ["-", "+", "*", "- [ ]", ">"]
 
 # td task files: markdown plus td's task colours (runtime/queries/td, td.inline).
 # A language of its own keeps those colours out of other markdown (READMEs, PR
@@ -130,6 +132,7 @@ grammar = "markdown"
 language-id = "markdown"
 file-types = [{ glob = "tasks/*.md" }, { glob = ".cache/td/agenda.md" }]
 language-servers = ["harper-ls"]
+comment-tokens = ["-", "+", "*", "- [ ]", ">"]
 block-comment-tokens = { start = "<!--", end = "-->" }
 indent = { tab-width = 2, unit = "  " }
 word-completion.trigger-length = 4
