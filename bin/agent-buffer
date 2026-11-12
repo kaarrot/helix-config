@@ -1,0 +1,257 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""Buffer-specific agent bindings using existing Helix commands only."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+import unicodedata
+import uuid
+
+
+MARKER = re.compile(r"# helix-agent-session: ([0-9a-f]{32})\Z")
+AGENTS = ("codex", "claude", "grok", "agy")
+# Capture bindings exit Bash before the filename metadata. Quotes and newlines
+# in a display name remain data inside BASH_EXECUTION_STRING.
+BUFFER_CONTEXT_MARKER = "; exit # helix-agent-buffer: "
+
+
+def state_dir():
+    base = os.environ.get("HELIX_AGENT_STATE_DIR")
+    if not base:
+        base = str(Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "helix/agent-sessions")
+    path = Path(base)
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return path
+
+
+def editor_scope():
+    if scope := os.environ.get("HELIX_AGENT_SCOPE"):
+        if re.fullmatch(r"[A-Za-z0-9_-]+", scope):
+            return scope
+        raise ValueError("Invalid HELIX_AGENT_SCOPE")
+    pid = os.getppid()
+    for _ in range(32):
+        try:
+            if Path(f"/proc/{pid}/comm").read_text().strip() == "hx":
+                return str(pid)
+            status = Path(f"/proc/{pid}/status").read_text()
+            pid = int(re.search(r"^PPid:\s+(\d+)", status, re.M)[1])
+        except (OSError, TypeError):
+            break
+        if pid <= 1:
+            break
+    return "shell-" + str(os.getppid())
+
+
+def pending_path():
+    directory = state_dir() / "pending"
+    directory.mkdir(exist_ok=True, mode=0o700)
+    return directory / (editor_scope() + ".json")
+
+
+def read_json(path, default=None):
+    try:
+        value = json.loads(path.read_text())
+        return value if isinstance(value, dict) else (default or {})
+    except (OSError, ValueError):
+        return default or {}
+
+
+def write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+        json.dump(value, stream, ensure_ascii=False)
+        temporary = Path(stream.name)
+    os.replace(temporary, path)
+
+
+def trim_ending(text):
+    if text.endswith("\r\n"):
+        return text[:-2]
+    return text[:-1] if text.endswith("\n") else text
+
+
+def cursor_sized(text):
+    # A normal cursor covers one grapheme. Cover composed characters, combining
+    # marks, emoji modifiers, flags and joined emoji without adding dependencies.
+    text = unicodedata.normalize("NFC", text)
+    bases = "".join(c for c in text if not (
+        unicodedata.category(c).startswith("M")
+        or 0x1F3FB <= ord(c) <= 0x1F3FF
+        or 0xE0020 <= ord(c) <= 0xE007F
+    ))
+    return (len(bases) <= 1
+            or (len(bases) == 2 and all(0x1F1E6 <= ord(c) <= 0x1F1FF for c in bases))
+            or ("\u200d" in bases and all(len(part) == 1 for part in bases.split("\u200d"))))
+
+
+def capture(args):
+    text = trim_ending(sys.stdin.read())
+    _, separator, source_name = (args.buffer_context or "").partition(BUFFER_CONTEXT_MARKER)
+    source_uri = None
+    if separator:
+        try:
+            source_path = Path(source_name).expanduser().resolve()
+            if source_path.is_file():
+                source_uri = source_path.as_uri()
+        except (OSError, ValueError, RuntimeError):
+            pass
+    write_json(pending_path(), {
+        "agent": args.agent, "mode": args.mode, "prompt": text,
+        "line_start": args.line_start, "valid": bool(text) and not cursor_sized(text),
+        "source_known": bool(separator), "source_uri": source_uri, "cwd": os.getcwd(),
+    })
+
+
+def header(_args):
+    path = pending_path()
+    request = read_json(path)
+    if not request:
+        return
+    line = trim_ending(sys.stdin.read())
+    match = MARKER.fullmatch(line)
+    request["token"] = match[1] if match else None
+    if match and request.get("line_start") == 1:
+        # The primary selection can overlap just part of the metadata line.
+        request["prompt"] = request["prompt"].partition("\n")[2]
+        request["valid"] = bool(request["prompt"])
+    write_json(path, request)
+
+
+def prompt_slug(prompt):
+    first_line = next((line.strip() for line in prompt.splitlines() if line.strip()), "")
+    text = unicodedata.normalize("NFKC", first_line).casefold()
+    slug = re.sub(r"[\W_]+", "-", text).strip("-")
+    return slug[:48].rstrip("-") or "conversation"
+
+
+def conversation_token(path):
+    try:
+        with path.open(encoding="utf-8") as stream:
+            match = MARKER.fullmatch(trim_ending(stream.readline(512)))
+            return match[1] if match else None
+    except (OSError, UnicodeError):
+        return None
+
+
+def conversation_path(directory, token, prompt):
+    # Keep existing paths: open buffers and the LSP bridge identify documents
+    # by URI. The full marker, rather than the short filename suffix, is the ID.
+    legacy = directory / (token + ".md")
+    if legacy.is_file():
+        return legacy
+    for path in sorted(directory.glob(f"*-{token[:6]}*.md")):
+        if conversation_token(path) == token:
+            return path
+    slug = prompt_slug(prompt)
+    for length in (6, 10, 32):
+        path = directory / f"{slug}-{token[:length]}.md"
+        if not path.exists():
+            return path
+    number = 2
+    while (path := directory / f"{slug}-{token}-{number}.md").exists():
+        number += 1
+    return path
+
+
+def prepare(_args):
+    path = pending_path()
+    request = read_json(path)
+    directory = state_dir() / "conversations"
+    directory.mkdir(exist_ok=True, mode=0o700)
+    if not request.get("valid") or "token" not in request:
+        error = directory / ("select-prompt-" + editor_scope() + ".md")
+        error.write_text("Select a prompt before starting or resuming an agent.\n")
+        print(error)
+        return
+    token = request.get("token") if request["mode"] == "resume" else None
+    if not token:
+        token = uuid.uuid4().hex
+    created = False
+    while True:
+        destination = conversation_path(directory, token, request["prompt"])
+        if (destination == directory / (token + ".md") and destination.is_file()
+                or conversation_token(destination) == token):
+            break
+        try:
+            with destination.open("x", encoding="utf-8") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(f"# helix-agent-session: {token}\n\n{request['prompt']}\n")
+            created = True
+            break
+        except FileExistsError:
+            # Another request may have claimed the same short name. Resolve
+            # again so neither conversation is overwritten or misrouted.
+            continue
+    request["token"] = token
+    request["request_id"] = uuid.uuid4().hex
+    request["uri"] = destination.resolve().as_uri()
+    request["copy_prompt"] = None
+    if created:
+        request["copy_prompt"] = False
+    elif request.get("source_known"):
+        request["copy_prompt"] = request["source_uri"] != request["uri"]
+    request["scope"] = editor_scope()
+    request["prepared"] = True
+    write_json(path, request)
+    print(destination)
+
+
+def queue_dir(scope=None):
+    directory = state_dir() / "queue" / (scope or editor_scope())
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return directory
+
+
+def start(_args):
+    path = pending_path()
+    request = read_json(path)
+    if not request.get("valid") or not request.get("prepared"):
+        print("Select a prompt before launching an agent.")
+        path.unlink(missing_ok=True)
+        return
+    write_json(queue_dir() / (request["request_id"] + ".json"), request)
+    path.unlink(missing_ok=True)
+    print(f"Queued {request['agent']} request; space . q cancels this conversation")
+
+
+def cancel(_args):
+    match = MARKER.fullmatch(trim_ending(sys.stdin.read()))
+    if not match:
+        message = "This buffer has no conversation marker"
+    else:
+        token = match[1]
+        for path in queue_dir().glob("*.json"):
+            if read_json(path).get("token") == token:
+                path.unlink(missing_ok=True)
+        control = state_dir() / "cancel" / editor_scope() / (token + ".json")
+        write_json(control, {"token": token})
+        message = "Cancellation requested for this conversation"
+    write_json(state_dir() / "status" / (editor_scope() + ".json"), {"message": message})
+
+
+def status(_args):
+    value = read_json(state_dir() / "status" / (editor_scope() + ".json"))
+    print(value.get("message", ""))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    capture_parser = commands.add_parser("capture")
+    capture_parser.add_argument("agent", choices=AGENTS)
+    capture_parser.add_argument("mode", choices=("new", "resume"))
+    capture_parser.add_argument("--line-start", type=int, required=True)
+    capture_parser.add_argument("--buffer-context")
+    for name in ("header", "prepare", "start", "cancel", "status"):
+        commands.add_parser(name)
+    args = parser.parse_args(argv)
+    globals()[args.command](args)
+
+
+if __name__ == "__main__":
+    main()

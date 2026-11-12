@@ -1,0 +1,353 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""Append agent output to live Helix buffers through standard LSP edits."""
+
+from collections import defaultdict, deque
+import fcntl
+import json
+import os
+from pathlib import Path
+import queue
+import runpy
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+common = runpy.run_path(str(Path(__file__).with_name('agent-buffer')))
+state_dir = common['state_dir']
+read_json = common['read_json']
+write_json = common['write_json']
+
+
+def end_position(text):
+    lines = text.split('\n')
+    return {'line': len(lines) - 1, 'character': len(lines[-1].encode('utf-16-le')) // 2}
+
+
+def send(message):
+    data = json.dumps({'jsonrpc': '2.0', **message}, ensure_ascii=False).encode('utf-8')
+    sys.stdout.buffer.write(b'Content-Length: ' + str(len(data)).encode() + b'\r\n\r\n' + data)
+    sys.stdout.buffer.flush()
+
+
+def read_messages(messages):
+    try:
+        while True:
+            headers = {}
+            while True:
+                line = sys.stdin.buffer.readline()
+                if not line:
+                    return
+                if line in (b'\r\n', b'\n'):
+                    break
+                key, value = line.decode('ascii').split(':', 1)
+                headers[key.lower()] = value.strip()
+            length = int(headers['content-length'])
+            if length < 0 or length > 32 * 1024 * 1024:
+                raise ValueError('Invalid LSP frame length')
+            data = sys.stdin.buffer.read(length)
+            if len(data) != length:
+                return
+            messages.put(('lsp', json.loads(data)))
+    finally:
+        messages.put(('stop', None))
+
+
+class Bridge:
+    def __init__(self):
+        self.scope = common['editor_scope']()
+        self.messages = queue.Queue()
+        self.documents = {}
+        self.text = defaultdict(str)
+        self.requests = defaultdict(deque)
+        self.jobs = {}
+        self.edits = {}
+        self.retry_versions = {}
+        self.next_flush = defaultdict(float)
+        self.flush_now = set()
+        self.batch_interval = .2
+        self.progress_creates = {}
+        self.progress_jobs = {}
+        self.supports_progress = False
+        self.next_id = 1
+        self.ready = False
+
+    def append(self, uri, text):
+        self.text[uri] += text
+
+    def start_progress(self, job):
+        if not self.supports_progress:
+            return
+        token = 'agent-' + job['request']['request_id']
+        job['progress_token'] = token
+        self.progress_jobs[token] = job
+        request_id = self.next_id
+        self.next_id += 1
+        self.progress_creates[request_id] = job
+        send({'id': request_id, 'method': 'window/workDoneProgress/create', 'params': {'token': token}})
+
+    def finish_progress(self, job):
+        job['finished'] = True
+        if job.get('progress_started'):
+            message = 'Cancelled' if job['cancel'].is_set() else 'Failed' if job.get('failed') else 'Finished'
+            send({'method': '$/progress', 'params': {
+                'token': job['progress_token'], 'value': {'kind': 'end', 'message': message},
+            }})
+            self.progress_jobs.pop(job['progress_token'], None)
+            job['progress_started'] = False
+
+    def collect_requests(self):
+        controls = state_dir() / 'cancel' / self.scope
+        for path in controls.glob('*.json'):
+            value = read_json(path)
+            path.unlink(missing_ok=True)
+            token = value.get('token')
+            for uri in list(self.requests):
+                self.requests[uri] = deque(r for r in self.requests[uri] if r['token'] != token)
+            for uri, job in list(self.jobs.items()):
+                if job['request']['token'] == token:
+                    self.cancel_job(job)
+        for path in sorted(common['queue_dir'](self.scope).glob('*.json')):
+            value = read_json(path)
+            uri = value.get('uri')
+            if uri not in self.documents:
+                continue  # Wait for didOpen; language-server startup is asynchronous.
+            document = self.documents[uri]
+            marker = document['text'].split('\n', 1)[0].rstrip('\r')
+            if marker != '# helix-agent-session: ' + value.get('token', ''):
+                path.unlink(missing_ok=True)
+                continue
+            try:
+                path.unlink()  # Only this editor/server can claim the request.
+            except FileNotFoundError:
+                continue
+            self.requests[uri].append(value)
+
+    def cancel_job(self, job):
+        job['cancel'].set()
+        # Serialize signalling and reaping so an exited child's PID cannot be
+        # reused for an unrelated group between poll() and killpg().
+        with job['process_lock']:
+            process = job.get('process')
+            if process is not None and process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def run_agent(self, uri, job):
+        request = job['request']
+        token, agent = request['token'], request['agent']
+        registry = state_dir() / 'registry' / (token + '.json')
+        registry.parent.mkdir(exist_ok=True, mode=0o700)
+        try:
+            with registry.with_suffix('.lock').open('a') as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    job['failed'] = True
+                    self.messages.put(('text', (uri, '\n[Conversation already running in another editor]\n')))
+                    return
+                ids = read_json(registry)
+                session_id = ids.get(agent, '') if request['mode'] == 'resume' else ''
+                with tempfile.TemporaryFile() as errors:
+                    process = subprocess.Popen(
+                        [sys.executable, str(Path(__file__).with_name('agent-session')),
+                         agent, request['mode'], '--', request['prompt']],
+                        env={**os.environ, 'HELIX_AGENT_SESSION': session_id if isinstance(session_id, str) else ''},
+                        cwd=request.get('cwd'),
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors,
+                        text=True, encoding='utf-8', errors='replace', start_new_session=True,
+                    )
+                    with job['process_lock']:
+                        job['process'] = process
+                    if job['cancel'].is_set():
+                        self.cancel_job(job)
+                    assert process.stdout is not None
+                    with process.stdout:
+                        for line in process.stdout:
+                            try:
+                                event = json.loads(line)
+                            except ValueError:
+                                self.messages.put(('text', (uri, line)))
+                                continue
+                            if event.get('type') == 'session':
+                                ids[agent] = event['id']
+                                write_json(registry, ids)
+                            elif event.get('type') == 'text':
+                                self.messages.put(('text', (uri, event.get('text', ''))))
+                    while True:
+                        with job['process_lock']:
+                            code = process.poll()
+                        if code is not None:
+                            break
+                        time.sleep(.01)
+                    job['failed'] = bool(code)
+                    errors.seek(0)
+                    diagnostic = errors.read().decode('utf-8', errors='replace')
+                    if diagnostic and not job['cancel'].is_set():
+                        self.messages.put(('text', (uri, diagnostic)))
+                    elif code and not job['cancel'].is_set():
+                        self.messages.put(('text', (uri, f'\n[{agent} exited with status {code}]\n')))
+        except Exception as error:
+            job['failed'] = True
+            self.messages.put(('text', (uri, f'\n[Agent error: {error}]\n')))
+        finally:
+            if job['cancel'].is_set():
+                self.messages.put(('text', (uri, '\n[Cancelled]\n')))
+            self.messages.put(('done', (uri, job)))
+
+    def advance(self):
+        for uri in list(self.documents):
+            busy_edit = any(edit['uri'] == uri for edit in self.edits.values())
+            can_retry = self.documents[uri]['version'] > self.retry_versions.get(uri, -1)
+            due = time.monotonic() >= self.next_flush[uri] or uri in self.flush_now
+            if self.text[uri] and not busy_edit and can_retry and due:
+                doc = self.documents[uri]
+                text, self.text[uri] = self.text[uri], ''
+                position = end_position(doc['text'])
+                edit_id = self.next_id
+                self.next_id += 1
+                self.next_flush[uri] = time.monotonic() + self.batch_interval
+                self.flush_now.discard(uri)
+                self.edits[edit_id] = {'uri': uri, 'version': doc['version'], 'text': text, 'applied': False}
+                send({'id': edit_id, 'method': 'workspace/applyEdit', 'params': {
+                    'label': 'Append agent output', 'edit': {'documentChanges': [{
+                        'textDocument': {'uri': uri, 'version': doc['version']},
+                        'edits': [{'range': {'start': position, 'end': position}, 'newText': text}],
+                    }]},
+                }})
+            busy_edit = any(edit['uri'] == uri for edit in self.edits.values())
+            if uri not in self.jobs and not self.text[uri] and not busy_edit and self.requests[uri]:
+                request = self.requests[uri].popleft()
+                job = {'request': request, 'cancel': threading.Event(), 'process': None, 'process_lock': threading.Lock()}
+                self.jobs[uri] = job
+                self.next_flush[uri] = 0
+                self.flush_now.discard(uri)
+                self.start_progress(job)
+                copy_prompt = request.get('copy_prompt')
+                if copy_prompt is None:
+                    # Older capture bindings did not supply source identity.
+                    copy_prompt = request['prompt'] not in self.documents[uri]['text']
+                if copy_prompt:
+                    self.append(uri, '\n\n' + request['prompt'] + '\n')
+                job['prefix'] = '\n'
+                job['thread'] = threading.Thread(target=self.run_agent, args=(uri, job), daemon=True)
+                job['thread'].start()
+
+    def release_edits(self, uri):
+        for edit_id, edit in list(self.edits.items()):
+            if edit['uri'] == uri and edit['applied'] and self.documents[uri]['version'] > edit['version']:
+                del self.edits[edit_id]
+
+    def handle_lsp(self, message):
+        method, params = message.get('method'), message.get('params', {})
+        if method == 'initialize':
+            self.supports_progress = bool(params.get('capabilities', {}).get('window', {}).get('workDoneProgress'))
+            send({'id': message['id'], 'result': {'capabilities': {
+                'positionEncoding': 'utf-16', 'textDocumentSync': {'openClose': True, 'change': 1},
+            }, 'serverInfo': {'name': 'agent-buffer-lsp'}}})
+        elif method == 'initialized':
+            self.ready = True
+        elif method == 'textDocument/didOpen':
+            document = params['textDocument'].copy()
+            self.documents[document['uri']] = document
+        elif method == 'textDocument/didChange':
+            uri = params['textDocument']['uri']
+            if uri in self.documents and params['contentChanges']:
+                self.documents[uri].update(params['textDocument'])
+                self.documents[uri]['text'] = params['contentChanges'][-1]['text']
+                self.release_edits(uri)
+        elif method == 'textDocument/didClose':
+            uri = params['textDocument']['uri']
+            if job := self.jobs.get(uri):
+                self.cancel_job(job)
+            self.documents.pop(uri, None)
+            self.requests.pop(uri, None)
+            self.text.pop(uri, None)
+            self.retry_versions.pop(uri, None)
+            self.next_flush.pop(uri, None)
+            self.flush_now.discard(uri)
+        elif method == 'window/workDoneProgress/cancel':
+            job = self.progress_jobs.get(params.get('token'))
+            if job is not None:
+                self.cancel_job(job)
+        elif method == 'shutdown':
+            self.ready = False
+            send({'id': message['id'], 'result': None})
+        elif method == 'exit':
+            return False
+        elif not method and message.get('id') in self.progress_creates:
+            job = self.progress_creates.pop(message['id'])
+            if 'error' not in message:
+                send({'method': '$/progress', 'params': {
+                    'token': job['progress_token'], 'value': {
+                        'kind': 'begin', 'title': job['request']['agent'].capitalize(),
+                        'message': 'Running', 'cancellable': True,
+                    },
+                }})
+                job['progress_started'] = True
+                if job.get('finished'):
+                    self.finish_progress(job)
+            else:
+                self.progress_jobs.pop(job['progress_token'], None)
+        elif not method and message.get('id') in self.edits:
+            edit_id = message['id']
+            edit = self.edits[edit_id]
+            if message.get('result', {}).get('applied'):
+                edit['applied'] = True
+                if edit['uri'] in self.documents:
+                    self.release_edits(edit['uri'])
+            else:
+                # An intervening user edit invalidated the old EOF/version.
+                # Retry the same text after the client's latest didChange.
+                self.retry_versions[edit['uri']] = edit['version']
+                self.text[edit['uri']] = edit['text'] + self.text[edit['uri']]
+                del self.edits[edit_id]
+        elif method and 'id' in message:
+            send({'id': message['id'], 'result': None})
+        return True
+
+    def run(self):
+        threading.Thread(target=read_messages, args=(self.messages,), daemon=True).start()
+        signal.signal(signal.SIGTERM, lambda *_: self.messages.put(('stop', None)))
+        try:
+            while True:
+                try:
+                    kind, value = self.messages.get(timeout=.03)
+                except queue.Empty:
+                    kind, value = None, None
+                if kind == 'stop':
+                    break
+                if kind == 'lsp' and not self.handle_lsp(value):
+                    break
+                if kind == 'text':
+                    uri, text = value
+                    job = self.jobs.get(uri)
+                    prefix = job.pop('prefix', '') if job and text else ''
+                    self.append(uri, prefix + text)
+                elif kind == 'done':
+                    uri, job = value
+                    self.flush_now.add(uri)
+                    self.finish_progress(job)
+                    if self.jobs.get(uri) is job:
+                        del self.jobs[uri]
+                if self.ready:
+                    self.collect_requests()
+                    self.advance()
+        finally:
+            jobs = list(self.jobs.values())
+            for job in jobs:
+                self.cancel_job(job)
+            # Let a thread still entering Popen observe cancellation and stop
+            # its newly created process group before this server exits.
+            for job in jobs:
+                job['thread'].join(timeout=2)
+                self.cancel_job(job)
+
+
+if __name__ == '__main__':
+    Bridge().run()

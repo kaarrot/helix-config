@@ -4,6 +4,9 @@ My Helix setup on Termux, plus `td` (todos, reminders, the agenda) and `tl`
 (time log), driven by the keys under `space ,`. How they work:
 [docs/agenda.md](docs/agenda.md); every key: [docs/keys.md](docs/keys.md).
 
+The tentative buffer-specific AI conversation bindings under `space .` are
+documented in [docs/agent-sessions.md](docs/agent-sessions.md).
+
 ## What td / tl need
 
 **Always**

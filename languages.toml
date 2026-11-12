@@ -155,3 +155,18 @@ name = "td.inline"
 scope = "source.td.inline"
 grammar = "markdown_inline"
 file-types = []
+
+# Agent replies are applied to the live buffer through the existing LSP interface.
+[language-server.agent-buffer-lsp]
+command = "python3"
+args = ["/data/data/com.termux/files/home/.config/helix/bin/agent-buffer-lsp"]
+
+[[language]]
+name = "agent-chat"
+scope = "source.agent-chat"
+grammar = "markdown"
+language-id = "markdown"
+file-types = [{ glob = "**/agent-sessions/conversations/*.md" }]
+roots = []
+language-servers = ["agent-buffer-lsp"]
+indent = { tab-width = 2, unit = "  " }

@@ -66,26 +66,18 @@ b = ":sh echo 'https://ADDRESS/-/blob/'$(git branch --show-current)'/%{buffer_na
 x = ["extend_to_line_bounds", ":pipe sed 's/^\\([^[]*\\)\\[ \\]/\\1[X]/; t; s/^\\([^[]*\\)\\[[xX]\\]/\\1[ ]/'", ":write"]
 
 
-# with std err output
-# v = "@:: sh -c 'echo \"$0\" | codex exec --skip-git-repo-check resume --last -'<ret>"
-# V = "@:: sh -c 'echo \"$0\" | codex exec --skip-git-repo-check -'<ret>"
-
-
-
-v = "@:: sh -c 'echo \"$0\" | codex exec --skip-git-repo-check resume --last - 2<gt>/dev/null'<ret>"
-V = "@:: sh -c 'echo \"$0\" | codex exec --skip-git-repo-check - 2<gt>/dev/null'<ret>"
-
-# Some actions in cocontinue mode would need more permissin permissions
-c = "@:: claude -c -p --permission-mode acceptEdits 2<gt>/dev/null<ret>"
-C = "@:: claude -p 2<gt>/dev/null<ret>"
-
-# grok -p takes the next arg as the prompt; keep it last so the selection is appended
-g = "@:: grok -c --permission-mode acceptEdits -p 2<gt>/dev/null<ret>"
-G = "@:: grok -p 2<gt>/dev/null<ret>"
-
-# agy -p takes the next arg as the prompt; keep it last so the selection is appended
-a = "@:: agy -c --dangerously-skip-permissions -p 2<gt>/dev/null<ret>"
-A = "@:: agy --dangerously-skip-permissions -p 2<gt>/dev/null<ret>"
+# Buffer-specific conversations: editable live output through agent-buffer-lsp.
+# Uppercase starts; lowercase resumes. space . q cancels this conversation.
+# Keep the capture suffix: Bash exits before treating the buffer name as metadata.
+v = ["keep_primary_selection", ":pipe-to python3 ~/.config/helix/bin/agent-buffer capture codex resume --line-start %{selection_line_start} --buffer-context \"$BASH_EXECUTION_STRING\"; exit # helix-agent-buffer: %{buffer_name}", "save_selection", "goto_file_start", "extend_to_line_bounds", ":pipe-to python3 ~/.config/helix/bin/agent-buffer header", "jump_backward", ":open %sh{python3 ~/.config/helix/bin/agent-buffer prepare}", ":set-language agent-chat", "goto_file_end", ":echo %sh{python3 ~/.config/helix/bin/agent-buffer start}"]
+V = ["keep_primary_selection", ":pipe-to python3 ~/.config/helix/bin/agent-buffer capture codex new --line-start %{selection_line_start} --buffer-context \"$BASH_EXECUTION_STRING\"; exit # helix-agent-buffer: %{buffer_name}", "save_selection", "goto_file_start", "extend_to_line_bounds", ":pipe-to python3 ~/.config/helix/bin/agent-buffer header", "jump_backward", ":open %sh{python3 ~/.config/helix/bin/agent-buffer prepare}", ":set-language agent-chat", "goto_file_end", ":echo %sh{python3 ~/.config/helix/bin/agent-buffer start}"]
+c = ["keep_primary_selection", ":pipe-to python3 ~/.config/helix/bin/agent-buffer capture claude resume --line-start %{selection_line_start} --buffer-context \"$BASH_EXECUTION_STRING\"; exit # helix-agent-buffer: %{buffer_name}", "save_selection", "goto_file_start", "extend_to_line_bounds", ":pipe-to python3 ~/.config/helix/bin/agent-buffer header", "jump_backward", ":open %sh{python3 ~/.config/helix/bin/agent-buffer prepare}", ":set-language agent-chat", "goto_file_end", ":echo %sh{python3 ~/.config/helix/bin/agent-buffer start}"]
+C = ["keep_primary_selection", ":pipe-to python3 ~/.config/helix/bin/agent-buffer capture claude new --line-start %{selection_line_start} --buffer-context \"$BASH_EXECUTION_STRING\"; exit # helix-agent-buffer: %{buffer_name}", "save_selection", "goto_file_start", "extend_to_line_bounds", ":pipe-to python3 ~/.config/helix/bin/agent-buffer header", "jump_backward", ":open %sh{python3 ~/.config/helix/bin/agent-buffer prepare}", ":set-language agent-chat", "goto_file_end", ":echo %sh{python3 ~/.config/helix/bin/agent-buffer start}"]
+g = ["keep_primary_selection", ":pipe-to python3 ~/.config/helix/bin/agent-buffer capture grok resume --line-start %{selection_line_start} --buffer-context \"$BASH_EXECUTION_STRING\"; exit # helix-agent-buffer: %{buffer_name}", "save_selection", "goto_file_start", "extend_to_line_bounds", ":pipe-to python3 ~/.config/helix/bin/agent-buffer header", "jump_backward", ":open %sh{python3 ~/.config/helix/bin/agent-buffer prepare}", ":set-language agent-chat", "goto_file_end", ":echo %sh{python3 ~/.config/helix/bin/agent-buffer start}"]
+G = ["keep_primary_selection", ":pipe-to python3 ~/.config/helix/bin/agent-buffer capture grok new --line-start %{selection_line_start} --buffer-context \"$BASH_EXECUTION_STRING\"; exit # helix-agent-buffer: %{buffer_name}", "save_selection", "goto_file_start", "extend_to_line_bounds", ":pipe-to python3 ~/.config/helix/bin/agent-buffer header", "jump_backward", ":open %sh{python3 ~/.config/helix/bin/agent-buffer prepare}", ":set-language agent-chat", "goto_file_end", ":echo %sh{python3 ~/.config/helix/bin/agent-buffer start}"]
+a = ["keep_primary_selection", ":pipe-to python3 ~/.config/helix/bin/agent-buffer capture agy resume --line-start %{selection_line_start} --buffer-context \"$BASH_EXECUTION_STRING\"; exit # helix-agent-buffer: %{buffer_name}", "save_selection", "goto_file_start", "extend_to_line_bounds", ":pipe-to python3 ~/.config/helix/bin/agent-buffer header", "jump_backward", ":open %sh{python3 ~/.config/helix/bin/agent-buffer prepare}", ":set-language agent-chat", "goto_file_end", ":echo %sh{python3 ~/.config/helix/bin/agent-buffer start}"]
+A = ["keep_primary_selection", ":pipe-to python3 ~/.config/helix/bin/agent-buffer capture agy new --line-start %{selection_line_start} --buffer-context \"$BASH_EXECUTION_STRING\"; exit # helix-agent-buffer: %{buffer_name}", "save_selection", "goto_file_start", "extend_to_line_bounds", ":pipe-to python3 ~/.config/helix/bin/agent-buffer header", "jump_backward", ":open %sh{python3 ~/.config/helix/bin/agent-buffer prepare}", ":set-language agent-chat", "goto_file_end", ":echo %sh{python3 ~/.config/helix/bin/agent-buffer start}"]
+q = ["save_selection", "goto_file_start", "extend_to_line_bounds", ":pipe-to python3 ~/.config/helix/bin/agent-buffer cancel", "jump_backward", ":echo %sh{python3 ~/.config/helix/bin/agent-buffer status}"]
 
 # ryk TTS: pipe the selection to the warm daemon (`ryk --send`), not one-shot
 # `ryk`. One-shot blocks Helix until playback ends. --send returns once queued

@@ -1,0 +1,238 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""Translate native agent output into JSONL for the Helix configuration helper.
+
+The conversation reference arrives in HELIX_AGENT_SESSION, independently of the
+selected prompt. agent-buffer consumes stdout; no shell or global 'latest' lookup is
+used to discover the ID of a newly created conversation.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import uuid
+
+
+AGENTS = ("codex", "claude", "grok", "agy")
+SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z")
+MISSING_SESSION = re.compile(
+    r"(?:no (?:saved |previous |existing )?(?:session|conversation)(?: was)? found"
+    r"|(?:session|conversation)[^\n]{0,160}(?:not found|does not exist|doesn't exist)"
+    r"|(?:could not|couldn't|cannot|can't|unable to) find (?:a |the )?(?:session|conversation))",
+    re.IGNORECASE,
+)
+
+
+def emit(kind, **fields):
+    print(json.dumps({"type": kind, **fields}, ensure_ascii=False), flush=True)
+
+
+class NativeStream:
+    def __init__(self, agent, proposed_id=None):
+        self.agent = agent
+        self.proposed_id = proposed_id
+        self.session_id = None
+        self.saw_text = False
+        self.turn_started = False
+        self.failed = False
+        self.errors = []
+        self.partial_text = False
+
+    def session(self, value):
+        if isinstance(value, str) and SESSION_ID.fullmatch(value):
+            if value != self.session_id:
+                self.session_id = value
+                emit("session", id=value)
+
+    def text(self, value):
+        if isinstance(value, str) and value:
+            self.saw_text = True
+            emit("text", text=value)
+
+    def error(self, value):
+        if isinstance(value, dict):
+            value = value.get("message", str(value))
+        if isinstance(value, str) and value:
+            self.errors.append(value)
+            self.failed = True
+
+    def event(self, event):
+        if not isinstance(event, dict):
+            raise ValueError("expected a JSON object from the agent")
+        kind = event.get("type")
+        if self.agent == "codex":
+            if kind == "thread.started":
+                self.session(event.get("thread_id"))
+            elif kind == "turn.started":
+                self.turn_started = True
+            elif kind == "item.completed":
+                item = event.get("item", {})
+                if item.get("type") == "agent_message":
+                    self.text(item.get("text", "") + "\n")
+            elif kind in ("error", "turn.failed"):
+                self.error(event.get("error", event.get("message", "Agent failed")))
+            return
+
+        # Grok's native streaming-json consists of ACP session updates.
+        update = event.get("update")
+        if self.agent == "grok" and isinstance(update, dict):
+            self.session(event.get("sessionId", event.get("session_id")))
+            update_kind = update.get("sessionUpdate", update.get("session_update"))
+            if update_kind == "agent_message_chunk":
+                self.turn_started = True
+                content = update.get("content", {})
+                if content.get("type") == "text":
+                    self.text(content.get("text"))
+            elif update_kind in ("tool_call", "tool_call_update"):
+                self.turn_started = True
+            return
+
+        # Claude and agy use Messages-style init, assistant and result events.
+        # Accept Grok's Messages format too, for installations using that format.
+        if kind in ("system", "init", "result"):
+            self.session(event.get("session_id", event.get("sessionId",
+                         event.get("conversation_id", event.get("conversationId")))))
+        if kind == "system" and event.get("subtype") == "init":
+            if not self.session_id and self.proposed_id:
+                self.session(self.proposed_id)
+        elif kind == "stream_event":
+            native = event.get("event", {})
+            if native.get("type") == "content_block_delta":
+                delta = native.get("delta", {})
+                if delta.get("type") == "text_delta":
+                    self.turn_started = True
+                    self.partial_text = True
+                    self.text(delta.get("text"))
+        elif kind == "assistant":
+            self.turn_started = True
+            self.session(event.get("session_id", self.proposed_id))
+            message = event.get("message", {})
+            if not self.partial_text:
+                for block in message.get("content", []):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        self.text(block.get("text", "") + "\n")
+            self.partial_text = False
+        elif kind == "result":
+            if event.get("is_error") or event.get("subtype", "").startswith("error"):
+                for error in event.get("errors", []):
+                    self.error(error)
+                self.error(event.get("result"))
+            elif not self.saw_text:
+                self.text(event.get("result", "") + "\n")
+        elif kind == "error":
+            self.error(event.get("error", event.get("message", "Agent failed")))
+
+
+def command(agent, mode, session_id, prompt):
+    proposed_id = None
+    if agent == "codex":
+        argv = ["codex", "exec", "--skip-git-repo-check", "--json"]
+        if mode == "resume":
+            argv += ["resume", session_id] if session_id else ["resume", "--last"]
+        return argv + ["-"], None
+    if agent == "claude":
+        argv = ["claude", "--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages"]
+        if mode == "resume":
+            argv += ["--permission-mode", "acceptEdits"]
+            argv += ["--resume", session_id] if session_id else ["--continue"]
+        else:
+            proposed_id = str(uuid.uuid4())
+            argv += ["--session-id", proposed_id]
+        return argv + ["--", prompt], proposed_id
+    if agent == "grok":
+        argv = ["grok", "--output-format", "streaming-json"]
+        if mode == "resume":
+            argv += ["--permission-mode", "acceptEdits"]
+            argv += ["--resume", session_id] if session_id else ["--continue"]
+        else:
+            proposed_id = str(uuid.uuid4())
+            argv += ["--session-id", proposed_id]
+        return argv + ["-p", prompt], proposed_id
+    argv = ["agy", "--output-format", "stream-json"]
+    if mode == "resume":
+        argv += ["--dangerously-skip-permissions"]
+        argv += ["--conversation", session_id] if session_id else ["--continue"]
+    else:
+        # Preserve the permission setting of the existing space . A binding.
+        argv += ["--dangerously-skip-permissions"]
+    return argv + ["-p", prompt], None
+
+
+def run(agent, mode, session_id, prompt):
+    argv, proposed_id = command(agent, mode, session_id, prompt)
+    stream = NativeStream(agent, proposed_id)
+    # A temporary input file avoids a pipe deadlock with large Codex prompts.
+    # Other agents receive exactly one prompt argument, as in the old bindings.
+    with tempfile.TemporaryFile() as prompt_file, tempfile.TemporaryFile() as errors:
+        prompt_file.write(prompt.encode("utf-8"))
+        prompt_file.seek(0)
+        process = subprocess.Popen(
+            argv, stdin=prompt_file if agent == "codex" else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=errors,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        assert process.stdout is not None
+        with process.stdout:
+            for line in process.stdout:
+                if not line.strip():
+                    continue
+                try:
+                    stream.event(json.loads(line))
+                except (ValueError, TypeError, AttributeError) as error:
+                    # Plain errors before an init event can indicate a stale ID.
+                    if not stream.turn_started and not stream.saw_text:
+                        stream.errors.append(line.strip())
+                        stream.failed = True
+                    else:
+                        stream.text(line)
+                        stream.error(f"Unexpected {agent} output: {error}")
+        returncode = process.wait()
+        errors.seek(0, os.SEEK_END)
+        length = errors.tell()
+        errors.seek(max(0, length - 16384))
+        stderr = errors.read().decode("utf-8", errors="replace").strip()
+    if not stream.session_id and proposed_id and returncode == 0 and not stream.failed:
+        stream.session(proposed_id)
+    diagnostics = "\n".join(stream.errors + ([stderr] if stderr else []))
+    return returncode, stream, diagnostics
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("agent", choices=AGENTS)
+    parser.add_argument("mode", choices=("new", "resume"))
+    parser.add_argument("prompt", nargs="?")
+    args = parser.parse_args(argv)
+    if not args.prompt:
+        emit("text", text="No prompt selected. Select the prompt before launching the agent.\n")
+        return 2
+    session_id = os.environ.get("HELIX_AGENT_SESSION", "")
+    if not SESSION_ID.fullmatch(session_id):
+        session_id = None
+    if args.mode == "new":
+        session_id = None
+    elif not session_id:
+        emit("text", text=f"[{args.agent}: no valid conversation marker; resuming most recent]\n")
+    try:
+        returncode, stream, diagnostics = run(args.agent, args.mode, session_id, args.prompt)
+        if (args.mode == "resume" and session_id and (returncode or stream.failed)
+                and not stream.turn_started and not stream.saw_text
+                and MISSING_SESSION.search(diagnostics)):
+            emit("text", text=f"[{args.agent}: saved conversation unavailable; resuming most recent]\n")
+            returncode, stream, diagnostics = run(args.agent, args.mode, None, args.prompt)
+        if returncode or stream.failed:
+            emit("text", text=f"[{args.agent}: {diagnostics or 'agent command failed'}]\n")
+            return returncode if returncode > 0 else 1
+        if not stream.session_id:
+            emit("text", text=f"[{args.agent}: no conversation ID reported; this buffer is not pinned]\n")
+        return 0
+    except OSError as error:
+        emit("text", text=f"[{args.agent}: {error}]\n")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
