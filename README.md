@@ -20,7 +20,7 @@ documented in [docs/agent-sessions.md](docs/agent-sessions.md).
 - **bash**: `editor.shell` uses `env BASH_ENV=$HOME/bashrc bash -c` to load
   shared functions and environment settings from `~/bashrc` without login
   startup files. `~/.bashrc` sources the same file for terminal sessions. The
-  prompt keys (`space , n`, `N`, `O`) read what you type from
+  prompt keys (`space , n`, `N`) read what you type from
   `$BASH_EXECUTION_STRING`.
 - **Python 3**, standard library only, for `bin/td` and `bin/tl`. No config
   files: `$TL_DIR` (default `~/tasks`) and `$TD_FILE` (default

@@ -102,12 +102,12 @@ k = ":pipe-to ryk --send"
 
 # Clock in: stop the running entry, start a new one at the end of the buffer (in todo.md, at the end of the todo you are on), normal mode at its end
 i = [":open %sh{~/.config/helix/bin/tl running --from %{buffer_name}:%{cursor_line}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{~/.config/helix/bin/tl next --skip %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl start - --file %{buffer_name}", "collapse_selection", ":write!", ":open %sh{cat ~/.cache/tl/goto && rm ~/.cache/tl/goto}", "goto_line_end"]
+# Clock in at the cursor: use a blank line, otherwise a new line below, in any buffer (todo.md too); normal mode at the entry's end
+I = [":open %sh{~/.config/helix/bin/tl running --from %{buffer_name}:%{cursor_line}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{~/.config/helix/bin/tl next --skip %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl start - --here --file %{buffer_name}", "collapse_selection", ":write!", ":open %sh{cat ~/.cache/tl/goto && rm ~/.cache/tl/goto}", "goto_line_end"]
 # Go to the running time-log entry, in whichever task file it is
-I = [":open %sh{~/.config/helix/bin/tl where --visit --from %{buffer_name}:%{cursor_line}}", "select_all", ":pipe-to ~/.config/helix/bin/tl where --locate - --file %{buffer_name}", ":open %sh{cat ~/.cache/tl/goto && rm ~/.cache/tl/goto}", ":echo %sh{~/.config/helix/bin/tl where --say}"]
+o = [":open %sh{~/.config/helix/bin/tl where --visit --from %{buffer_name}:%{cursor_line}}", "select_all", ":pipe-to ~/.config/helix/bin/tl where --locate - --file %{buffer_name}", ":open %sh{cat ~/.cache/tl/goto && rm ~/.cache/tl/goto}", ":echo %sh{~/.config/helix/bin/tl where --say}"]
 # Clock out: end the running entry and go to its task file, in insert mode on a "# " heading above it, to type what you did
-o = [":open %sh{~/.config/helix/bin/tl out --visit --from %{buffer_name}:%{cursor_line}}", "select_all", ":pipe ~/.config/helix/bin/tl out --edit - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{cat ~/.cache/tl/goto && rm ~/.cache/tl/goto}", "insert_at_line_end"]
-# Clock out from here: type what you did at the "# done:" prompt, Enter ends the running entry; stays in this buffer
-O = "@:write-all<ret>:sh ~/.config/helix/bin/tl out \"$BASH_EXECUTION_STRING\" # done: "
+O = [":open %sh{~/.config/helix/bin/tl out --visit --from %{buffer_name}:%{cursor_line}}", "select_all", ":pipe ~/.config/helix/bin/tl out --edit - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{cat ~/.cache/tl/goto && rm ~/.cache/tl/goto}", "insert_at_line_end"]
 # Refresh durations: work out "= 1h 15min" again for the entry on the line (or in the selected lines) from its times, say after typing one by hand; a running one is ended now
 u = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/tl close --file %{buffer_name}", "collapse_selection"]
 # Recently changed task files, newest first, in a popup
