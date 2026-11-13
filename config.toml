@@ -39,9 +39,6 @@ left = ["mode", "spinner", "completion-suggestions", "file-name", "read-only-ind
 
 
 [keys.insert]
-# Literal newline: no list/comment continuation or auto-indent. o/O still
-# continue the language's comment tokens; Ctrl-j keeps standard Enter behavior.
-ret = "@\n"
 # Press 'jk' quickly to leave insert mode
 #"a" = { "a" = "normal_mode" }
 # "j" = { "k" = "normal_mode" }
