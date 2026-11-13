@@ -39,6 +39,12 @@ left = ["mode", "spinner", "completion-suggestions", "file-name", "read-only-ind
 
 
 [keys.insert]
+# Auto-indent on Enter without continuing comment/list tokens: <C-j> runs
+# insert_newline (computing indentation), x ensures a non-whitespace char is
+# before the cursor, and <C-u> (kill_to_line_start) deletes back to the first
+# non-whitespace char on the line (stripping any continued comment token plus x
+# while keeping the leading indentation). o/O and Ctrl-j still continue tokens.
+ret = "@<C-j>x<C-u>"
 # Press 'jk' quickly to leave insert mode
 #"a" = { "a" = "normal_mode" }
 # "j" = { "k" = "normal_mode" }
