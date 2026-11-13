@@ -12,7 +12,10 @@ review-agent = "codex"
 continue-comments = true
 scroll-lines = 1
 gutters = ["diagnostics", "spacer", "diff"]
-shell = ["bash", "-lc"]
+# Run Bash without login startup files, which can invoke interactive bind setup.
+# BASH_ENV tells noninteractive Bash to source ~/bashrc for shared functions and
+# environment settings; Bash expands $HOME in this value.
+shell = ["env", "BASH_ENV=$HOME/bashrc", "bash", "-c"]
 end-of-line-diagnostics = "disable"
 auto-completion = true
 completion-trigger-len = 3  

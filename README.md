@@ -17,8 +17,11 @@ documented in [docs/agent-sessions.md](docs/agent-sessions.md).
   The fork also does the agenda folding (`runtime/queries/td/folds.scm`) and
   the `-bold` in `themes/github_light.toml` that keeps dates in bold tasks
   plain.
-- **bash**: `editor.shell` is `bash -lc`, and the prompt keys (`space , n`,
-  `N`, `O`) read what you type from `$BASH_EXECUTION_STRING`.
+- **bash**: `editor.shell` uses `env BASH_ENV=$HOME/bashrc bash -c` to load
+  shared functions and environment settings from `~/bashrc` without login
+  startup files. `~/.bashrc` sources the same file for terminal sessions. The
+  prompt keys (`space , n`, `N`, `O`) read what you type from
+  `$BASH_EXECUTION_STRING`.
 - **Python 3**, standard library only, for `bin/td` and `bin/tl`. No config
   files: `$TL_DIR` (default `~/tasks`) and `$TD_FILE` (default
   `~/tasks/todo.md`) are the only settings that matter day to day.
