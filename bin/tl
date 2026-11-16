@@ -75,7 +75,8 @@ the start/end times.
                         per-day totals for the last N days (default 14) over the task folder;
                         with --week, this week's (or DATE's week), Monday to Sunday. With --view,
                         written to ~/.cache/tl/summary.txt (read-only) instead, and its path
-                        printed (space , L); `+`/`-` there step it a week (view_step).
+                        printed (space , L); `+`/`-` there step it a week (view_step), and
+                        `space , p` jumps to the entry's line (view_jump).
                         Entries with no end time, of any date, are
                         listed first. Locations print as ~/path:line, for gf. Under each day, a
                         line per task (total and title: its file's first line), then the nearest
@@ -685,6 +686,17 @@ def cmd_recent(args):
     return 0
 
 
+def entry_topic(lines, i, inbox, heading):
+    """What the entry at lines[i] was for: the heading right above it (what you did, typed by
+    `O`), else the todo whose section it is in, else the nearest heading above. A todo-shaped
+    entry (`- [ ] 2026-10-12 09:00 - 10:00`) outside the inbox is no todo, and is under none."""
+    todo = section_of(lines, i) if inbox or not TODO.match(lines[i]) else None
+    if todo and not inbox and ATTEMPT.match(lines[todo[0]]):
+        todo = None
+    above = HEADING.match(lines[i - 1]) if i >= 1 else None
+    return above[1] if above else TODO.match(lines[todo[0]])["text"] if todo else heading
+
+
 def cmd_summary(arg, week=None):
     folder = Path(os.environ.get("TL_DIR", "~/tasks")).expanduser()
     if not folder.is_dir():
@@ -729,14 +741,7 @@ def cmd_summary(arg, week=None):
             e, err = parse_in(line, inbox)
             if e is None and err is None:
                 continue
-            # what the entry was for: the heading right above it (what you did, typed by `O`), else
-            # the todo whose section it is in, else the nearest heading above. A todo-shaped entry
-            # (`- [ ] 2026-10-12 09:00 - 10:00`) outside the inbox is no todo, and is under none.
-            todo = section_of(lines, n - 1) if inbox or not TODO.match(line) else None
-            if todo and not inbox and ATTEMPT.match(lines[todo[0]]):
-                todo = None
-            above = HEADING.match(lines[n - 2]) if n >= 2 else None
-            topic = above[1] if above else TODO.match(lines[todo[0]])["text"] if todo else heading
+            topic = entry_topic(lines, n - 1, inbox, heading)
             if e and e.end is None:
                 running.append((where, n, e, topic))
                 continue
@@ -833,6 +838,75 @@ def view_step(n):
     with contextlib.redirect_stdout(out):
         cmd_summary(None, (shown or now().date()) + timedelta(weeks=n))
     write_view(out.getvalue())
+
+
+DAY_ROW = re.compile(r"^(\d{4}-\d{2}-\d{2}) [A-Z][a-z]{2}\s+\d+h \d{2}min\s*$")
+TASK_ROW = re.compile(r"^    (\S.*?)\s{2,}\d+h \d{2}min(?:\s+.*)?$")
+TOPIC_ROW = re.compile(r"^      - (\S.*?)\s*$")
+
+
+def view_jump(lineno, raw):
+    """For `space , p` on the summary view (td jump calls this): the PATH:LINE of the entry on
+    row lineno (1-based), whose text is raw, or None to stay. A `- topic` row goes to the
+    earliest entry on that day for that task and topic (matching the order in cmd_summary); a
+    task row or day row goes to its first entry on that day; a running or warning row goes to
+    its ~/path:line."""
+    loc = re.match(r"^  (\S.+?):(\d+)  ", raw)
+    if loc:
+        path = Path(loc[1]).expanduser()
+        return f"{path}:{loc[2]}" if path.is_file() else None
+    try:
+        view = VIEW_PATH.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
+    except OSError:
+        return None
+    stripped = raw.rstrip()
+    at = (lineno - 1 if lineno and 1 <= lineno <= len(view) and view[lineno - 1].rstrip() == stripped
+          else next((i for i, line in enumerate(view) if line.rstrip() == stripped), None))
+    if at is None:
+        return None
+    day = task = topic = None
+    if m := TOPIC_ROW.match(raw):
+        topic = m[1]
+    elif m := TASK_ROW.match(raw):
+        task = m[1]
+    elif m := DAY_ROW.match(raw):
+        day = m[1]
+        if at + 1 < len(view) and (tm := TASK_ROW.match(view[at + 1])):
+            task = tm[1]
+    else:
+        return None
+    if day is None:
+        for line in reversed(view[:at]):
+            if task is None and (tm := TASK_ROW.match(line)):
+                task = tm[1]
+            elif dm := DAY_ROW.match(line):
+                day = dm[1]
+                break
+    if not (day and task):
+        return None
+    folder = Path(os.environ.get("TL_DIR", "~/tasks")).expanduser()
+    if not folder.is_dir():
+        return None
+    hits = []
+    for path in sorted(task_files(folder)):
+        if path.stem != task:
+            continue
+        heading, fenced, inbox = "", False, is_td_inbox(path)
+        lines = path.read_text(errors="replace").splitlines()
+        for n, line in enumerate(lines, 1):
+            if FENCE.match(line):
+                fenced = not fenced
+            elif not fenced and HEADING.match(line):
+                heading = HEADING.match(line).group(1)
+            e, _ = parse_in(line, inbox)
+            if e is None or e.end is None or e.date != day:
+                continue
+            if topic is None or entry_topic(lines, n - 1, inbox, heading) == topic:
+                hits.append((e.start, n, path))
+    if not hits:
+        return None
+    _, n, path = min(hits, key=lambda h: (h[0], h[1]))
+    return f"{path}:{n}"
 
 
 def main(argv):

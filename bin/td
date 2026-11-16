@@ -109,7 +109,9 @@ Commands:
                        goes, and writes it to ~/.cache/td/open: a bullet's
                        ~/tasks/<slug>.md if it exists; from an agenda row,
                        its todo.md line (INBOX:N); a file-task or orphan row,
-                       its file; else PATH:LINE (stay).
+                       its file; from tl's week summary view
+                       (~/.cache/tl/summary.txt), the entry's line; else
+                       PATH:LINE (stay).
   td set PATH LINE S   rewrite checkbox char at PATH:LINE to S (" "/Y/A/x/!)
   td toggle S          stdin: a line. Toggle the checkbox between " " and S
                        in place. With --from the agenda, the row stays as
@@ -1896,6 +1898,8 @@ def _goto(source, lineno, raw, want_file):
     truth. Anything else stays: PATH:LINE (a bare path would put the
     cursor back at the top)."""
     here = f"{source}:{lineno}" if source and lineno else str(source or td_file())
+    if source and source.name == "summary.txt" and _same_file(source, _tl().VIEW_PATH):
+        return _tl().view_jump(lineno, raw) or here
     bm = TASK.match(raw)
     if bm and bm["indent"] and _same_file(source, LIST_PATH):
         found = _subtask_at(raw, lineno)
@@ -1973,7 +1977,8 @@ def cmd_promote(args):
     raw = sys.stdin.read().rstrip("\r\n")
     m = TASK.match(raw)
     named = _task_name(LINK.sub("", MARKER.sub("", m["text"]))) if m else None
-    if named and not _same_file(source, LIST_PATH):
+    if (named and not _same_file(source, LIST_PATH)
+            and not (source and source.name == "summary.txt" and _same_file(source, _tl().VIEW_PATH))):
         core, slug = named
         folder = task_folder()
         folder.mkdir(parents=True, exist_ok=True)
@@ -4868,6 +4873,82 @@ def run_tests(verbose=False):
             tl = str(Path(TD).with_name("tl"))
             return sp.run([sys.executable, tl, *args], env=e, capture_output=True,
                           check=True).stdout.decode()
+
+        def test_jump_from_week_view(self):
+            # NOW is Saturday 2026-10-10; week is 2026-10-05 Mon to 2026-10-11 Sun.
+            day = self.put_dedicated(
+                "day.md",
+                "# [ ] day\n"
+                "# mindfulness\n```\n2026-10-10 13:20 - 13:20 = 0h 00min\n```\n"
+                "# mindfulness\n```\n2026-10-10 13:21 - 13:21 = 0h 00min\n```\n"
+                "- [ ] call bank [2026-10-12 Mon 09:30]\n  note\n"
+                "2026-10-09 10:00 - 10:00 = 0h 00min\n"
+                "# mindfulness\n```\n2026-10-09 08:00 - 08:00 = 0h 00min\n```\n"
+                "# running task\n2026-10-10 10:45 -\n"
+                "2026-10-09 25:00 -\n",
+            )
+            todo = self.put_inbox(
+                "- [ ] prep slides\n"
+                "  2026-10-10 09:00 - 09:30 = 0h 30min\n"
+            )
+            a = self.put_dedicated("a.md", "# Alpha\n2026-10-08 09:00 - 10:00\n")
+            view = Path(self.td_tl("summary", "--week", "--view"))
+            lines = view.read_text().splitlines()
+
+            def jump_row(pred):
+                lineno, line = next((i, l) for i, l in enumerate(lines, 1) if pred(l))
+                return self.td("jump", "--from", f"{view}:{lineno}", stdin=line + "\n").strip()
+
+            # Topic under day: same heading twice on one day lands on earliest (line 4);
+            # same heading on an earlier day lands on that day's timestamp (line 15).
+            self.assertEqual(jump_row(lambda l: l == "      - mindfulness"), f"{day}:4")
+            sat_idx = lines.index(next(l for l in lines if l.startswith("2026-10-10")))
+            fri_idx = lines.index(next(l for l in lines if l.startswith("2026-10-09")))
+            fri_mind = next(
+                (i, l) for i, l in enumerate(lines, 1)
+                if i - 1 > fri_idx and l == "      - mindfulness"
+            )
+            self.assertEqual(
+                self.td("jump", "--from", f"{view}:{fri_mind[0]}", stdin=fri_mind[1] + "\n").strip(),
+                f"{day}:15",
+            )
+            # Open stamped bullet entry in day.md lands on its timestamp line (line 12).
+            self.assertEqual(
+                jump_row(lambda l: l == "      - call bank [2026-10-12 Mon 09:30]"),
+                f"{day}:12",
+            )
+            # Topic under todo.md lands on its timestamp line (line 2).
+            self.assertEqual(jump_row(lambda l: l == "      - prep slides"), f"{todo}:2")
+            # Task row lands on the first entry on that day (2026-10-09: line 15 at 08:00).
+            fri_day_row = next(
+                (i, l) for i, l in enumerate(lines, 1)
+                if i - 1 > fri_idx and l.startswith("    day ")
+            )
+            self.assertEqual(
+                self.td("jump", "--from", f"{view}:{fri_day_row[0]}", stdin=fri_day_row[1] + "\n").strip(),
+                f"{day}:15",
+            )
+            # Day row (including a non-first day like 2026-10-08) lands on its first task's entry.
+            self.assertEqual(jump_row(lambda l: l.startswith("2026-10-08")), f"{a}:2")
+            self.assertEqual(jump_row(lambda l: l.startswith("2026-10-10")), f"{day}:4")
+            # Still running & Check by hand rows jump to their path:line.
+            self.assertEqual(jump_row(lambda l: "day.md:18" in l), f"{day}:18")
+            self.assertEqual(jump_row(lambda l: "day.md:19" in l), f"{day}:19")
+            # Header/total/blank lines stay on summary.txt:lineno.
+            self.assertEqual(jump_row(lambda l: l.startswith("Time summary")),
+                             f"{view}:{next(i for i, l in enumerate(lines, 1) if l.startswith('Time summary'))}")
+            self.assertEqual(
+                self.td("jump", "--from", f"{view}:{sat_idx}", stdin=lines[sat_idx - 1] + "\n").strip(),
+                f"{view}:{sat_idx}",
+            )
+            self.assertEqual(jump_row(lambda l: l.startswith("Total ")),
+                             f"{view}:{next(i for i, l in enumerate(lines, 1) if l.startswith('Total '))}")
+            # Deleted entry stays on summary.txt:lineno.
+            a.unlink()
+            self.assertEqual(
+                jump_row(lambda l: l.startswith("2026-10-08")),
+                f"{view}:{next(i for i, l in enumerate(lines, 1) if l.startswith('2026-10-08'))}",
+            )
 
     class Rename(Case):
         """td rename, as space , N runs it: the row's line in the agenda, then the new name."""
