@@ -101,24 +101,28 @@ file task or an orphan (below), and `space , p` no longer finds it.
 
 ### Tags
 
-Tasks can carry one or more `#tag` tokens anywhere in the bullet text or on
-a standalone file task's `# [S] title` heading — space-separated (`#home #coop`)
-or chained (`#tag1#tag2`). Tag matching is case-insensitive (`#Home` and
-`#home` are one tag), and tags are normalized to lowercase in listings. A tag
-must start with a letter and follow whitespace (or the start of the text), so
+Tasks can carry one or more `#tag` tokens anywhere in the bullet text or in
+their dedicated file, including its first heading, notes and subtasks —
+space-separated (`#home #coop`) or chained (`#tag1#tag2`). Tags anywhere in a
+dedicated file apply to its parent task, including standalone file tasks.
+Tag matching is case-insensitive (`#Home` and `#home` are one tag), and tags
+are normalized to lowercase in listings. A tag must start with a letter and
+follow whitespace (or the start of the text), so
 issue numbers (`#123`), URL fragments (`example.com#sec`), and heading
 markers (`# `) are ignored.
 
 Because tags are left out of the task slug and `added` hash, adding, changing,
 or removing `#tag` on a bullet keeps its link to `~/tasks/<slug>.md`, keeps
 its `added` order, and never re-fires an existing reminder. When a bullet has
-a dedicated file, tags from both the bullet and the file's first-line heading
-apply.
+a dedicated file, tags from both the bullet and the entire file apply.
 
 Renaming from the agenda keeps heading-only tags on the heading; renaming
 inside the file keeps bullet-only tags on the bullet. Tags shown in the
-rename prompt follow your edits, including removal. Editing only tags keeps
-the existing filename, so its reminder history keeps matching.
+rename prompt follow your edits, including removal. In the grouped tag view,
+the hidden group tag is kept when renaming; use `space , p` to edit its source
+if you want to remove it. Tags in the file's body stay there when renaming.
+Editing only tags keeps the existing filename, so its reminder history keeps
+matching.
 
 Files promoted before tag support keep their existing filenames (for example,
 `pay-rent-home.md` for `pay rent #home`). Once found from their headings, these
@@ -382,9 +386,11 @@ test a fresh one with `td fire ~/tasks/todo.md`.
   recently changed first) open the agenda grouped by tag under `# TAGS`:
   `- #tag (N)` headers sorted alphabetically, with each tag's open tasks
   indented under it (ordered by state priority, then the active sort) and
-  folded closed (`za` toggles a tag). Tasks carrying multiple tags appear
-  under each tag. Pressing `space , p` on a `- #tag (N)` header switches
-  the agenda to `td list --tag tag`, showing the standard state-grouped
+  folded closed (`za` toggles a tag). The tag named by the group header is
+  hidden on its task rows; other tags stay visible, and the source keeps all
+  its tags. Tasks carrying multiple tags appear under each tag. Pressing
+  `space , p` on a `- #tag (N)` header switches the agenda to
+  `td list --tag tag`, showing the standard state-grouped
   agenda (`TODAY`, `RESCHEDULE`, `ACTIVE`, `TODO`, `WAITING`) filtered to
   that tag; on an unfolded task row, `space , p`, `space , P`, `space , N`,
   `space , x`, and the status keys work as in the main agenda, and status
