@@ -45,16 +45,20 @@ Commands:
                        background when they finish, so the alarm follows.
                        Not stamp, shift and new: their keys don't save,
                        so the next tick sees their change.
-  td list [--state todo|today|active|waiting|done|all] [--sort added|modified]
+  td list [--state todo|today|active|waiting|done|all] [--sort added|modified] [--tag TAG] [--by-tag]
                        build the agenda from $TD_FILE bullets; write to
                        ~/.cache/td/agenda.md (read-only: it is a view) and
                        stdout. Appends " (*)" to
                        bullets whose slug has a dedicated file. Files with
                        no matching bullet are listed under their status if
                        their first line is `# [S] title` (done/ignored ones
-                       hidden), else in # ORPHANS, " (*)" too, no path. The options are kept
-                       in ~/.cache/td/agenda-args, so a rebuild after a
-                       change keeps the order.
+                       hidden), else in # ORPHANS, " (*)" too, no path. --tag TAG
+                       (with or without `#`) filters tasks and RESCHEDULE rows
+                       to that tag (no # ORPHANS); --by-tag groups open tasks
+                       under `# TAGS` by `#tag (N)` headers, each task indented
+                       for folding. The options are kept in
+                       ~/.cache/td/agenda-args, so a rebuild after a change
+                       keeps the order and filter/view.
                        added: newest first-seen first. modified: most
                        recently changed first (its line, or its dedicated
                        file; hand edits count from the next td run).
@@ -68,11 +72,13 @@ Commands:
   td promote [--from PATH:LINE]
                        stdin: a line, at PATH:LINE. A bullet gets its file
                        ~/tasks/<slug>.md: created with a `# [S] title`
-                       heading, or reused with the heading retagged (nothing
-                       is written from the agenda). Prints where `space , P`
-                       goes, and writes it to ~/.cache/td/open: that file
-                       (from an agenda row, the row's file, if any), else
-                       PATH:LINE. A bullet in the inbox is kept in
+                       heading (keeping any `#tag` tokens on the heading while
+                       leaving `#tag` and stamps out of the filename slug), or
+                       reused with the heading retagged and any new `#tag`
+                       appended (nothing is written from the agenda). Prints
+                       where `space , P` goes, and writes it to ~/.cache/td/open:
+                       that file (from an agenda row, the row's file, if any),
+                       else PATH:LINE. A bullet in the inbox is kept in
                        ~/.cache/td/cut, with its file, for --cut.
   td promote --cut - [--file PATH]
                        the next step of `space , P`, on the whole buffer of
@@ -108,7 +114,9 @@ Commands:
                        stdin: a line, at PATH:LINE. Prints where `space , p`
                        goes, and writes it to ~/.cache/td/open: a bullet's
                        ~/tasks/<slug>.md if it exists; from an agenda row,
-                       its todo.md line (INBOX:N); a file-task or orphan row,
+                       its todo.md line (INBOX:N); a `- #tag (N)` row in the
+                       --by-tag agenda switches agenda.md to `--tag tag` and
+                       stays on agenda.md:1; a file-task or orphan row,
                        its file; from tl's week summary view
                        (~/.cache/tl/summary.txt), the entry's line; else
                        PATH:LINE (stay).
@@ -239,6 +247,12 @@ H1 = re.compile(r"^#\s+(?:\[[ xXyYaAwW!]\]\s+)?(.+?)\s*$")
 H1_STATE = re.compile(r"^#\s+\[([ xXyYaAwW!])\]")
 SLUG_SPLIT = re.compile(r"[^A-Za-z0-9]+")
 CHECKBOX = re.compile(r"- \[[ xXyYaAwW!]\]")
+# One or more #tag tokens after whitespace (or at start of string), e.g.
+# `#home` or `#tag1#tag2`. A tag starts with a letter and continues with
+# letters, digits, `_` or `-`, so `#123`, `foo#bar` and `# ` are not tags.
+TAG_CLUSTER = re.compile(r"(?<!\S)(?:#[A-Za-z][A-Za-z0-9_-]*)+(?![A-Za-z0-9_-])")
+TAG_NAME = re.compile(r"#([A-Za-z][A-Za-z0-9_-]*)")
+TAG_ROW = re.compile(r"^- #(?P<tag>[A-Za-z][A-Za-z0-9_-]*)(?: \(\d+\))?\s*$")
 
 STATE_NAMES = {" ": "todo", "Y": "today", "A": "active", "W": "waiting",
                "x": "done", "X": "done", "!": "ignore"}
@@ -264,6 +278,8 @@ LIST_PATH = CACHE / "agenda.md"
 # The `td list` options the agenda was last built with, so a rebuild after a
 # change keeps the view's order (space , A) instead of falling back to added.
 LIST_ARGS_PATH = CACHE / "agenda-args"
+# Legacy filenames stay linked even after their original tags are edited away.
+FILE_LINKS_PATH = CACHE / "file-links"
 # Cursor column `space , s` and `+`/`-` hand from Helix to td (and back).
 COL_PATH = CACHE / "stamp-col"
 # Where `space , p` / `P` go: td jump/promote write it, the key :opens it.
@@ -375,17 +391,27 @@ def _with_stamp_brackets(s, start, end):
     return (i - 1, tail.end()) if tail else (start, end)
 
 
-def _identity_text(text):
-    """Task text with link, (*), and its stamps and repeaters removed.
+def find_tags(text):
+    """Distinct lowercase tag names in text, in order of appearance."""
+    s = LINK.sub("", MARKER.sub("", text))
+    out = []
+    for m in TAG_CLUSTER.finditer(s):
+        for tag in TAG_NAME.findall(m.group(0)):
+            low = tag.lower()
+            if low not in out:
+                out.append(low)
+    return out
+
+
+def _without_stamps(text):
+    """Task text with link, (*), and its stamps and repeaters removed, keeping
+    #tag tokens.
 
     A stamp is an annotation, wherever it is in the line (`call bank
     2026-10-12 10:00 - bring docs`, `rent 2026-11-01 09:00 ++1m #home`).
-    Leaving it in the slug or the added-hash orphans the dedicated file and
-    jumps the row to the top of the agenda every time `td stamp`, `+`/`-` or
-    a repeater bump moves the date. A repeater goes with the stamps: on a
-    line with none, `++1d` is text. Brackets around the stamp go too, a
-    repeater written inside them included, so neither the task name nor
-    the file name keeps them. Other brackets stay text.
+    Brackets around the stamp go too, a repeater written inside them included,
+    so neither the heading nor the file name keeps them. Other brackets stay
+    text.
     """
     s = MARKER.sub("", text).strip()
     s = LINK.sub("", s).strip()
@@ -398,11 +424,27 @@ def _identity_text(text):
     return re.sub(r"\s+", " ", s).strip()
 
 
-def bullet_hash(path, text):
-    """Stable hash: ignores checkbox, link, marker, and a trailing stamp."""
-    core = _identity_text(text)
+def _identity_text(text):
+    """Task text with link, (*), stamps, repeaters, and #tag tokens removed.
+
+    Keeping tags out of the slug and added-hash means adding, changing, or
+    removing `#tag` on a bullet keeps its dedicated file link and `added`
+    order intact. If stripping tags leaves no alphanumeric characters (e.g. a
+    bullet whose text is only `#home`), fall back to the untagged-kept form.
+    """
+    s = _without_stamps(text)
+    untagged = re.sub(r"\s+", " ", TAG_CLUSTER.sub(" ", s)).strip()
+    return untagged if SLUG_SPLIT.sub("", untagged) else s
+
+
+def _task_hash(path, core):
     h = hashlib.sha1(f"{path}\t{core}".encode("utf-8", "surrogateescape"))
     return h.hexdigest()[:16]
+
+
+def bullet_hash(path, text):
+    """Stable hash: ignores checkbox, link, marker, stamps, repeaters and tags."""
+    return _task_hash(path, _identity_text(text))
 
 
 def schedule_hash(path, due_iso, text):
@@ -561,7 +603,7 @@ def _reminder_text(path, lineno, raw):
         r"^\s*(?:[-*+]|#+)\s+(?:\[[ xXyYaAwW!]\]\s+)?", "", raw))
 
 
-def scan_schedules():
+def scan_schedules(lookup=None):
     """All schedule candidates across $TL_DIR files + inbox bullets.
 
     Any `YYYY-MM-DD HH:MM` timestamp counts — no `SCHEDULE:` marker needed —
@@ -581,8 +623,9 @@ def scan_schedules():
     inbox, bullets = scan_inbox()
     if inbox.is_file() and not any(_same_file(f, inbox) for f in files):
         files.append(inbox)
-    has_bullet = {slugify(b.text) for b in bullets}
-    open_bullet = {slugify(b.text) for b in bullets if b.state in VISIBLE}
+    lookup = _task_file_lookup() if lookup is None else lookup
+    has_bullet = {_linked_slug(b.text, lookup) for b in bullets}
+    open_bullet = {_linked_slug(b.text, lookup) for b in bullets if b.state in VISIBLE}
     out = []
     for f in files:
         is_inbox = _same_file(f, inbox)
@@ -662,6 +705,80 @@ def _drop_lines(path, old):
     keep = [line for line in lines if not old(line)]
     if len(keep) != len(lines):
         _rewrite_sidecar(path, keep)
+
+
+def _migrate_task_history(bullets):
+    """Carry pre-tag-support task keys forward before agenda compaction drops them.
+
+    Keep the earliest added time and latest change. Stored labels also recover
+    the old key when tags were edited before the first upgraded agenda run;
+    verify their hash first, since labels may have been truncated.
+    """
+    live = {b.hash for b in bullets}
+    aliases = {}
+
+    def remember(path, text, expected=None):
+        old = _task_hash(path, _without_stamps(text))
+        new = bullet_hash(path, text)
+        if old != new and new in live and (expected is None or old == expected):
+            aliases[old] = new
+
+    for b in bullets:
+        remember(str(b.path), b.text)
+    paths = {str(b.path) for b in bullets}
+    for line in _read_sidecar(ADDED_PATH):
+        parts = line.split("\t", 2)
+        if len(parts) == 3 and parts[1] not in live:
+            for path in paths:
+                remember(path, parts[2], parts[1])
+    if not aliases:
+        return
+    for path in (ADDED_PATH, CHANGED_PATH):
+        last = {}
+        for line in _read_sidecar(path):
+            parts = line.split("\t", 2)
+            if len(parts) >= 2:
+                last[parts[1]] = parts
+        migrated = []
+        for old, new in aliases.items():
+            previous, current = last.get(old), last.get(new)
+            if previous is None:
+                continue
+            if (current is None or (previous[0] < current[0] if path == ADDED_PATH
+                                    else previous[0] > current[0])):
+                row = [previous[0], new, *previous[2:]]
+                migrated.append(row)
+                last[new] = row
+        if migrated:
+            _append_sidecar(path, migrated)
+
+
+def _migrate_reminder_history(items):
+    """Translate old scheduled/fired keys without changing paths or due times.
+
+    The hash uses the written date, including for later repeater occurrences.
+    Called under the tick lock so a migration cannot lose a concurrent fire.
+    """
+    aliases = {}
+    for s in items:
+        b = parse_bullet(s.path, s.line, s.raw)
+        text = _without_stamps(b.text if b else s.raw)
+        old = schedule_hash(str(s.path), s.due.isoformat(timespec="minutes"), text)
+        if old != s.hash:
+            aliases[old] = s.hash
+    if not aliases:
+        return
+    for path in (SCHEDULED_PATH, FIRED_PATH):
+        lines = _read_sidecar(path)
+        migrated = []
+        for line in lines:
+            parts = line.split("\t", 2)
+            if len(parts) >= 2 and parts[1] in aliases:
+                parts[1] = aliases[parts[1]]
+                line = "\t".join(parts)
+            migrated.append(line)
+        if migrated != lines:
+            _rewrite_sidecar(path, migrated)
 
 
 # Reminder rows are kept this long after they were due. By then a tick has
@@ -1000,6 +1117,7 @@ def _tick():
     t = now()
     lead = timedelta(minutes=int(os.environ.get("TD_LEAD_MIN", "0")))
     items = scan_schedules()
+    _migrate_reminder_history(items)
     scheduled = load_scheduled()
     fired = load_fired()
     last_tick = load_last_tick()
@@ -1063,19 +1181,58 @@ def _tick():
 def _parse_list_args(args):
     state = "all"
     sort = "added"
+    tag = None
+    by_tag = False
     i = 0
     while i < len(args):
         if args[i] == "--state" and i + 1 < len(args):
             state = args[i + 1]; i += 2
         elif args[i] == "--sort" and i + 1 < len(args):
             sort = args[i + 1]; i += 2
+        elif args[i] == "--tag" and i + 1 < len(args):
+            raw_tag = args[i + 1]
+            norm = raw_tag[1:] if raw_tag.startswith("#") else raw_tag
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", norm):
+                sys.exit(f"bad --tag: {raw_tag}")
+            tag = norm.lower()
+            i += 2
+        elif args[i] == "--by-tag":
+            by_tag = True; i += 1
         else:
             i += 1
     if state not in ("todo", "today", "active", "waiting", "done", "all"):
         sys.exit(f"bad --state: {state}")
     if sort not in ("added", "modified"):
         sys.exit(f"bad --sort: {sort}")
-    return state, sort
+    return state, sort, tag, by_tag
+
+
+def _task_tags(b, inbox, existing, lookup=None):
+    """Distinct lowercase tags for task Bullet b (from its own text plus its
+    dedicated file's first-line H1 if b is an inbox bullet with a file)."""
+    tags = find_tags(b.text)
+    if _same_file(b.path, inbox) and _linked_slug(b.text, lookup) in existing:
+        path = dedicated_path(b.text, lookup)
+        try:
+            first = path.read_bytes().decode("utf-8", "surrogateescape").splitlines()[:1]
+        except OSError:
+            first = []
+        hm = H1_PARTS.match(first[0]) if first else None
+        if hm:
+            for t in find_tags(hm["title"]):
+                if t not in tags:
+                    tags.append(t)
+    return tags
+
+
+def _scheduled_has_tag(s, tag, tags_by_slug, inbox, existing, lookup=None):
+    """True when Scheduled s carries tag on its line, heading, or owning task."""
+    if tag in find_tags(s.raw):
+        return True
+    if _same_file(s.path, inbox):
+        b = parse_bullet(s.path, s.line, s.raw)
+        return bool(b and tag in _task_tags(b, inbox, existing, lookup))
+    return tag in find_tags(s.title) or tag in tags_by_slug.get(s.path.stem.lower(), ())
 
 
 def _row(b, has_file):
@@ -1129,19 +1286,89 @@ def _existing_slugs():
     return out
 
 
-def _task_file(slug):
-    """~/tasks/<slug>.md for a slug that keeps its capitals (file_slug): the file already there
-    under that name, or under the same one in other capitals, else the path a new one gets."""
+def _legacy_file_matches(stem, title):
+    """Whether stem is title's old slug, allowing tags added to its heading
+    since promotion. Non-tag words must match; each tag can be omitted."""
+    def words(text):
+        return "".join(re.escape(w.lower()) + "-" for w in SLUG_SPLIT.split(text) if w)
+
+    text = _without_stamps(title)
+    parts, start = [], 0
+    for m in TAG_CLUSTER.finditer(text):
+        parts.append(words(text[start:m.start()]))
+        parts.extend(f"(?:{words(tag)})?" for tag in TAG_NAME.findall(m.group(0)))
+        start = m.end()
+    parts.append(words(text[start:]))
+    return re.fullmatch("-" + "".join(parts), "-" + stem.lower() + "-") is not None
+
+
+def _task_file_lookup(existing=None):
+    """Physical stems plus unambiguous aliases for pre-tag-support filenames.
+    Build once per scan so unpromoted bullets don't each reread every heading."""
+    existing = _existing_slugs() if existing is None else existing
+    lookup = dict(existing)
+    known = {}
+    for line in _read_sidecar(FILE_LINKS_PATH):
+        parts = line.split("\t", 1)
+        if len(parts) == 2:
+            known[parts[0]] = parts[1]
+    # Keep pre-tag-support filenames in place: open buffers, time-log labels
+    # and reminder histories still refer to them. Only accept a heading whose
+    # old filename matches; an arbitrary file with the same title is unrelated.
+    legacy, remembered = {}, []
+    folder = task_folder().resolve()
+    for stem in existing.values():
+        candidate = task_folder() / f"{stem}.md"
+        key = str(folder / candidate.name)
+        try:
+            with candidate.open("rb") as f:
+                first = f.readline().decode("utf-8", "surrogateescape").rstrip("\r\n")
+        except OSError:
+            continue
+        hm = H1_PARTS.match(first)
+        if hm:
+            slug = slugify(hm["title"])
+            if (slug not in existing and
+                    (known.get(key) == slug or _legacy_file_matches(stem, hm["title"]))):
+                legacy.setdefault(slug, []).append(stem)
+                if known.get(key) != slug:
+                    remembered.append((key, slug))
+        elif key in known and known[key] not in existing:
+            legacy.setdefault(known[key], []).append(stem)
+    if remembered:
+        _append_sidecar(FILE_LINKS_PATH, remembered)
+    lookup.update((slug, stems[0]) for slug, stems in legacy.items() if len(stems) == 1)
+    return lookup
+
+
+def _task_file(slug, lookup=None):
+    """~/tasks/<slug>.md, reusing its existing capitals or legacy tagged filename."""
     path = task_folder() / f"{slug}.md"
     if path.exists():
         return path
-    return task_folder() / f"{_existing_slugs().get(slug.lower(), slug)}.md"
+    lookup = _task_file_lookup() if lookup is None else lookup
+    return task_folder() / f"{lookup.get(slug.lower(), slug)}.md"
 
 
-def dedicated_path(text):
+def dedicated_path(text, lookup=None):
     """The own file of the task whose text is text: found whatever its capitals, else the new
     file's path, named with the text's capitals."""
-    return _task_file(file_slug(text) or "untitled")
+    path = _task_file(file_slug(text) or "untitled", lookup)
+    if not path.exists():
+        # Also handle an old file with no usable heading, while the bullet
+        # still carries the original tags used in its filename.
+        legacy = SLUG_SPLIT.sub("-", _without_stamps(text)).strip("-")
+        if legacy:
+            stems = _existing_slugs() if lookup is None else lookup
+            stem = stems.get(legacy.lower())
+            if stem and stem.lower() == legacy.lower():
+                return task_folder() / f"{stem}.md"
+    return path
+
+
+def _linked_slug(text, lookup=None):
+    """The actual filename stem, which may retain tags from before tag support."""
+    return dedicated_path(text, lookup).stem.lower()
 
 
 def _subtasks(path):
@@ -1166,6 +1393,31 @@ def _subtask_row(indent, state, text):
     return f"  {indent}- [{state}] {text}"
 
 
+def _parent_row(raw, row=None):
+    """The first unindented `- ...` line above `raw` in agenda.md, or None."""
+    m = TASK.match(raw)
+    if not m or not m["indent"]:
+        return None
+    try:
+        lines = LIST_PATH.read_bytes().decode("utf-8", "surrogateescape").splitlines()
+    except OSError:
+        return None
+    stripped = raw.rstrip()
+    at = (row - 1 if row and 1 <= row <= len(lines) and lines[row - 1].rstrip() == stripped
+          else next((i for i, line in enumerate(lines) if line.rstrip() == stripped), None))
+    for line in reversed(lines[:at] if at is not None else []):
+        if line.startswith("- "):
+            return line
+    return None
+
+
+def _unindent_tag_task(raw, row=None):
+    """If raw is an indented task row under a `- #tag (N)` row in agenda.md,
+    return raw without its leading indent; else raw."""
+    parent = _parent_row(raw, row)
+    return raw.lstrip(" \t") if parent and TAG_ROW.match(parent) else raw
+
+
 def _subtask_at(raw, row):
     """An indented agenda row is a subtask: -> (path, line, col) of its bullet in its task's file
     now, col on its text, or None. Its task's row is the first unindented one above it in
@@ -1183,9 +1435,10 @@ def _subtask_at(raw, row):
         (i for i, line in enumerate(lines) if line.rstrip() == raw), None)
     parent = None
     for line in reversed(lines[:at] if at is not None else []):
-        pm = TASK.match(line)
-        if pm and not pm["indent"]:
-            parent = pm
+        if line.startswith("- "):
+            pm = TASK.match(line)
+            if pm:
+                parent = pm
             break
     if parent is None:
         return None
@@ -1202,12 +1455,12 @@ def _subtask_at(raw, row):
     return None
 
 
-def _modified_iso(b, changed):
+def _modified_iso(b, changed, lookup=None):
     """When bullet b was last touched: its line changed, or its dedicated
     file was written, whichever is later."""
     iso = changed.get(b.hash, "0")
     # A file task (see _file_tasks) is its own file.
-    dedicated = (dedicated_path(b.text)
+    dedicated = (dedicated_path(b.text, lookup)
                  if _same_file(b.path, td_file()) else b.path)
     try:
         mtime = datetime.fromtimestamp(dedicated.stat().st_mtime)
@@ -1216,13 +1469,18 @@ def _modified_iso(b, changed):
     return max(iso, mtime.isoformat(timespec="seconds"))
 
 
-def _fired_reminders(t):
+def _fired_reminders(t, lookup=None):
     """One-off reminders that went off and still wait, for the agenda's
     RESCHEDULE: open (scan_schedules), due by t, with a `fired` row, on a
     line with no ++/.+ repeater (that one reminds again, see _tick).
     Oldest first."""
-    fired = load_fired()
-    return sorted((s for s in scan_schedules()
+    items = scan_schedules(lookup)
+    CACHE.mkdir(parents=True, exist_ok=True)
+    with TICK_LOCK.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _migrate_reminder_history(items)
+        fired = load_fired()
+    return sorted((s for s in items
                    if s.due <= t and not REPEATER.search(s.raw)
                    and (s.hash, s.due.isoformat(timespec="minutes")) in fired),
                   key=lambda s: (s.due, str(s.path), s.line, s.col))
@@ -1249,13 +1507,15 @@ def _fired_row(s):
 
 
 def build_list(args):
-    state, sort = _parse_list_args(args)
+    state, sort, tag, by_tag = _parse_list_args(args)
     inbox, bullets = scan_inbox()
     existing = _existing_slugs()
-    bullet_slugs = {slugify(b.text) for b in bullets}
+    lookup = _task_file_lookup(existing)
+    bullet_slugs = {_linked_slug(b.text, lookup) for b in bullets}
     # Files with a `# [S]` first line and no bullet are tasks of their own.
     file_tasks = _file_tasks(bullet_slugs)
     bullets = bullets + file_tasks
+    _migrate_task_history(bullets)
     # To the second, so tasks seen a few seconds apart don't tie.
     when = now().isoformat(timespec="seconds")
     update_added([(b.hash, b.text) for b in bullets], when)
@@ -1264,29 +1524,54 @@ def build_list(args):
     if inbox.is_file():
         # Not when the inbox is missing (mid-sync, say): every row would go.
         compact_task_rows({b.hash for b in bullets})
+    tags_by_slug = {}
+    task_tags_map = {}
+    for b in bullets:
+        tags = _task_tags(b, inbox, existing, lookup)
+        task_tags_map[id(b)] = tags
+        if b.state in VISIBLE:
+            slug = _linked_slug(b.text, lookup) if _same_file(b.path, inbox) else b.path.stem.lower()
+            tags_by_slug.setdefault(slug, set()).update(tags)
     kept = [b for b in bullets if (b.state in VISIBLE if state == "all"
                                    else STATE_NAMES[b.state] == state)]
+    if tag:
+        kept = [b for b in kept if tag in task_tags_map[id(b)]]
     if sort == "modified":
-        kept.sort(key=lambda b: _modified_iso(b, changed), reverse=True)
+        kept.sort(key=lambda b: _modified_iso(b, changed, lookup), reverse=True)
     else:
         kept.sort(key=lambda b: added.get(b.hash, "0"), reverse=True)
 
     def row(b):
         if not _same_file(b.path, inbox):
             return _row(b, True)  # a file task
-        return _row(b, slugify(b.text) in existing)
+        return _row(b, _linked_slug(b.text, lookup) in existing)
 
     def rows(b):
         """b's row, then, if it is open, the open subtasks in its own file."""
         if _same_file(b.path, inbox):
-            own = dedicated_path(b.text) if slugify(b.text) in existing else None
+            own = dedicated_path(b.text, lookup) if _linked_slug(b.text, lookup) in existing else None
         else:
             own = b.path  # a file task is its own file
         subs = _subtasks(own) if own and b.state in VISIBLE else []
         return [row(b)] + [_subtask_row(*s) for s in subs]
 
     out = [LEGEND, ""]
-    if state == "all":
+    if by_tag:
+        state_rank = {STATE_FROM_NAME[name]: idx for idx, name in enumerate(GROUPS)}
+        groups_by_tag = {}
+        for b in kept:
+            for t in task_tags_map[id(b)]:
+                groups_by_tag.setdefault(t, []).append(b)
+        out.append("# TAGS")
+        out.append("")
+        for t in sorted(groups_by_tag):
+            items = sorted(groups_by_tag[t],
+                           key=lambda b: state_rank.get(b.state, len(GROUPS)))
+            out.append(f"- #{t} ({len(items)})")
+            for b in items:
+                out.append(f"  {row(b)}")
+        out.append("")
+    elif state == "all":
         groups = {name: [] for name in GROUPS}
         for b in kept:
             groups[STATE_NAMES[b.state]].append(b)
@@ -1294,14 +1579,17 @@ def build_list(args):
         for name in GROUPS:
             sections.append((name.upper(), [r for b in groups[name] for r in rows(b)]))
             if name == "today":
-                sections.append(("RESCHEDULE", [_fired_row(s) for s in
-                                                _fired_reminders(now())]))
-        for title, rows in sections:
-            if not rows:
+                fired = _fired_reminders(now(), lookup)
+                if tag:
+                    fired = [s for s in fired
+                             if _scheduled_has_tag(s, tag, tags_by_slug, inbox, existing, lookup)]
+                sections.append(("RESCHEDULE", [_fired_row(s) for s in fired]))
+        for title, section_rows in sections:
+            if not section_rows:
                 continue
             out.append(f"# {title}")
             out.append("")
-            out.extend(rows)
+            out.extend(section_rows)
             out.append("")
     else:
         out.append(f"# {state.upper()}")
@@ -1312,7 +1600,7 @@ def build_list(args):
 
     orphans = sorted((existing[k] for k in existing.keys() - bullet_slugs
                       - {b.path.stem.lower() for b in file_tasks}), key=str.lower)
-    if orphans and state == "all":
+    if orphans and state == "all" and not by_tag and not tag:
         out.append("# ORPHANS")
         out.append("")
         for stem in orphans:
@@ -1337,10 +1625,15 @@ def _write_agenda(text):
 
 
 def cmd_list(args):
-    state, sort = _parse_list_args(args)
+    state, sort, tag, by_tag = _parse_list_args(args)
     text = build_list(args)
     _write_agenda(text)
-    LIST_ARGS_PATH.write_text(f"--state {state} --sort {sort}\n", encoding="utf-8")
+    saved = f"--state {state} --sort {sort}"
+    if tag:
+        saved += f" --tag {tag}"
+    if by_tag:
+        saved += " --by-tag"
+    LIST_ARGS_PATH.write_text(saved + "\n", encoding="utf-8")
     sys.stdout.write(text)
     return 0
 
@@ -1471,17 +1764,19 @@ def _row_file(raw):
         return None
     title = MARKER.sub("", m["text"]).strip()
     _, bullets = scan_inbox()
-    for f in _file_tasks({slugify(b.text) for b in bullets}):
+    lookup = _task_file_lookup()
+    for f in _file_tasks({_linked_slug(b.text, lookup) for b in bullets}):
         if f.text == title and f.state == canon(m["state"]):
             return f.path
     return None
 
 
-def _agenda_task(raw):
+def _agenda_task(raw, row=None):
     """The task an agenda row shows -> RowTask: kind "file" for a file-task or orphan row (path:
     its file; name: its first-line heading's title, else the file's name), kind "bullet" for a
     bullet row (name: its text without the ` (*)`; state, to find it in todo.md). Else None,
     a subtask row (indented) too: it is a line in its task's file, not a task of its own."""
+    raw = _unindent_tag_task(raw, row)
     bm = TASK.match(raw)
     if bm and bm["indent"]:
         return None
@@ -1490,7 +1785,6 @@ def _agenda_task(raw):
         first = path.read_bytes().decode("utf-8", "surrogateescape").splitlines()[:1]
         hm = H1_PARTS.match(first[0]) if first else None
         return RowTask("file", task_folder() / path.name, hm["title"] if hm else path.stem, None)
-    bm = TASK.match(raw)
     if bm:
         return RowTask("bullet", None, MARKER.sub("", bm["text"]).strip(), bm["state"])
     return None
@@ -1526,7 +1820,8 @@ def _file_buffer_task(path):
     slug = _dedicated_slug(path)
     if slug is None or not path.is_file():
         return None
-    bullets = [b for b in scan_inbox()[1] if slugify(b.text) == slug]
+    lookup = _task_file_lookup()
+    bullets = [b for b in scan_inbox()[1] if _linked_slug(b.text, lookup) == slug]
     if bullets:
         b = next((b for b in bullets if b.state in VISIBLE), bullets[0])
         return RowTask("bullet", None, MARKER.sub("", b.text).strip(), b.state)
@@ -1553,6 +1848,28 @@ def _with_stamps_of(old, name):
     return " ".join(part for part in (name, tail, link.group(0).strip() if link else "") if part)
 
 
+def _with_unseen_tags(text, source, shown):
+    """Keep source tags absent from the old rename prompt (shown).
+    Visible tags follow the edited text; unseen tags retain their spelling and
+    clusters. Insert before a trailing link so it remains a link."""
+    seen = set(find_tags(shown)) | set(find_tags(text))
+    extra = []
+    source = LINK.sub("", MARKER.sub("", source))
+    for m in TAG_CLUSTER.finditer(source):
+        cluster = []
+        for tag in TAG_NAME.findall(m.group(0)):
+            if tag.lower() not in seen:
+                seen.add(tag.lower())
+                cluster.append(f"#{tag}")
+        if cluster:
+            extra.append("".join(cluster))
+    if not extra:
+        return text
+    link = LINK.search(text)
+    at = link.start() if link else len(text)
+    return text[:at].rstrip() + " " + " ".join(extra) + text[at:]
+
+
 def cmd_rename(args):
     """td rename --from SOURCE:LINE NAME...: for space , N, on an agenda row (the key copies the
     row's name into the prompt itself, from the row's text) or inside a task's own file
@@ -1571,8 +1888,9 @@ def cmd_rename(args):
     the path of the buffer the key is in, for :move: the agenda's own (a no-op: the buffer stays), or
     from inside a task's file, the file's new path (the buffer follows it, and the file is touched
     a second later, _nudge_later, so that it shows the new heading; the heading, the file name and
-    a todo.md bullet of that file change together; the bullet keeps its stamps). A
-    file already there under the new name, an unusable name, or a row or file with no task:
+    a todo.md bullet of that file change together; the bullet keeps its stamps). Tags absent
+    from the old prompt stay in the other source; tags shown in the prompt follow NAME.
+    A file already there under the new name, an unusable name, or a row or file with no task:
     exit 1, nothing changed."""
     source, lineno = _from_spec(args)
     if "--focus" in args:
@@ -1584,16 +1902,17 @@ def cmd_rename(args):
         raw = lines[lineno - 1] if 1 <= lineno <= len(lines) else ""
     in_file = source is not None and not _same_file(source, LIST_PATH)
     task = _file_buffer_task(source) if in_file else (
-        _agenda_task(raw) if _same_file(source, LIST_PATH) else None)
+        _agenda_task(raw, lineno) if _same_file(source, LIST_PATH) else None)
     if task is None:
         sys.exit("td: space , N renames the task on an agenda row, or in its own file")
     named = _task_name(_name_arg(args))
     if named is None:
         sys.exit("td: no task name (type it after # name:)")
     name, slug = named
-    new_file = task_folder() / f"{slug}.md"
-    taken = _task_file(slug)  # the same name in any capitals is taken too
     if task.kind == "file":
+        new_file = (task.path if _identity_text(task.name) == _identity_text(name)
+                    else task_folder() / f"{slug}.md")
+        taken = _task_file(new_file.stem)  # the same name in any capitals is taken too
         if taken.exists() and not _same_file(task.path, taken):
             sys.exit(f"td: {tilde(taken)} already exists")
         _set_heading_title(task.path, name)
@@ -1607,12 +1926,28 @@ def cmd_rename(args):
             sys.exit("td: no such bullet in todo.md now (space , a rebuilds the agenda)")
         m = TASK.match(_split_eol(lines[hits[0]])[0])
         old_file = dedicated_path(m["text"])
+        text = _with_stamps_of(task.name, name) if in_file else name
+        title = _without_stamps(name)
+        if old_file.is_file():
+            first = old_file.read_bytes().decode("utf-8", "surrogateescape").splitlines()[:1]
+            hm = H1_PARTS.match(first[0]) if first else None
+            old_title = hm["title"] if hm else ""
+            if in_file:
+                text = _with_unseen_tags(text, m["text"], old_title)
+            else:
+                title = _with_unseen_tags(title, old_title, m["text"])
+        # Tag-only titles use their tags as a fallback slug, so retained tags
+        # must be included before checking the target filename for a collision.
+        slug = file_slug(text)
+        new_file = task_folder() / f"{slug}.md"
+        if old_file.is_file() and _identity_text(m["text"]) == _identity_text(text):
+            new_file = old_file
+        taken = _task_file(new_file.stem)
         if taken.exists() and not _same_file(old_file, taken):
             sys.exit(f"td: {tilde(taken)} already exists")
-        text = _with_stamps_of(task.name, name) if in_file else name
         _write_line(inbox, lines, hits[0], f"{m['indent']}- [{m['state']}] {text}")
         if old_file.is_file():
-            _set_heading_title(old_file, _identity_text(name))
+            _set_heading_title(old_file, title)
             if not _same_file(old_file, new_file):
                 old_file.rename(new_file)
         _carry_over(bullet_hash(str(inbox), m["text"]), bullet_hash(str(inbox), text), text)
@@ -1915,6 +2250,19 @@ def _goto(source, lineno, raw, want_file):
     here = f"{source}:{lineno}" if source and lineno else str(source or td_file())
     if source and source.name == "summary.txt" and _same_file(source, _tl().VIEW_PATH):
         return _tl().view_jump(lineno, raw) or here
+    if _same_file(source, LIST_PATH):
+        if not want_file:
+            tm = TAG_ROW.match(raw)
+            if tm:
+                tag = tm["tag"].lower()
+                saved = _read_sidecar(LIST_ARGS_PATH)
+                _, sort, _, _ = _parse_list_args(saved[0].split() if saved else [])
+                _write_agenda(build_list(["--sort", sort, "--tag", tag]))
+                LIST_ARGS_PATH.write_text(
+                    f"--state all --sort {sort} --tag {tag}\n", encoding="utf-8")
+                _nudge_later(LIST_PATH)
+                return f"{LIST_PATH}:1"
+        raw = _unindent_tag_task(raw, lineno)
     bm = TASK.match(raw)
     if bm and bm["indent"] and _same_file(source, LIST_PATH):
         found = _subtask_at(raw, lineno)
@@ -2003,10 +2351,10 @@ def cmd_promote(args):
                   file=sys.stderr)
         else:
             if not dedicated.exists():
-                dedicated.write_text(f"# [{canon(m['state'])}] {_identity_text(core)}\n\n",
+                dedicated.write_text(f"# [{canon(m['state'])}] {_without_stamps(core)}\n\n",
                                      encoding="utf-8", errors="surrogateescape")
             else:
-                _retag_dedicated_h1(core, canon(m["state"]))
+                _retag_dedicated_h1(core, canon(m["state"]), sync_tags=True)
             if lineno and _same_file(source, td_file()):
                 CACHE.mkdir(parents=True, exist_ok=True)
                 CUT_PATH.write_text(f"{source}:{lineno}\n{dedicated}\n", encoding="utf-8",
@@ -2096,8 +2444,8 @@ def _moved_entry(tl):
 
 def _as_heading(line):
     """A `[ ]` or `[x]` bullet (`- [x] costco`) as the `# costco` heading the other logged entries
-    of day.md have, else "" (the line stays as it is). The heading keeps the words only (see
-    _identity_text), so a done bullet's stamps and repeater go: its reminders are off, and a
+    of day.md have, else "" (the line stays as it is). The heading keeps words and tags (see
+    _without_stamps), so a done bullet's stamps and repeater go: its reminders are off, and a
     stamp in a heading would fire. An open bullet with a stamp stays a bullet: a reminder needs
     its checkbox, to be done or (a repeater) moved on, and a heading has none. So do the
     states [Y] [A] [W] and [!], which a heading would lose."""
@@ -2105,7 +2453,7 @@ def _as_heading(line):
     m = TASK.match(body)
     if not m or m["state"] not in " xX" or (m["state"] == " " and find_stamps(m["text"])):
         return ""
-    words = _identity_text(m["text"])
+    words = _without_stamps(m["text"])
     return f"# {words}{line[len(body):]}" if words else ""
 
 
@@ -2345,7 +2693,7 @@ def cmd_toggle(args):
     if not in_tasks:
         return 0  # a checklist elsewhere: this line only
     heading_state = canon(TASK.match(new_raw)["state"])
-    slug = slugify(bm["text"])
+    slug = _linked_slug(bm["text"])
     if not from_inbox:
         inbox_line = _set_inbox_state(inbox, slug, wanted)
         if inbox_line:
@@ -2365,7 +2713,10 @@ def _toggle_agenda_row(raw, state, row=None):
     its repeating date instead (see _set_file_task). A subtask row
     (indented; row, its line in agenda.md, tells which task it is under):
     its line in the task's file, as the key does there (see cmd_toggle).
-    Anything else (orphans, headings, a stale row): nothing but the rebuild."""
+    An indented task row under `- #tag (N)` in `--by-tag` is treated like
+    an unindented row. Anything else (orphans, headings, tag rows, a stale
+    row): nothing but the rebuild."""
+    raw = _unindent_tag_task(raw, row)
     bm = TASK.match(raw)
     if bm and bm["indent"]:
         found = _subtask_at(raw, row)
@@ -2474,9 +2825,10 @@ def _set_inbox_state(inbox, slug, new_state):
         return None
     lines = inbox.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
     hits = []  # (closed, index)
+    lookup = _task_file_lookup()
     for i, line in enumerate(lines):
         m = TASK.match(_split_eol(line)[0])
-        if m and slugify(m["text"]) == slug:
+        if m and _linked_slug(m["text"], lookup) == slug:
             hits.append((canon(m["state"]) not in VISIBLE, i))
     if not hits:
         return None
@@ -2526,10 +2878,11 @@ H1_PARTS = re.compile(
     r"^(?P<hash>#\s+)(?:\[(?P<state>[ xXyYaAwW!])\]\s+)?(?P<title>.+?)(?P<trail>\s*)$")
 
 
-def _retag_dedicated_h1(text, new_state):
+def _retag_dedicated_h1(text, new_state, sync_tags=False):
     """Rewrite the first H1 of ~/tasks/<slug>.md so it carries `[state] ` prefix.
 
-    No-op when the dedicated file is absent. State " " strips the prefix.
+    No-op when the dedicated file is absent. State " " strips the prefix. With
+    sync_tags=True, any `#tag` in text missing from the heading is appended.
     """
     core = LINK.sub("", MARKER.sub("", text)).strip()
     if not core:
@@ -2544,7 +2897,19 @@ def _retag_dedicated_h1(text, new_state):
         m = H1_WITH_STATE.match(body)
         if not m:
             continue
-        new = f"{m[1]}[{new_state}] {m[2]}{tail}"
+        title = m[2]
+        if sync_tags:
+            have = set(find_tags(title))
+            missing = []
+            for cm in TAG_CLUSTER.finditer(core):
+                for raw_tag in TAG_NAME.findall(cm.group(0)):
+                    low = raw_tag.lower()
+                    if low not in have:
+                        have.add(low)
+                        missing.append(f"#{raw_tag}")
+            if missing:
+                title = f"{title} {' '.join(missing)}"
+        new = f"{m[1]}[{new_state}] {title}{tail}"
         if new == raw:
             return False
         lines[i] = new
@@ -2739,6 +3104,148 @@ def run_tests(verbose=False):
             ts = datetime.strptime(when, "%Y-%m-%d %H:%M").timestamp()
             os.utime(path, (ts, ts))
 
+    class TagUpgrade(Case):
+        def cache_rows(self, name, rows):
+            self.cache.mkdir(parents=True, exist_ok=True)
+            (self.cache / name).write_text("".join("\t".join(row) + "\n" for row in rows))
+
+        def old_hash(self, *parts):
+            # The persisted format before tags were excluded from task identities.
+            return hashlib.sha1("\t".join(map(str, parts)).encode()).hexdigest()[:16]
+
+        def test_legacy_file_stays_linked_after_tag_edits_and_promotion(self):
+            inbox = self.put_inbox("- [ ] pay rent #home\n")
+            own = self.put_dedicated("Pay-rent-home.md", "# [ ] pay rent #home\n\n"
+                                     "existing notes\n- [ ] step\nfollow up 2026-10-10 12:00\n")
+            self.td("tick")
+            for title in ("pay rent #home", "pay rent #work#coop", "pay rent"):
+                with self.subTest(title=title):
+                    line = f"- [ ] {title}\n"
+                    inbox.write_text(line)
+                    out = self.td("list")
+                    self.assertIn(f"- [ ] {title} (*)\n  - [ ] step\n", out)
+                    self.assertEqual(out.count("(*)"), 1)
+                    self.assertEqual(self.td("jump", "--from", f"{inbox}:1", stdin=line).strip(), str(own))
+                    self.assertEqual(self.td("promote", "--from", f"{inbox}:1", stdin=line).strip(), str(own))
+                    self.assertFalse((self.tasks / "pay-rent.md").exists())
+                    self.assertIn("existing notes\n", own.read_text())
+            self.assertIn("- #home (1)", self.td("list", "--by-tag"))
+            self.td("toggle", "A", "--from", str(own), "--line", "1")
+            self.assertEqual(inbox.read_text(), "- [A] pay rent\n")
+            inbox.write_text("- [x] pay rent\n")
+            self.assertNotIn("would fire", self.td("tick", now_="2026-10-10 12:00"))
+
+        def test_legacy_lookup_does_not_claim_an_unrelated_file(self):
+            inbox = self.put_inbox("- [ ] alpha #work\n")
+            self.put_dedicated("alpha-old.md", "# [ ] alpha #home\n")
+            line = inbox.read_text()
+            self.assertEqual(self.td("jump", "--from", f"{inbox}:1", stdin=line).strip(), f"{inbox}:1")
+            own = self.put_dedicated("alpha.md", "# [ ] alpha\n")
+            self.put_dedicated("alpha-home.md", "# [ ] alpha #home\nlegacy notes\n")
+            self.assertEqual(self.td("jump", "--from", f"{inbox}:1", stdin=line).strip(), str(own))
+
+        def test_legacy_link_survives_tag_edits_in_both_sources(self):
+            inbox = self.put_inbox("- [ ] alpha #home\n")
+            own = self.put_dedicated("alpha-home.md", "# [ ] alpha #home\n\nnotes\n")
+            self.td("list")
+            for tags in (" #work#Coop", ""):
+                with self.subTest(tags=tags):
+                    inbox.write_text(f"- [ ] alpha{tags}\n")
+                    own.write_text(f"# [ ] alpha{tags}\n\nnotes\n")
+                    out = self.td("list")
+                    self.assertEqual(out.count("(*)"), 1)
+                    self.assertIn(f"- [ ] alpha{tags} (*)", out)
+                    self.assertEqual(self.td("jump", "--from", f"{inbox}:1",
+                                             stdin=inbox.read_text()).strip(), str(own))
+                    self.assertEqual(self.td("promote", "--from", f"{inbox}:1",
+                                             stdin=inbox.read_text()).strip(), str(own))
+                    self.assertFalse((self.tasks / "alpha.md").exists())
+
+        def test_remembered_legacy_link_requires_the_same_task_title(self):
+            inbox = self.put_inbox("- [ ] alpha #home\n")
+            own = self.put_dedicated("alpha-home.md", "# [ ] alpha #home\n")
+            self.td("list")
+            inbox.write_text("- [ ] alpha\n")
+            own.write_text("# [ ] unrelated\n")
+            self.assertEqual(self.td("jump", "--from", f"{inbox}:1",
+                                     stdin=inbox.read_text()).strip(), f"{inbox}:1")
+
+        def test_remembered_legacy_link_does_not_cross_task_folders(self):
+            self.put_inbox("- [ ] alpha #home\n")
+            self.put_dedicated("alpha-home.md", "# [ ] alpha #home\n")
+            self.td("list")
+            other = self.home / "other-tasks"
+            other.mkdir()
+            inbox = other / "todo.md"
+            inbox.write_text("- [ ] alpha\n")
+            (other / "alpha-home.md").write_text("# [ ] alpha\n")
+            self.assertEqual(self.td("jump", "--from", f"{inbox}:1", stdin=inbox.read_text(),
+                                     TL_DIR=str(other), TD_FILE=str(inbox)).strip(), f"{inbox}:1")
+
+        def test_existing_added_and_modified_order_survive_upgrade(self):
+            inbox = self.put_inbox("- [ ] alpha #home\n- [ ] bravo\n")
+            old = self.old_hash(inbox, "alpha #home")
+            current = bullet_hash(str(inbox), "alpha")
+            bravo = bullet_hash(str(inbox), "bravo")
+            fp = hashlib.sha1(b" \talpha #home").hexdigest()[:16]
+            self.cache_rows("added", [("2026-10-10T10:00:00", old, "alpha #home"),
+                                      ("2026-10-10T10:30:00", bravo, "bravo"),
+                                      ("2026-10-10T10:59:00", current, "alpha #home")])
+            self.cache_rows("changed", [("2026-10-10T10:50:00", old, fp)])
+            out = self.td("list", "--sort", "modified")
+            self.assertLess(out.index("alpha"), out.index("bravo"))
+            changed = [r for r in self.read_cache("changed").splitlines() if current in r]
+            self.assertEqual(changed, [f"2026-10-10T10:50:00\t{current}\t{fp}"])
+            out = self.td("list", now_="2026-10-10 11:05")
+            self.assertLess(out.index("bravo"), out.index("alpha"))
+            self.assertIn(f"2026-10-10T10:00:00\t{current}\t", self.read_cache("added"))
+            before = (self.read_cache("added"), self.read_cache("changed"))
+            self.td("list", now_="2026-10-10 11:10")
+            self.assertEqual(before, (self.read_cache("added"), self.read_cache("changed")))
+
+        def test_added_history_survives_a_tag_edit_before_upgrade(self):
+            inbox = self.put_inbox("- [ ] alpha #work\n")
+            old = self.old_hash(inbox, "alpha #home")
+            self.cache_rows("added", [("2026-10-09T08:00:00", old, "alpha #home")])
+            self.td("list")
+            self.assertIn("2026-10-09T08:00:00\t", self.read_cache("added"))
+
+        def test_fired_inbox_and_file_reminders_stay_in_reschedule(self):
+            inbox = self.put_inbox("- [ ] call #home 2026-10-10 10:00\n")
+            own = self.put_dedicated("trip-coop.md", "# [ ] trip #coop\n\n"
+                                     "- [ ] book taxi #coop 2026-10-10 09:30\n")
+            self.cache_rows("fired", [
+                ("2026-10-10T10:00", self.old_hash(inbox, "2026-10-10T10:00", "call #home"), "call #home"),
+                ("2026-10-10T09:30", self.old_hash(own, "2026-10-10T09:30", "book taxi #coop"), "book taxi #coop [trip-coop]")])
+            self.cache_rows("last-tick", [("2026-10-10T10:30",)])
+            out = self.td("list")
+            reschedule = out.split("# RESCHEDULE\n\n", 1)[1].split("\n\n", 1)[0]
+            self.assertIn("- call #home 2026-10-10 10:00", reschedule)
+            self.assertIn("- trip: book taxi #coop 2026-10-10 09:30", reschedule)
+            before = self.read_cache("fired")
+            self.assertNotIn("would fire", self.td("tick"))
+            self.assertEqual(before, self.read_cache("fired"))
+            inbox.write_text("- [ ] call #work 2026-10-10 10:00\n")
+            self.assertIn("# RESCHEDULE", self.td("list", "--tag", "work"))
+
+        def test_legacy_scheduled_reminder_still_retries(self):
+            inbox = self.put_inbox("- [ ] call #home 2026-10-10 10:00\n")
+            old = self.old_hash(inbox, "2026-10-10T10:00", "call #home")
+            self.cache_rows("scheduled", [("2026-10-10T08:00", old, "2026-10-10T10:00", "call #home")])
+            self.cache_rows("last-tick", [("2026-10-10T10:30",)])
+            self.assertEqual(self.td("tick").count("would fire"), 1)
+            self.assertNotIn("would fire", self.td("tick", now_="2026-10-10 11:05"))
+            self.assertNotIn(old, self.read_cache("scheduled"))
+
+        def test_repeating_history_uses_the_written_date(self):
+            inbox = self.put_inbox("- [ ] pills #home 2026-10-10 09:00 ++1h\n")
+            old = self.old_hash(inbox, "2026-10-10T09:00", "pills #home")
+            self.cache_rows("scheduled", [("2026-10-10T10:00", old, "2026-10-10T11:00", "pills #home")])
+            self.cache_rows("last-tick", [("2026-10-10T11:01",)])
+            self.assertEqual(self.td("tick", now_="2026-10-10 11:05").count("would fire"), 1)
+            self.assertNotIn("would fire", self.td("tick", now_="2026-10-10 11:06"))
+            self.assertNotIn(old, self.read_cache("scheduled"))
+
     class Parse(unittest.TestCase):
         def test_bullet_shapes(self):
             p = Path("x.md")
@@ -2805,6 +3312,29 @@ def run_tests(verbose=False):
                 "call [bank]")
             # A repeater goes with a stamp; on a line with none it is text.
             self.assertEqual(slugify("learn C ++1d"), "learn-c-1d")
+
+        def test_tags_and_identity(self):
+            p = "/x.md"
+            self.assertEqual(find_tags("fuga czarna #coop"), ["coop"])
+            self.assertEqual(find_tags("fuga czarna #coop #Home"), ["coop", "home"])
+            self.assertEqual(find_tags("fuga czarna #tag1#tag2 #tag1"), ["tag1", "tag2"])
+            self.assertEqual(
+                find_tags("check https://example.com/a#b#c and #123 #valid_tag-2"),
+                ["valid_tag-2"])
+            self.assertEqual(_without_stamps("rent [2026-11-01 Sun 09:00 ++1m] #tag1#tag2"),
+                             "rent #tag1#tag2")
+            for tagged in ("fuga czarna #coop",
+                           "fuga czarna #coop #home",
+                           "fuga czarna #coop#home",
+                           "fuga czarna #Coop#HOME [2026-11-15 Sun 20:12]"):
+                self.assertEqual(_identity_text(tagged), "fuga czarna", tagged)
+                self.assertEqual(slugify(tagged), "fuga-czarna", tagged)
+                self.assertEqual(bullet_hash(p, tagged), bullet_hash(p, "fuga czarna"), tagged)
+            # Non-tag hashes (URLs, #123) stay in identity; tag-only bullets keep a slug.
+            self.assertEqual(_identity_text("fix #123 https://a.b/c#d #home"),
+                             "fix #123 https://a.b/c#d")
+            self.assertEqual(slugify("#home"), "home")
+            self.assertEqual(_identity_text("- [ ] #home"), "- [ ] #home")
 
         def test_slugify(self):
             self.assertEqual(slugify("Costco run!"), "costco-run")
@@ -2998,6 +3528,77 @@ def run_tests(verbose=False):
                 "- [ ] alpha 2026-10-12 Sun 09:00 ++1w\n- [ ] bravo\n")
             out = self.td("list", now_="2026-10-10 12:00")
             self.assertLess(out.index("bravo"), out.index("alpha"))
+
+        def test_by_tag_groups_and_sorts(self):
+            inbox = self.put_inbox(
+                "- [ ] alpha #home\n"
+                "- [Y] bravo #coop#Home\n"
+                "- [A] charlie #coop\n"
+                "- [x] done #coop\n"
+                "- [ ] untagged\n")
+            self.td("list", now_="2026-10-10 11:00")
+            self.put_dedicated("passport.md", "# [W] renew passport #coop #Travel\n")
+            self.put_dedicated("alpha.md", "# [ ] alpha\n\n- [ ] subtask\n")
+            self.put_dedicated("orphan.md", "# just notes #coop\n")
+            out = self.td("list", "--by-tag", now_="2026-10-10 11:05")
+            self.assertIn("# TAGS\n\n"
+                          "- #coop (3)\n"
+                          "  - [Y] bravo #coop#Home\n"
+                          "  - [A] charlie #coop\n"
+                          "  - [W] renew passport #coop #Travel (*)\n"
+                          "- #home (2)\n"
+                          "  - [Y] bravo #coop#Home\n"
+                          "  - [ ] alpha #home (*)\n"
+                          "- #travel (1)\n"
+                          "  - [W] renew passport #coop #Travel (*)\n", out)
+            for absent in ("untagged", "done", "subtask", "ORPHANS", "orphan"):
+                self.assertNotIn(absent, out)
+            self.assertEqual(self.read_cache("agenda-args"), "--state all --sort added --by-tag\n")
+            # Modified sort orders same-state tasks within a tag group.
+            (self.tasks / "alpha.md").unlink()
+            self.put_inbox(
+                "- [ ] alpha #home\n"
+                "- [ ] delta #home\n"
+                "- [Y] bravo #coop#Home\n")
+            self.td("list", "--by-tag", now_="2026-10-10 11:10")
+            self.td("toggle", "Y", "--from", str(inbox), "--line", "1", now_="2026-10-10 11:15")
+            self.td("toggle", "Y", "--from", str(inbox), "--line", "1", now_="2026-10-10 11:16")
+            out = self.td("list", "--by-tag", "--sort", "modified", now_="2026-10-10 11:20")
+            home_block = out.split("- #home (3)\n", 1)[1].split("- #", 1)[0]
+            self.assertLess(home_block.index("alpha"), home_block.index("delta"))
+            self.assertLess(home_block.index("bravo"), home_block.index("alpha"))
+            # No tagged tasks still shows # TAGS cleanly.
+            self.put_inbox("- [ ] plain\n")
+            (self.tasks / "passport.md").unlink()
+            self.assertEqual(self.td("list", "--by-tag"), f"{LEGEND}\n\n# TAGS\n")
+
+        def test_filter_tag_and_reschedule(self):
+            self.put_inbox(
+                "- [Y] call jon #coop 2026-10-10 10:00\n"
+                "- [ ] buy milk #home 2026-10-10 10:00\n"
+                "- [ ] fuga czarna #dom#coop\n")
+            fuga = self.put_dedicated("fuga-czarna.md", "# [ ] fuga czarna #dom#coop\n\n- [ ] sub\n")
+            self.put_dedicated("trip.md", "# [ ] trip #coop\n\n"
+                               "- [ ] book taxi 2026-10-10 10:30\n")
+            self.put_dedicated("orphan.md", "# just notes #coop\n")
+            self.td("tick", now_="2026-10-10 08:00")
+            self.td("tick", now_="2026-10-10 11:00")
+            for arg in ("coop", "#COOP"):
+                out = self.td("list", "--tag", arg, now_="2026-10-10 11:05")
+                self.assertIn("- [Y] call jon #coop 2026-10-10 10:00", out)
+                self.assertIn("- [ ] fuga czarna #dom#coop (*)\n  - [ ] sub\n", out)
+                self.assertIn("- [ ] trip #coop (*)", out)
+                self.assertIn("- call jon #coop 2026-10-10 10:00", out.split("# RESCHEDULE")[1])
+                self.assertIn("- trip: book taxi 2026-10-10 10:30", out.split("# RESCHEDULE")[1])
+                self.assertNotIn("buy milk", out)
+                self.assertNotIn("ORPHANS", out)
+                self.assertNotIn("orphan", out)
+                self.assertEqual(self.read_cache("agenda-args"), "--state all --sort added --tag coop\n")
+            # A tag only on the dedicated file's H1 still matches the inbox bullet.
+            fuga.write_text("# [ ] fuga czarna #dom#coop #extra\n\n- [ ] sub\n")
+            self.assertIn("fuga czarna", self.td("list", "--tag", "extra", now_="2026-10-10 11:06"))
+            with self.assertRaises(sp.CalledProcessError):
+                self.td("list", "--tag", "123bad")
 
         def test_added_seconds_apart_newest_first(self):
             # The real clock: two tasks added within a minute keep their order.
@@ -3938,8 +4539,17 @@ def run_tests(verbose=False):
 
         def test_heading_leaves_out_the_stamp(self):
             # The stamp stays the bullet's: in the heading it would fire twice.
+            # Tags stay on the heading while being left out of the filename slug.
             self.td("promote", stdin="- [ ] pay rent 2026-11-01 Sun 09:00 ++1m #home\n")
-            self.assertEqual((self.tasks / "pay-rent-home.md").read_text(), "# [ ] pay rent #home\n\n")
+            self.assertEqual((self.tasks / "pay-rent.md").read_text(), "# [ ] pay rent #home\n\n")
+
+        def test_promote_preserves_multi_tags_and_syncs_existing_h1(self):
+            self.td("promote", stdin="- [A] fuga czarna #coop#Home [2026-11-15 Sun 20:12]\n")
+            p = self.tasks / "fuga-czarna.md"
+            self.assertEqual(p.read_text(), "# [A] fuga czarna #coop#Home\n\n")
+            # Re-promoting after adding a tag on the bullet appends the new tag to H1.
+            self.td("promote", stdin="- [Y] fuga czarna #coop#Home #Urgent\n")
+            self.assertEqual(p.read_text(), "# [Y] fuga czarna #coop#Home #Urgent\n\n")
 
         def test_heading_leaves_out_a_bracketed_repeater(self):
             # Repeater inside the stamp's brackets: neither the heading nor
@@ -4121,6 +4731,13 @@ def run_tests(verbose=False):
                          check=True).stdout.decode()
             for words in ("costco", "open", "big", "call bank"):
                 self.assertIn(f"      - {words}\n", out)
+
+        def test_archiving_preserves_tags(self):
+            self.put_inbox("")
+            self.press("- [x] alpha #coop #home [2026-10-12 Mon 09:30 ++1d]\nnotes\n", 1)
+            self.assertEqual(self.day(), "# alpha #coop #home\n" + self.under("notes\n"))
+            self.press("- [ ] bravo #coop#Home\n", 1)
+            self.assertTrue(self.day().endswith("# bravo #coop#Home\n" + self.under()))
 
         def test_what_needs_its_checkbox_stays_a_bullet(self):
             # an open reminder is done, or moved on by a repeater, with its checkbox; [Y] [A] [W] [!] are states
@@ -4420,6 +5037,29 @@ def run_tests(verbose=False):
             agenda, lineno = self.agenda_line("renew passport")
             for cmd in ("jump", "promote"):
                 self.assertEqual(self.go(cmd, agenda, lineno), str(d), cmd)
+
+        def test_jump_from_by_tag_rows(self):
+            inbox = self.put_inbox("- [ ] alpha #coop\n- [ ] bravo #home\n")
+            alpha = self.put_dedicated("alpha.md", "# [ ] alpha #coop\n\n- [ ] sub\n")
+            passport = self.put_dedicated("passport.md", "# [W] renew passport #coop#urgent\n")
+            self.td("list", "--by-tag", "--sort", "modified")
+            # Indented task rows under - #tag (N) jump to inbox (p) / dedicated file (P),
+            # not as subtasks; file-task rows jump to their file.
+            agenda, alpha_row = self.agenda_line("- [ ] alpha #coop (*)")
+            self.assertEqual(self.go("jump", agenda, alpha_row), f"{inbox}:1")
+            self.assertEqual(self.go("promote", agenda, alpha_row), str(alpha))
+            _, pass_row = self.agenda_line("renew passport")
+            self.assertEqual(self.go("jump", agenda, pass_row), str(passport))
+            self.assertEqual(self.go("promote", agenda, pass_row), str(passport))
+            # p on a - #tag (N) header switches agenda.md to --tag tag, keeping sort.
+            _, tag_row = self.agenda_line("- #coop (2)")
+            self.assertEqual(self.go("jump", agenda, tag_row), f"{agenda}:1")
+            self.assertEqual(self.read_cache("agenda-args"),
+                             "--state all --sort modified --tag coop\n")
+            filtered = agenda.read_text()
+            self.assertIn("- [ ] alpha #coop (*)\n  - [ ] sub\n", filtered)
+            self.assertIn("- [W] renew passport #coop#urgent (*)", filtered)
+            self.assertNotIn("bravo", filtered)
 
     class SetToggle(Case):
         def test_set_rewrites_checkbox(self):
@@ -4820,6 +5460,32 @@ def run_tests(verbose=False):
             agenda = self.toggle_row("A", "charlie")
             self.assertLess(agenda.index("bravo"), agenda.index("alpha"))
 
+        def test_by_tag_and_tag_filter_rows_toggle_and_keep_view(self):
+            p = self.put_inbox("- [ ] alpha #coop#home\n- [ ] bravo #coop\n")
+            d = self.put_dedicated("alpha.md", "# [ ] alpha #coop#home\n")
+            ft = self.put_dedicated("passport.md", "# [W] renew passport #coop\n")
+            self.td("list", "--by-tag")
+            # Pressing status key on `- #tag (N)` header makes one edit and leaves tasks alone.
+            agenda_path = self.cache / "agenda.md"
+            self.assertEqual(self.td("toggle", "Y", "--from", str(agenda_path),
+                                     stdin="- #coop (3)\n"), "- #coop (3) \n")
+            self.assertEqual(p.read_text(), "- [ ] alpha #coop#home\n- [ ] bravo #coop\n")
+            # Toggling an indented task row updates inbox + file H1 and rebuilds --by-tag.
+            agenda = self.toggle_row("Y", "alpha")
+            self.assertEqual(p.read_text(), "- [Y] alpha #coop#home\n- [ ] bravo #coop\n")
+            self.assertEqual(d.read_text(), "# [Y] alpha #coop#home\n")
+            self.assertIn("# TAGS\n\n- #coop (3)\n  - [Y] alpha #coop#home (*)", agenda)
+            # Toggling a file task in --by-tag updates its H1 and keeps --by-tag.
+            agenda = self.toggle_row("A", "renew passport")
+            self.assertEqual(ft.read_text(), "# [A] renew passport #coop\n")
+            self.assertIn("  - [A] renew passport #coop (*)", agenda)
+            # Marking done in --tag filter keeps the --tag filter on rebuild.
+            self.td("list", "--tag", "home")
+            agenda = self.toggle_row("x", "alpha")
+            self.assertEqual(p.read_text(), "- [x] alpha #coop#home\n- [ ] bravo #coop\n")
+            self.assertNotIn("alpha", agenda)
+            self.assertEqual(self.read_cache("agenda-args"), "--state all --sort added --tag home\n")
+
         def test_done_view_row_back_to_todo(self):
             p = self.put_inbox("- [x] alpha\n- [x] bravo\n")
             self.td("list", "--state", "done", "--sort", "modified")
@@ -5134,6 +5800,96 @@ def run_tests(verbose=False):
         def test_promote_checks_the_name_too(self):
             self.td("promote", stdin="- [ ] !!\n")
             self.assertEqual(list(self.tasks.iterdir()), [])
+
+        def test_unchanged_agenda_rename_preserves_heading_only_tags(self):
+            name = "alpha #home [2026-10-20 Tue 09:00 ++1w]"
+            inbox = self.put_inbox(f"- [A] {name}\n")
+            contents = b"# [A] alpha #home #Coop#Travel\r\n\r\nnotes\r\n"
+            own = self.put_dedicated("alpha.md", contents.decode())
+            agenda = self.cache / "agenda.md"
+            for options in ((), ("--by-tag",), ("--tag", "coop")):
+                with self.subTest(options=options):
+                    out = self.td("list", *options)
+                    row = next(i for i, line in enumerate(out.splitlines(), 1) if name in line)
+                    self.td("rename", "--from", f"{agenda}:{row}", name)
+                    self.assertEqual(inbox.read_text(), f"- [A] {name}\n")
+                    self.assertEqual(own.read_bytes(), contents)
+                    self.assertIn("alpha", self.td("list", "--tag", "coop"))
+                    self.assertIn("alpha", self.td("list", "--tag", "travel"))
+
+        def test_agenda_rename_can_remove_visible_tags_and_keeps_hidden_tags(self):
+            inbox = self.put_inbox("- [ ] alpha #home\n")
+            old = self.put_dedicated("alpha.md", "# [ ] alpha #home #Coop#Travel\n\nnotes\n")
+            self.rename("alpha", "beta #COOP")
+            self.assertEqual(inbox.read_text(), "- [ ] beta #COOP\n")
+            self.assertFalse(old.exists())
+            self.assertEqual((self.tasks / "beta.md").read_text(), "# [ ] beta #COOP #Travel\n\nnotes\n")
+            self.assertNotIn("beta", self.td("list", "--tag", "home"))
+            self.assertIn("beta", self.td("list", "--tag", "travel"))
+
+        def test_file_rename_preserves_bullet_only_tags_stamps_and_link(self):
+            inbox = self.put_inbox("- [A] alpha #Home #coop [2026-10-20 Tue 09:00 ++1w] → notes.md\n")
+            old = self.put_dedicated("alpha.md", "# [A] alpha #Coop#Travel\n\nnotes\n")
+            out = self.rename_in(old, 3, "beta #Travel")
+            self.assertEqual(out, str(self.tasks / "beta.md"))
+            self.assertEqual(inbox.read_text(),
+                             "- [A] beta #Travel [2026-10-20 Tue 09:00 ++1w] #Home → notes.md\n")
+            self.assertEqual((self.tasks / "beta.md").read_text(), "# [A] beta #Travel\n\nnotes\n")
+
+        def test_tag_only_file_rename_keeps_the_bullet_linked(self):
+            inbox = self.put_inbox("- [ ] alpha #Home\n")
+            old = self.put_dedicated("alpha.md", "# [ ] alpha\n")
+            out = self.rename_in(old, 1, "#Travel")
+            own = self.tasks / "Travel-Home.md"
+            self.assertEqual(out, str(own))
+            self.assertEqual(inbox.read_text(), "- [ ] #Travel #Home\n")
+            self.assertEqual(own.read_text(), "# [ ] #Travel\n")
+            self.assertEqual(self.td("jump", "--from", f"{inbox}:1", stdin=inbox.read_text()).strip(), str(own))
+
+        def test_changing_tags_keeps_legacy_filename_and_reminder_history(self):
+            inbox = self.put_inbox("- [ ] alpha #home\n")
+            own = self.put_dedicated("alpha-home.md", "# [ ] alpha #home\n\n"
+                                     "follow up 2026-10-10 10:00\n")
+            self.td("tick", now_="2026-10-10 08:00")
+            self.td("tick")
+            fired = self.read_cache("fired")
+            self.rename("alpha #home", "alpha #work")
+            self.assertTrue(own.is_file())
+            self.assertFalse((self.tasks / "alpha.md").exists())
+            self.assertEqual(self.rename_in(own, 1, "alpha #coop"), str(own))
+            self.assertEqual(inbox.read_text(), "- [ ] alpha #coop\n")
+            self.assertEqual(self.read_cache("fired"), fired)
+            self.assertIn("# RESCHEDULE", self.td("list", "--tag", "coop"))
+
+        def test_file_task_tag_edit_keeps_its_legacy_filename(self):
+            self.put_inbox("")
+            own = self.put_dedicated("alpha-home.md", "# [ ] alpha #home\n\nnotes\n")
+            self.rename("alpha #home", "alpha #work")
+            self.assertEqual(own.read_text(), "# [ ] alpha #work\n\nnotes\n")
+            self.assertFalse((self.tasks / "alpha.md").exists())
+
+        def test_rename_keeps_tags_out_of_slug_and_works_in_by_tag(self):
+            p = self.put_inbox("- [ ] alpha #home 2026-10-20 Tue 09:00\n")
+            d = self.put_dedicated("alpha.md", "# [ ] alpha #home\n\nnotes\n")
+            self.td("list", "--by-tag")
+            agenda = self.cache / "agenda.md"
+            lines = agenda.read_text().splitlines()
+            tag_row = next(i for i, l in enumerate(lines, 1) if l.startswith("- #home"))
+            r = self.td_run("rename", "--from", f"{agenda}:{tag_row}", "other")
+            self.assertEqual(r.returncode, 1)
+            task_row = next(i for i, l in enumerate(lines, 1) if "alpha #home" in l)
+            self.td("rename", "--from", f"{agenda}:{task_row}",
+                    '... "$BASH_EXECUTION_STRING" # name: alpha #home #coop 2026-10-20 Tue 09:00')
+            self.assertEqual(p.read_text(), "- [ ] alpha #home #coop 2026-10-20 Tue 09:00\n")
+            self.assertEqual(d.read_text(), "# [ ] alpha #home #coop\n\nnotes\n")
+            self.assertIn("- #coop (1)\n  - [ ] alpha #home #coop 2026-10-20 Tue 09:00 (*)",
+                          agenda.read_text())
+            # Renaming from inside the file also preserves tags on H1 and stamps in todo.md.
+            self.rename_in(d, 1, "alpha renamed #coop")
+            self.assertEqual(p.read_text(), "- [ ] alpha renamed #coop 2026-10-20 Tue 09:00\n")
+            self.assertFalse(d.exists())
+            self.assertEqual((self.tasks / "alpha-renamed.md").read_text(),
+                             "# [ ] alpha renamed #coop\n\nnotes\n")
 
     class Fire(Case):
         def test_fire_by_file(self):
@@ -5510,7 +6266,7 @@ def run_tests(verbose=False):
 
     loader = unittest.defaultTestLoader
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
-                               for c in (Parse, List, Tick, New, Stamp, Next,
+                               for c in (Parse, List, TagUpgrade, Tick, New, Stamp, Next,
                                          Promote, Day, Marker, Reschedule, Jump, SetToggle,
                                          AgendaToggle, File, WeekView, Rename, Fire, Recurring,
                                          TlAgrees,

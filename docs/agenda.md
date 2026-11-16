@@ -82,19 +82,51 @@ created by `space , P`:
 The heading carries the task's state, kept in step by the status keys (see
 [keys.md](keys.md#status-keys-in-other-files)). There is no link in the
 bullet: the file is named after the bullet's text, its *slug*: lowercase,
-every run of other characters turned into one `-`. A stamp and its repeater
-are left out of the heading and the file name, and so are the brackets
-around them (`stretch [2026-10-16 Fri 09:50 ++1h]` is the file `stretch.md`
-with the heading `stretch`), so a leftover `[ ]` never becomes part of
-either.
+every run of other characters turned into one `-`. A stamp, its repeater,
+and `#tag` tokens (including chained `#tag1#tag2`) are left out of the file
+name, and brackets around a stamp go with it (`stretch [2026-10-16 Fri 09:50 ++1h]`
+is the file `stretch.md` with the heading `stretch`), so a leftover `[ ]`
+never becomes part of either. Stamps and repeaters are also left out of the
+heading, while `#tag` tokens stay on the heading (`# [ ] pay rent #home`)
+so promoted and standalone file tasks keep their tags.
 
 - `Costco run!` → `costco-run.md`
 - `costCo RUN` → `costco-run.md` (the same file)
-- `pay rent 2026-11-01 Sun 09:00 ++1m` → `pay-rent.md`
+- `pay rent 2026-11-01 Sun 09:00 ++1m #home` → `pay-rent.md` (heading `# [ ] pay rent #home`)
 
-An existing file is reused, never overwritten or numbered. Renaming a
+An existing file is reused, never overwritten or numbered; promoting adds any
+new `#tag` from the bullet to its heading. Renaming a
 bullet unlinks it from its file: the file then shows on the agenda as a
 file task or an orphan (below), and `space , p` no longer finds it.
+
+### Tags
+
+Tasks can carry one or more `#tag` tokens anywhere in the bullet text or on
+a standalone file task's `# [S] title` heading — space-separated (`#home #coop`)
+or chained (`#tag1#tag2`). Tag matching is case-insensitive (`#Home` and
+`#home` are one tag), and tags are normalized to lowercase in listings. A tag
+must start with a letter and follow whitespace (or the start of the text), so
+issue numbers (`#123`), URL fragments (`example.com#sec`), and heading
+markers (`# `) are ignored.
+
+Because tags are left out of the task slug and `added` hash, adding, changing,
+or removing `#tag` on a bullet keeps its link to `~/tasks/<slug>.md`, keeps
+its `added` order, and never re-fires an existing reminder. When a bullet has
+a dedicated file, tags from both the bullet and the file's first-line heading
+apply.
+
+Renaming from the agenda keeps heading-only tags on the heading; renaming
+inside the file keeps bullet-only tags on the bullet. Tags shown in the
+rename prompt follow your edits, including removal. Editing only tags keeps
+the existing filename, so its reminder history keeps matching.
+
+Files promoted before tag support keep their existing filenames (for example,
+`pay-rent-home.md` for `pay rent #home`). Once found from their headings, these
+links are remembered in the cache so later tag edits keep the files linked.
+Existing first-seen, modified, scheduled and fired records are
+carried forward automatically to the tag-independent keys. Moving a task to
+day.md keeps its tags on the resulting heading while removing completed
+reminders' stamps and repeaters.
 
 ### File tasks
 
@@ -346,6 +378,18 @@ test a fresh one with `td fire ~/tasks/todo.md`.
   and file tasks whose heading is `# [x] title`, most recently changed
   first. The keys work on its rows as on the agenda's: `space , x` takes a
   task back to todo.
+- `space , g` (newest added first within each state) and `space , G` (most
+  recently changed first) open the agenda grouped by tag under `# TAGS`:
+  `- #tag (N)` headers sorted alphabetically, with each tag's open tasks
+  indented under it (ordered by state priority, then the active sort) and
+  folded closed (`za` toggles a tag). Tasks carrying multiple tags appear
+  under each tag. Pressing `space , p` on a `- #tag (N)` header switches
+  the agenda to `td list --tag tag`, showing the standard state-grouped
+  agenda (`TODAY`, `RESCHEDULE`, `ACTIVE`, `TODO`, `WAITING`) filtered to
+  that tag; on an unfolded task row, `space , p`, `space , P`, `space , N`,
+  `space , x`, and the status keys work as in the main agenda, and status
+  rebuilds keep the active `--by-tag` or `--tag` view. `space , a` / `A`
+  clears the tag filter.
 
 The agenda is a view: it is always built from todo.md and the task
 files, never edited. `td` writes it read-only (0444), replacing it by a
@@ -428,7 +472,7 @@ is `++0d` (it would never move), so those lines are just marked done.
 | `td install` | build the alarm helper, write the `td-tick` shim, arm the next reminder |
 | `td uninstall` | cancel the alarm, remove the shim |
 | `td tick` | scan, record future times, fire due ones, arm the alarm for the next one; `--alarm` (from the alarm) also releases the wake lock |
-| `td list [--state todo\|today\|active\|waiting\|done\|all] [--sort added\|modified]` | write the agenda to `~/.cache/td/agenda.md` and stdout, and the options to `~/.cache/td/agenda-args` |
+| `td list [--state todo\|today\|active\|waiting\|done\|all] [--sort added\|modified] [--tag TAG] [--by-tag]` | write the agenda to `~/.cache/td/agenda.md` and stdout, and the options to `~/.cache/td/agenda-args` |
 | `td promote [--from PATH:LINE]` | stdin: a line. Create or reuse the bullet's task file (not from the agenda; a task named `todo`, whose file would be the inbox or the file it is in, stays as it is), then print where `space , P` goes and write it to `~/.cache/td/open`; for a todo.md bullet, keep its place and file in `~/.cache/td/cut` |
 | `td promote --cut - [--file PATH]` | `space , P`'s next step, on the whole buffer: in todo.md, move the kept bullet's section (its notes and time entries, up to the next todo) to the end of its file, without their shared indent; anywhere else, stdin back as it was |
 | `td day [--from PATH:LINE]` | stdin: a line. `space , ret`'s first step: keep a bullet's place in `~/.cache/td/day` (not from the agenda or day.md), then print where the key ends, the same line, and write it to `~/.cache/td/open` |
