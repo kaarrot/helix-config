@@ -254,8 +254,13 @@ Each tick:
 
 The notification is titled `TODO`. Its text is the bullet's text, or the
 task file's first heading (its name if it has none). It plays the
-notification sound, and tapping it opens the file (needs the Termux:API
-app).
+notification sound, and tapping it opens the original file at the
+reminder's line with `~/bin/hx` in a new foreground Termux session. The
+line number is captured when the notification is posted; editing above it
+afterward can move that line. This calls Termux's own service;
+`allow-external-apps` and `~/bin/termux-file-editor` are not needed.
+Notifications already posted before this change keep their old tap action;
+test a fresh one with `td fire ~/tasks/todo.md`.
 
 ## The agenda
 
@@ -503,4 +508,8 @@ each time.
 - **DST fall-back (02:30 twice)** — `fired` makes it fire once.
 - **A renamed bullet** — its task file becomes a file task or an orphan;
   rename the file to the new slug (or the bullet back) to relink.
-- **No tap action** — `termux-open` needs the Termux:API app.
+- **Tap does not open Helix** — check that `~/bin/hx` exists and is
+  executable. If Android keeps Termux in the background, allow Termux to
+  *Display over other apps* in Android's app settings. Old notifications
+  that show `TermuxFileReceiver` still use the previous `termux-open`
+  action; dismiss those and test a fresh notification.

@@ -31,7 +31,9 @@ documented in [docs/agent-sessions.md](docs/agent-sessions.md).
 **Reminders (Termux on Android only)**
 
 - The **Termux:API** app and `pkg install termux-api`: notifications
-  (`termux-notification`, `termux-open`, `termux-wake-unlock`).
+  (`termux-notification`, `termux-wake-unlock`). Tapping a notification
+  opens the original task at its reminder line in `~/bin/hx` in a new
+  Termux session.
 - `pkg install ecj dx`: they build `bin/TdAlarm.java`, the exact-alarm
   helper.
 - Termux and Termux:API set to *Unrestricted* battery use.

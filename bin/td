@@ -824,20 +824,35 @@ def load_stamped_now():
 
 # ---------------------------------------------------------------- fire
 
-def fire_notification(title, body, open_path):
+def notification_action(open_path, open_line=1):
+    """Open the task at its reminder line in a foreground Helix session."""
+    path = Path(open_path).expanduser().absolute()
+    # termux-open sends the file through Android's share/import UI. Call
+    # Termux's own service as its uid instead, like the reminder alarm does.
+    # --esa has its own comma escaping; shlex.join handles the outer shell.
+    return shlex.join([
+        "am", "startservice", "--user", str(os.getuid() // 100000),
+        "-n", "com.termux/com.termux.app.TermuxService",
+        "-a", "com.termux.service_execute",
+        "-d", (Path.home() / "bin" / "hx").as_uri(),
+        "--esa", "com.termux.execute.arguments", f"{path}:{open_line}".replace(",", "\\,"),
+        "--es", "com.termux.execute.cwd", str(path.parent),
+        "--es", "com.termux.execute.session_action", "0",
+    ])
+
+
+def fire_notification(title, body, open_path, open_line=1):
     """-> True when the notification was posted."""
     if os.environ.get("TD_DRY_RUN") == "1":
         print(f"would fire: {tilde(open_path)}  {title}: {body}")
         return True
     try:
-        # The action is a shell command line (termux-notification runs it
-        # with sh -c), so the path is quoted.
         r = subprocess.run(["termux-notification",
                             "--title", title,
                             "--content", body,
                             "--sound",
                             "--action",
-                            f"termux-open {shlex.quote(str(open_path))}"],
+                            notification_action(open_path, open_line)],
                            check=False)
     except OSError:
         return False
@@ -1024,7 +1039,7 @@ def _tick():
                 continue
         if key in fired:
             continue
-        if fire_notification("TODO", s.label, s.path):
+        if fire_notification("TODO", s.label, s.path, s.line):
             _append_sidecar(FIRED_PATH, [(due_iso, s.hash, s.label[:80])])
             fired.add(key)
         else:
@@ -2551,6 +2566,7 @@ def cmd_fire(args):
     title_found = False
     due = None
     text = ""
+    open_line = 1
     for i, raw in enumerate(lines, 1):
         hm = H1.match(raw)
         if hm and not title_found:
@@ -2561,9 +2577,10 @@ def cmd_fire(args):
                 try:
                     due = datetime.strptime(f"{ts[1]} {ts[2]}", "%Y-%m-%d %H:%M")
                     text = stamp_text(path, i, raw)
+                    open_line = i
                 except ValueError:
                     pass
-    if not fire_notification("TODO", title, path):
+    if not fire_notification("TODO", title, path, open_line):
         sys.exit("td fire: termux-notification failed")
     due_iso = (due or now()).isoformat(timespec="minutes")
     _append_sidecar(FIRED_PATH, [(due_iso, schedule_hash(str(path), due_iso, text),
@@ -5125,7 +5142,7 @@ def run_tests(verbose=False):
             self.assertIn("would fire", out)
             self.assertIn("ping", out)
 
-        def test_tap_action_quotes_the_path(self):
+        def test_tap_opens_original_file_at_reminder_line_in_helix(self):
             # termux-notification runs --action with sh -c.
             bin_dir = self.home / "bin"
             bin_dir.mkdir()
@@ -5133,11 +5150,55 @@ def run_tests(verbose=False):
             fake.write_text(f"#!{sys.executable}\nimport json, sys\n"
                             f"open({str(self.home / 'args')!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
             fake.chmod(0o755)
-            p = self.put_dedicated("it's here.md", "# here\n2026-10-10 09:00\n")
-            self.td("fire", str(p), TD_DRY_RUN=None, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+            am = bin_dir / "am"
+            am.write_text(f"#!{sys.executable}\nimport json, sys\n"
+                          f"open({str(self.home / 'am-args')!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
+            am.chmod(0o755)
+            p = self.put_dedicated("it's here,$(touch injected)`touch injected2`.md",
+                                   "# here\n\nnotes\n\n2026-10-10 09:00\n")
+            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+            self.td("fire", str(p), TD_DRY_RUN=None, PATH=env["PATH"])
             args = json.loads((self.home / "args").read_text())
             action = args[args.index("--action") + 1]
-            self.assertEqual(shlex.split(action), ["termux-open", str(p)])
+            sp.run(["sh", "-c", action], env=env, cwd=self.home,
+                   capture_output=True, check=True)
+            opened = json.loads((self.home / "am-args").read_text())
+            self.assertEqual(opened[:4], ["startservice", "--user",
+                                         str(os.getuid() // 100000), "-n"])
+            self.assertEqual(opened[4], "com.termux/com.termux.app.TermuxService")
+            self.assertEqual(opened[opened.index("-a") + 1], "com.termux.service_execute")
+            self.assertEqual(opened[opened.index("-d") + 1], (bin_dir / "hx").as_uri())
+            arg = opened[opened.index("com.termux.execute.arguments") + 1]
+            self.assertEqual(re.split(r"(?<!\\),", arg), [f"{p}:5".replace(",", "\\,")])
+            self.assertEqual(arg.replace("\\,", ","), f"{p}:5")
+            self.assertEqual(opened[opened.index("com.termux.execute.cwd") + 1], str(p.parent))
+            self.assertEqual(opened[-3:], ["--es", "com.termux.execute.session_action", "0"])
+            self.assertFalse((self.home / "injected").exists())
+            self.assertFalse((self.home / "injected2").exists())
+
+        def test_tick_tap_points_to_inbox_and_dedicated_reminder_lines(self):
+            bin_dir = self.home / "bin"
+            bin_dir.mkdir()
+            fake = bin_dir / "termux-notification"
+            fake.write_text(f"#!{sys.executable}\nimport json, sys\n"
+                            f"with open({str(self.home / 'notifications')!r}, 'a') as f:\n"
+                            "    f.write(json.dumps(sys.argv[1:]) + '\\n')\n")
+            fake.chmod(0o755)
+            p = self.put_inbox("- [ ] unrelated\n\n"
+                               "- [ ] inbox ping [2026-10-10 Sat 11:05]\n")
+            d = self.put_dedicated("dedicated.md",
+                                   "# dedicated\n\nnotes\n\n"
+                                   "call [2026-10-10 Sat 11:05]\n")
+            self.td("tick")
+            # The test HOME has no alarm helper; posting still succeeds.
+            self.td_run("tick", now_="2026-10-10 11:05", TD_DRY_RUN=None,
+                        PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+            targets = set()
+            for row in (self.home / "notifications").read_text().splitlines():
+                args = json.loads(row)
+                action = shlex.split(args[args.index("--action") + 1])
+                targets.add(action[action.index("com.termux.execute.arguments") + 1])
+            self.assertEqual(targets, {f"{p}:3", f"{d}:5"})
 
     class Recurring(Case):
         # NOW = "2026-10-10 11:00" (Sat)
