@@ -74,7 +74,18 @@ reported by that run is recorded. Connection and authentication failures do not
 retry the prompt in another conversation. IDs come from native structured
 output, rather than a search for the latest session file. For Codex, see
 [the official non-interactive mode guide](https://learn.chatgpt.com/docs/non-interactive-mode).
-The agent permission flags match the previous shortcuts.
+The agent permission flags match the previous shortcuts, except for Claude and
+Codex. Replies cannot show approval prompts, so `languages.toml` sets permission
+modes in the `agent-buffer-lsp` environment for both new and resumed requests:
+
+- `HELIX_CLAUDE_PERMISSION_MODE = "auto"` passes `--permission-mode auto` to
+  Claude. Without it, Claude is denied anything that needs approval, such as
+  reading outside the working directory; removing it restores `acceptEdits` on
+  resume only.
+- `HELIX_CODEX_PERMISSION_MODE = "auto"` passes `--approve-for-me` to Codex, so
+  an automatic reviewer answers approvals in the `workspace-write` sandbox.
+  `read-only`, `workspace-write` or `danger-full-access` pass `--sandbox`
+  instead. Removing it restores Codex's configured defaults.
 
 Conversation files and the ID registry live under
 `~/.local/state/helix/agent-sessions/`, or the corresponding `XDG_STATE_HOME`.

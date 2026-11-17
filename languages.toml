@@ -160,6 +160,13 @@ file-types = []
 [language-server.agent-buffer-lsp]
 command = "sh"
 args = ["-c", 'exec python3 "$HOME/.config/helix/bin/agent-buffer-lsp"']
+# Permission modes for the agent bindings. Replies can't show approval prompts.
+# Claude (space . C / c): "auto" lets Claude read, edit and run commands unless
+# it judges an action risky. Remove to restore acceptEdits on resume only.
+# Codex (space . V / v): "auto" passes --approve-for-me (automatic reviewer,
+# workspace-write sandbox); "read-only", "workspace-write" or
+# "danger-full-access" pass --sandbox instead. Remove for Codex's defaults.
+environment = { HELIX_CLAUDE_PERMISSION_MODE = "auto", HELIX_CODEX_PERMISSION_MODE = "auto" }
 
 [[language]]
 name = "agent-chat"

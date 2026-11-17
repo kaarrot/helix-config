@@ -130,13 +130,27 @@ def command(agent, mode, session_id, prompt):
     proposed_id = None
     if agent == "codex":
         argv = ["codex", "exec", "--skip-git-repo-check", "--json"]
+        # Set in languages.toml. "auto" routes approvals through Codex's
+        # automatic reviewer (workspace-write sandbox); a sandbox name selects
+        # that sandbox. Options must precede the resume subcommand.
+        permission_mode = os.environ.get("HELIX_CODEX_PERMISSION_MODE")
+        if permission_mode == "auto":
+            argv += ["--approve-for-me"]
+        elif permission_mode in ("read-only", "workspace-write", "danger-full-access"):
+            argv += ["--sandbox", permission_mode]
         if mode == "resume":
             argv += ["resume", session_id] if session_id else ["resume", "--last"]
         return argv + ["-"], None
     if agent == "claude":
         argv = ["claude", "--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages"]
-        if mode == "resume":
+        # Set in languages.toml (agent-buffer-lsp environment). --print cannot
+        # show approval prompts, so the mode decides what Claude may do unasked.
+        permission_mode = os.environ.get("HELIX_CLAUDE_PERMISSION_MODE")
+        if permission_mode:
+            argv += ["--permission-mode", permission_mode]
+        elif mode == "resume":
             argv += ["--permission-mode", "acceptEdits"]
+        if mode == "resume":
             argv += ["--resume", session_id] if session_id else ["--continue"]
         else:
             proposed_id = str(uuid.uuid4())
