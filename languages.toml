@@ -158,8 +158,8 @@ file-types = []
 
 # Agent replies are applied to the live buffer through the existing LSP interface.
 [language-server.agent-buffer-lsp]
-command = "python3"
-args = ["/data/data/com.termux/files/home/.config/helix/bin/agent-buffer-lsp"]
+command = "sh"
+args = ["-c", 'exec python3 "$HOME/.config/helix/bin/agent-buffer-lsp"']
 
 [[language]]
 name = "agent-chat"
