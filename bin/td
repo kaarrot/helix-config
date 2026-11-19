@@ -1011,6 +1011,14 @@ def _run_alarm(*args):
     text, or None when it worked."""
     if not ALARM_JAR.is_file():
         return f"{tilde(ALARM_JAR)} missing: run td install"
+    # Android 14+ aborts app_process when dynamically loaded code is writable.
+    # Repair helpers built by older td versions, including restored caches.
+    try:
+        mode = ALARM_JAR.stat().st_mode & 0o777
+        if mode & 0o222:
+            ALARM_JAR.chmod(mode & ~0o222)
+    except OSError as e:
+        return f"could not make {tilde(ALARM_JAR)} read-only: {e}"
     env = {k: v for k, v in os.environ.items()
            if k not in ("LD_PRELOAD", "LD_LIBRARY_PATH")}
     env["CLASSPATH"] = str(ALARM_JAR)
@@ -1041,13 +1049,13 @@ def arm(at):
     return err
 
 
-def _tick_later():
+def _tick_later(script):
     """Start a detached `td tick --later` (see main): stdio to /dev/null
     and a new session, so a :pipe key doesn't wait for it."""
     if not TERMUX or os.environ.get("TD_DRY_RUN") == "1":
         return
     try:
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
+        subprocess.Popen([sys.executable, str(script),
                           "tick", "--later"],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
@@ -3002,12 +3010,19 @@ def build_alarm():
     if missing:
         return f"needs {' and '.join(missing)}: pkg install ecj dx"
     CACHE.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as out:
-        for step in (["ecj", "-nowarn", "-d", out, str(ALARM_SRC)],
-                     ["dx", "--dex", f"--output={ALARM_JAR}", out]):
+    with tempfile.TemporaryDirectory(prefix="td-alarm-", dir=CACHE) as out:
+        classes = Path(out) / "classes"
+        classes.mkdir()
+        jar = Path(out) / "td-alarm.jar"
+        for step in (["ecj", "-nowarn", "-d", str(classes), str(ALARM_SRC)],
+                     ["dx", "--dex", f"--output={jar}", str(classes)]):
             r = subprocess.run(step, capture_output=True, text=True)
             if r.returncode != 0:
                 return f"{step[0]} failed:\n{r.stdout}{r.stderr}".rstrip()
+        # Publish only a complete, read-only helper. Replacing the file also
+        # lets reinstallation update an existing read-only JAR safely.
+        jar.chmod(0o400)
+        jar.replace(ALARM_JAR)
     return None
 
 
@@ -3051,7 +3066,8 @@ def main(argv):
     cmd = argv[1] if len(argv) > 1 else ""
     rest = argv[2:]
     if cmd in RETICK and "--focus" not in rest:
-        atexit.register(_tick_later)
+        # __file__ may be removed from __main__ before exit callbacks run.
+        atexit.register(_tick_later, Path(__file__).resolve())
     if cmd == "install":
         return cmd_install()
     if cmd == "uninstall":
@@ -3096,6 +3112,7 @@ def run_tests(verbose=False):
     import subprocess as sp
     import tempfile
     import unittest
+    from unittest import mock
 
     NOW = "2026-10-10 11:00"
     TD = os.path.abspath(__file__)
@@ -3708,6 +3725,22 @@ def run_tests(verbose=False):
             self.assertLess(out.index("bravo"), out.index("alpha"))
 
     class Tick(Case):
+        def test_agenda_refresh_starts_detached_tick_after_script_exit(self):
+            self.put_inbox("- [ ] future reminder [2026-10-10 Sat 12:00]\n")
+            # Unlike the dry-run tests, exercise real script shutdown and its
+            # detached child. This HOME has no alarm helper, so no Android
+            # alarm or notification can be created.
+            result = self.td_run("list", TD_DRY_RUN=None)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertNotIn(b"Exception ignored in atexit", result.stderr)
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                if (self.cache / "last-tick").exists() and (self.cache / "alarm.log").exists():
+                    break
+                time.sleep(0.05)
+            self.assertEqual(self.read_cache("last-tick").strip(), "2026-10-10T11:00")
+            self.assertIn("2026-10-10T12:00", self.read_cache("scheduled"))
+
         def test_future_timestamp_fires_when_due(self):
             # First tick (NOW = 11:00) sees future; records in scheduled.
             self.put_dedicated("rent.md", "# rent\n2026-10-10 12:00\n")
@@ -6065,6 +6098,66 @@ def run_tests(verbose=False):
             self.assertIn("- #body (1)", self.read_cache("agenda.md"))
             self.assertNotIn("- #home", self.read_cache("agenda.md"))
 
+    class Alarm(Case):
+        def test_legacy_writable_helper_is_repaired_before_loading(self):
+            self.cache.mkdir(parents=True)
+            jar = self.cache / "td-alarm.jar"
+            jar.write_bytes(b"legacy helper")
+            jar.chmod(0o600)
+
+            def launch(command, **kwargs):
+                self.assertEqual(jar.stat().st_mode & 0o222, 0)
+                return sp.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.dict(globals(), ALARM_JAR=jar), \
+                    mock.patch.object(subprocess, "run", side_effect=launch):
+                self.assertIsNone(_run_alarm("cancel", str(TICK_SHIM)))
+            self.assertEqual(jar.read_bytes(), b"legacy helper")
+
+        def test_build_replaces_a_read_only_helper_and_can_be_repeated(self):
+            self.cache.mkdir(parents=True)
+            jar = self.cache / "td-alarm.jar"
+            jar.write_bytes(b"old helper")
+            jar.chmod(0o400)
+
+            def compile_step(command, **kwargs):
+                if command[0] == "dx":
+                    dest = next(a.split("=", 1)[1] for a in command
+                                if a.startswith("--output="))
+                    Path(dest).write_bytes(b"new helper")
+                return sp.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.dict(globals(), CACHE=self.cache, ALARM_JAR=jar), \
+                    mock.patch.object(shutil, "which", return_value="/test/tool"), \
+                    mock.patch.object(subprocess, "run", side_effect=compile_step):
+                for _ in range(2):
+                    self.assertIsNone(build_alarm())
+                    self.assertEqual(jar.read_bytes(), b"new helper")
+                    self.assertEqual(jar.stat().st_mode & 0o777, 0o400)
+
+        def test_failed_build_preserves_the_installed_helper(self):
+            self.cache.mkdir(parents=True)
+            jar = self.cache / "td-alarm.jar"
+            jar.write_bytes(b"working helper")
+            jar.chmod(0o400)
+            for failing_tool in ("ecj", "dx"):
+                with self.subTest(tool=failing_tool):
+                    def compile_step(command, **kwargs):
+                        if command[0] == "dx":
+                            dest = next(a.split("=", 1)[1] for a in command
+                                        if a.startswith("--output="))
+                            Path(dest).write_bytes(b"incomplete helper")
+                        failed = command[0] == failing_tool
+                        return sp.CompletedProcess(command, int(failed), "",
+                                                   "build error" if failed else "")
+
+                    with mock.patch.dict(globals(), CACHE=self.cache, ALARM_JAR=jar), \
+                            mock.patch.object(shutil, "which", return_value="/test/tool"), \
+                            mock.patch.object(subprocess, "run", side_effect=compile_step):
+                        self.assertIn(f"{failing_tool} failed:", build_alarm())
+                    self.assertEqual(jar.read_bytes(), b"working helper")
+                    self.assertEqual(jar.stat().st_mode & 0o777, 0o400)
+
     class Fire(Case):
         def test_fire_by_file(self):
             p = self.put_dedicated("ping.md", "# ping\n2026-10-10 09:00\n")
@@ -6442,7 +6535,7 @@ def run_tests(verbose=False):
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
                                for c in (Parse, List, TagUpgrade, Tick, New, Stamp, Next,
                                          Promote, Day, Marker, Reschedule, Jump, SetToggle,
-                                         AgendaToggle, File, WeekView, Rename, Fire, Recurring,
+                                         AgendaToggle, File, WeekView, Rename, Alarm, Fire, Recurring,
                                          TlAgrees,
                                          KeysDoc))
     ok = unittest.TextTestRunner(verbosity=2 if verbose else 1).run(suite).wasSuccessful()

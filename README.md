@@ -30,14 +30,66 @@ documented in [docs/agent-sessions.md](docs/agent-sessions.md).
 
 **Reminders (Termux on Android only)**
 
-- The **Termux:API** app and `pkg install termux-api`: notifications
-  (`termux-notification`, `termux-wake-unlock`). Tapping a notification
+- Both the **Termux:API Android app** (from the same source as Termux)
+  and the **`termux-api` shell package**: installing the app alone does
+  not provide the notification command. Restoring home or dotfiles on a
+  new system does not install the shell packages. Reminders use
+  `termux-notification` and `termux-wake-unlock`. Tapping a notification
   opens the original task at its reminder line in `~/bin/hx` in a new
   Termux session.
 - `pkg install ecj dx`: they build `bin/TdAlarm.java`, the exact-alarm
   helper.
-- Termux and Termux:API set to *Unrestricted* battery use.
-- Run `bin/td install` once, and again whenever `bin/TdAlarm.java` changes.
+- Allow notifications for Termux:API in Android's app settings, and set
+  Termux and Termux:API to *Unrestricted* battery use.
+- Run `~/.config/helix/bin/td install` on first setup, on a new or restored
+  Termux installation, and whenever `bin/TdAlarm.java` changes.
+
+From any directory:
+
+```sh
+pkg install python termux-api ecj dx
+~/.config/helix/bin/td install
+termux-notification --title "Helix reminder check" --content "Notifications work" --sound
+```
+
+### Schedule a reminder in Helix
+
+1. On an open task in `~/tasks/todo.md` or a task file, press `space , s`.
+2. Adjust the stamp to a **future** time, by editing it or using `+` / `-`
+   on its date or time. A stamp left at "now" is recorded without notifying.
+3. Save with `:w`.
+4. Open the agenda with `space , a`. This starts a background scheduler
+   tick after 2 seconds and arms the next Android alarm.
+
+`space , s`, `+`, `-`, and a plain `:w` do not run the scheduler. After
+changing a reminder, save and open the agenda, or run
+`~/.config/helix/bin/td tick` in a shell. A reboot or force-stop clears
+Android's alarms: open the agenda or run `~/.config/helix/bin/td tick` to
+re-arm them.
+
+### If reminders stop
+
+First run the notification check above. A missing `termux-notification`
+means the shell package needs installing; if the command runs but nothing
+appears, check Termux:API's notification permission and channel settings.
+Then check the scheduler:
+
+```sh
+~/.config/helix/bin/td tick
+cat ~/.cache/td/last-tick
+tail -n 5 ~/.cache/td/alarm.log
+```
+
+`last-tick` should show the current local minute. `alarm.log` records
+failures to arm the alarm; old errors remain after a successful repair.
+If a direct `td tick` works but opening the agenda does not advance
+`last-tick`, run `~/.config/helix/bin/td list >/dev/null`, wait a few
+seconds, and check `last-tick` again. This exercises the agenda's automatic
+refresh and shows Python exit-callback errors that Helix can hide.
+
+Android 14+ [requires the alarm JAR to be read-only](https://github.com/termux/termux-packages/issues/16255), otherwise
+`app_process` can abort with `exit -6`. `td install` now builds a read-only
+JAR, and a tick repairs writable helpers left by older versions.
 
 Steps and checks: [Quick start](docs/agenda.md#quick-start).
 
