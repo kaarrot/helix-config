@@ -191,6 +191,9 @@ Commands:
                        back unchanged. No stamp or entry: the line comes
                        back unchanged.
   td fire PATH         fire a dedicated file's timestamp now (testing)
+  td open-reminder PATH LINE SNAPSHOT
+                       notification tap: find the reminder's current line
+                       in the saved file and open it in Helix
   td test [-v]         run tests
 
 Env: $TL_DIR (default ~/tasks), $TD_FILE (default $TL_DIR/todo.md),
@@ -199,7 +202,7 @@ Env: $TL_DIR (default ~/tasks), $TD_FILE (default $TL_DIR/todo.md),
      $TD_DRY_RUN=1 skips notifications and alarms and prints "would fire: ..."
      and "would arm: ..." instead,
      $TD_TERMUX=1/0 says whether this is Termux (default: detected).
-     Reminders (tick, install, fire) need Termux; elsewhere they refuse.
+     Reminders and notification taps need Termux; elsewhere they refuse.
 """
 import atexit
 import calendar
@@ -956,24 +959,85 @@ def load_stamped_now():
 
 # ---------------------------------------------------------------- fire
 
-def notification_action(open_path, open_line=1):
-    """Open the task at its reminder line in a foreground Helix session."""
+def notification_action(open_path, open_line=1, open_raw=None):
+    """Defer finding the reminder's line until the notification is tapped."""
     path = Path(open_path).expanduser().absolute()
+    if open_raw is None:
+        try:
+            lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines()
+            open_raw = lines[open_line - 1] if 1 <= open_line <= len(lines) else ""
+        except OSError:
+            open_raw = ""
+    return shlex.join([sys.executable, str(Path(__file__).resolve()),
+                       "open-reminder", str(path), str(open_line), open_raw])
+
+
+def notification_line(path, original_line, snapshot, lines):
+    """Find a captured reminder in the current file, preferring nearby matches.
+
+    Prefer the unchanged line, then its identity and original stamp, then
+    its identity alone (a recurring stamp may have advanced). Break ties by
+    proximity to the original line, which is also the fallback if missing.
+    """
+    fallback = max(1, min(original_line, len(lines)))
+    if not snapshot:
+        return fallback
+
+    def nearest(candidates):
+        return min(candidates, key=lambda i: (abs(i - original_line), i))
+
+    exact = [i for i, raw in enumerate(lines, 1) if raw == snapshot]
+    if exact:
+        return nearest(exact)
+    core = stamp_text(path, 0, snapshot)
+    stamps = {(m[1], m[2].zfill(5)) for m in find_stamps(snapshot)}
+    candidates, same_stamp = [], []
+    for i, raw in enumerate(lines, 1):
+        if stamp_text(path, i, raw) != core:
+            continue
+        current_stamps = {(m[1], m[2].zfill(5)) for m in find_stamps(raw)}
+        # A date-only reminder has an empty identity; blank lines do too.
+        if not core and not current_stamps:
+            continue
+        candidates.append(i)
+        if stamps & current_stamps:
+            same_stamp.append(i)
+    if same_stamp:
+        return nearest(same_stamp)
+    return nearest(candidates) if candidates else fallback
+
+
+def cmd_open_reminder(args):
+    """Notification action: resolve against the saved file at tap time."""
+    if len(args) != 3:
+        sys.exit("usage: td open-reminder PATH LINE SNAPSHOT")
+    try:
+        original_line = max(1, int(args[1]))
+    except ValueError:
+        sys.exit("td open-reminder: LINE must be a number")
+    _need_termux("open-reminder")
+    path = Path(args[0]).expanduser().absolute()
+    try:
+        lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines()
+    except OSError as e:
+        sys.exit(f"td open-reminder: cannot read {path}: {e}")
+    line = notification_line(path, original_line, args[2], lines)
     # termux-open sends the file through Android's share/import UI. Call
     # Termux's own service as its uid instead, like the reminder alarm does.
-    # --esa has its own comma escaping; shlex.join handles the outer shell.
-    return shlex.join([
+    # --esa requires comma escaping even when arguments are passed directly.
+    command = [
         "am", "startservice", "--user", str(os.getuid() // 100000),
         "-n", "com.termux/com.termux.app.TermuxService",
         "-a", "com.termux.service_execute",
         "-d", (Path.home() / "bin" / "hx").as_uri(),
-        "--esa", "com.termux.execute.arguments", f"{path}:{open_line}".replace(",", "\\,"),
+        "--esa", "com.termux.execute.arguments", f"{path}:{line}".replace(",", "\\,"),
         "--es", "com.termux.execute.cwd", str(path.parent),
         "--es", "com.termux.execute.session_action", "0",
-    ])
+    ]
+    return subprocess.run(command, check=False).returncode
 
 
-def fire_notification(title, body, open_path, open_line=1):
+def fire_notification(title, body, open_path, open_line=1, open_raw=None):
     """-> True when the notification was posted."""
     if os.environ.get("TD_DRY_RUN") == "1":
         print(f"would fire: {tilde(open_path)}  {title}: {body}")
@@ -984,7 +1048,7 @@ def fire_notification(title, body, open_path, open_line=1):
                             "--content", body,
                             "--sound",
                             "--action",
-                            notification_action(open_path, open_line)],
+                            notification_action(open_path, open_line, open_raw)],
                            check=False)
     except OSError:
         return False
@@ -1180,7 +1244,7 @@ def _tick():
                 continue
         if key in fired:
             continue
-        if fire_notification("TODO", s.label, s.path, s.line):
+        if fire_notification("TODO", s.label, s.path, s.line, s.raw):
             _append_sidecar(FIRED_PATH, [(due_iso, s.hash, s.label[:80])])
             fired.add(key)
         else:
@@ -2982,6 +3046,7 @@ def cmd_fire(args):
     due = None
     text = ""
     open_line = 1
+    open_raw = None
     for i, raw in enumerate(lines, 1):
         hm = H1.match(raw)
         if hm and not title_found:
@@ -2993,9 +3058,10 @@ def cmd_fire(args):
                     due = datetime.strptime(f"{ts[1]} {ts[2]}", "%Y-%m-%d %H:%M")
                     text = stamp_text(path, i, raw)
                     open_line = i
+                    open_raw = raw
                 except ValueError:
                     pass
-    if not fire_notification("TODO", title, path, open_line):
+    if not fire_notification("TODO", title, path, open_line, open_raw):
         sys.exit("td fire: termux-notification failed")
     due_iso = (due or now()).isoformat(timespec="minutes")
     _append_sidecar(FIRED_PATH, [(due_iso, schedule_hash(str(path), due_iso, text),
@@ -3100,6 +3166,8 @@ def main(argv):
         return cmd_toggle(rest)
     if cmd == "fire":
         return cmd_fire(rest)
+    if cmd == "open-reminder":
+        return cmd_open_reminder(rest)
     if cmd == "test":
         return run_tests("-v" in rest)
     sys.exit(__doc__)
@@ -6159,6 +6227,38 @@ def run_tests(verbose=False):
                     self.assertEqual(jar.stat().st_mode & 0o777, 0o400)
 
     class Fire(Case):
+        def tap_tools(self):
+            bin_dir = self.home / "bin"
+            bin_dir.mkdir()
+            for name, output in (("termux-notification", "notifications"),
+                                 ("am", "am-args")):
+                command = bin_dir / name
+                command.write_text(
+                    f"#!{sys.executable}\nimport json, sys\n"
+                    f"with open({str(self.home / output)!r}, 'a') as f:\n"
+                    "    f.write(json.dumps(sys.argv[1:]) + '\\n')\n")
+                command.chmod(0o755)
+            return {**os.environ, "HOME": str(self.home), "TD_TERMUX": "1",
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+
+        def posted_actions(self):
+            rows = (self.home / "notifications").read_text().splitlines()
+            args = [json.loads(row) for row in rows]
+            return [row[row.index("--action") + 1] for row in args]
+
+        def post_action(self, path, env):
+            self.td("fire", str(path), TD_DRY_RUN=None, PATH=env["PATH"])
+            return self.posted_actions()[-1]
+
+        def tap_args(self, action, env):
+            sp.run(["sh", "-c", action], env=env, cwd=self.home,
+                   capture_output=True, check=True)
+            return json.loads((self.home / "am-args").read_text().splitlines()[-1])
+
+        def tap_location(self, action, env):
+            args = self.tap_args(action, env)
+            return args[args.index("com.termux.execute.arguments") + 1].replace("\\,", ",")
+
         def test_fire_by_file(self):
             p = self.put_dedicated("ping.md", "# ping\n2026-10-10 09:00\n")
             out = self.td("fire", str(p))
@@ -6167,46 +6267,30 @@ def run_tests(verbose=False):
 
         def test_tap_opens_original_file_at_reminder_line_in_helix(self):
             # termux-notification runs --action with sh -c.
-            bin_dir = self.home / "bin"
-            bin_dir.mkdir()
-            fake = bin_dir / "termux-notification"
-            fake.write_text(f"#!{sys.executable}\nimport json, sys\n"
-                            f"open({str(self.home / 'args')!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
-            fake.chmod(0o755)
-            am = bin_dir / "am"
-            am.write_text(f"#!{sys.executable}\nimport json, sys\n"
-                          f"open({str(self.home / 'am-args')!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
-            am.chmod(0o755)
+            env = self.tap_tools()
             p = self.put_dedicated("it's here,$(touch injected)`touch injected2`.md",
-                                   "# here\n\nnotes\n\n2026-10-10 09:00\n")
-            env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
-            self.td("fire", str(p), TD_DRY_RUN=None, PATH=env["PATH"])
-            args = json.loads((self.home / "args").read_text())
-            action = args[args.index("--action") + 1]
-            sp.run(["sh", "-c", action], env=env, cwd=self.home,
-                   capture_output=True, check=True)
-            opened = json.loads((self.home / "am-args").read_text())
+                                   "# here\n\nnotes\n\n2026-10-10 09:00 "
+                                   "$(touch injected3)`touch injected4`\n")
+            action = self.post_action(p, env)
+            p.write_text("new notes\n\n" + p.read_text())
+            opened = self.tap_args(action, env)
             self.assertEqual(opened[:4], ["startservice", "--user",
                                          str(os.getuid() // 100000), "-n"])
             self.assertEqual(opened[4], "com.termux/com.termux.app.TermuxService")
             self.assertEqual(opened[opened.index("-a") + 1], "com.termux.service_execute")
-            self.assertEqual(opened[opened.index("-d") + 1], (bin_dir / "hx").as_uri())
+            self.assertEqual(opened[opened.index("-d") + 1], (self.home / "bin/hx").as_uri())
             arg = opened[opened.index("com.termux.execute.arguments") + 1]
-            self.assertEqual(re.split(r"(?<!\\),", arg), [f"{p}:5".replace(",", "\\,")])
-            self.assertEqual(arg.replace("\\,", ","), f"{p}:5")
+            self.assertEqual(re.split(r"(?<!\\),", arg), [f"{p}:7".replace(",", "\\,")])
+            self.assertEqual(arg.replace("\\,", ","), f"{p}:7")
             self.assertEqual(opened[opened.index("com.termux.execute.cwd") + 1], str(p.parent))
             self.assertEqual(opened[-3:], ["--es", "com.termux.execute.session_action", "0"])
             self.assertFalse((self.home / "injected").exists())
             self.assertFalse((self.home / "injected2").exists())
+            self.assertFalse((self.home / "injected3").exists())
+            self.assertFalse((self.home / "injected4").exists())
 
         def test_tick_tap_points_to_inbox_and_dedicated_reminder_lines(self):
-            bin_dir = self.home / "bin"
-            bin_dir.mkdir()
-            fake = bin_dir / "termux-notification"
-            fake.write_text(f"#!{sys.executable}\nimport json, sys\n"
-                            f"with open({str(self.home / 'notifications')!r}, 'a') as f:\n"
-                            "    f.write(json.dumps(sys.argv[1:]) + '\\n')\n")
-            fake.chmod(0o755)
+            env = self.tap_tools()
             p = self.put_inbox("- [ ] unrelated\n\n"
                                "- [ ] inbox ping [2026-10-10 Sat 11:05]\n")
             d = self.put_dedicated("dedicated.md",
@@ -6215,13 +6299,72 @@ def run_tests(verbose=False):
             self.td("tick")
             # The test HOME has no alarm helper; posting still succeeds.
             self.td_run("tick", now_="2026-10-10 11:05", TD_DRY_RUN=None,
-                        PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-            targets = set()
-            for row in (self.home / "notifications").read_text().splitlines():
-                args = json.loads(row)
-                action = shlex.split(args[args.index("--action") + 1])
-                targets.add(action[action.index("com.termux.execute.arguments") + 1])
-            self.assertEqual(targets, {f"{p}:3", f"{d}:5"})
+                        PATH=env["PATH"])
+            p.write_text("new inbox line\n\n" + p.read_text())
+            d.write_text("new task line\n\n\n" + d.read_text())
+            targets = {self.tap_location(action, env) for action in self.posted_actions()}
+            self.assertEqual(targets, {f"{p}:5", f"{d}:8"})
+
+        def test_tap_follows_a_recurring_stamp_after_it_advances(self):
+            env = self.tap_tools()
+            p = self.put_dedicated("review.md", "# review\n\n"
+                                   "- [ ] review #home [2026-10-10 Sat 09:00 ++1d]\n")
+            action = self.post_action(p, env)
+            p.write_text("new notes\n\n# review\n\n"
+                         "- [Y] review #work [2026-10-11 Sun 09:00 ++1d]\n")
+            self.assertEqual(self.tap_location(action, env), f"{p}:5")
+
+        def test_tap_follows_a_date_only_recurring_line(self):
+            env = self.tap_tools()
+            p = self.put_dedicated("haircut.md", "# haircut\n\n"
+                                   "[2026-10-10 Sat 09:00 ++2m]\n")
+            action = self.post_action(p, env)
+            p.write_text("notes\n\n# haircut\n\n[2026-12-10 Thu 09:00 ++2m]\n")
+            self.assertEqual(self.tap_location(action, env), f"{p}:5")
+
+        def test_tap_prefers_the_original_stamp_over_a_nearer_same_title(self):
+            env = self.tap_tools()
+            p = self.put_dedicated("calls.md", "# calls\n\n"
+                                   "- [ ] call bank [2026-10-10 Sat 09:00]\n"
+                                   "- [ ] call bank [2026-10-11 Sun 09:00]\n")
+            action = self.post_action(p, env)
+            p.write_text("# calls\n- [ ] call bank [2026-10-11 Sun 09:00]\n"
+                         "\nnotes\n- [Y] call bank [2026-10-10 Sat 09:00]\n")
+            self.assertEqual(self.tap_location(action, env), f"{p}:5")
+
+        def test_tap_chooses_the_nearest_ambiguous_match(self):
+            env = self.tap_tools()
+            raw = "- [ ] duplicate [2026-10-10 Sat 09:00]"
+            p = self.put_dedicated("duplicates.md", f"# task\nnotes\n\n{raw}\n")
+            action = self.post_action(p, env)
+            for stamp in ("2026-10-10 Sat", "2026-10-11 Sun"):
+                with self.subTest(stamp=stamp):
+                    current = raw.replace("2026-10-10 Sat", stamp)
+                    p.write_text(f"# task\n\n{current}\nnotes\n\n\n{current}\n")
+                    self.assertEqual(self.tap_location(action, env), f"{p}:3")
+
+        def test_missing_reminder_falls_back_near_its_original_line(self):
+            env = self.tap_tools()
+            p = self.put_dedicated("removed.md", "# task\n\nnotes\n\n"
+                                   "- [ ] original [2026-10-10 Sat 09:00]\n")
+            action = self.post_action(p, env)
+            for text, line in (("other\n" * 10, 5), ("short\nfile\n", 2), ("", 1)):
+                with self.subTest(line=line):
+                    p.write_text(text)
+                    self.assertEqual(self.tap_location(action, env), f"{p}:{line}")
+                    self.assertEqual(p.read_text(), text)
+
+        def test_tapping_a_deleted_file_does_not_recreate_it(self):
+            env = self.tap_tools()
+            p = self.put_dedicated("deleted.md", "# task\n2026-10-10 09:00\n")
+            action = self.post_action(p, env)
+            p.unlink()
+            result = sp.run(["sh", "-c", action], env=env, cwd=self.home,
+                            capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"cannot read", result.stderr)
+            self.assertFalse((self.home / "am-args").exists())
+            self.assertFalse(p.exists())
 
     class Recurring(Case):
         # NOW = "2026-10-10 11:00" (Sat)

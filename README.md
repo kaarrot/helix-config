@@ -67,6 +67,14 @@ changing a reminder, save and open the agenda, or run
 Android's alarms: open the agenda or run `~/.config/helix/bin/td tick` to
 re-arm them.
 
+New notifications find the reminder's current line when tapped, so saved
+lines added above it and advancing recurring dates do not leave a stale
+jump. The lookup prefers the original line text, then its task text and
+date, then the task text with the date ignored. Multiple matches use the
+one nearest the original line; a missing match uses the original line,
+clamped to the file's current length. It reads the saved file at its
+original path. Already-posted notifications keep their old tap action.
+
 ### If reminders stop
 
 First run the notification check above. A missing `termux-notification`

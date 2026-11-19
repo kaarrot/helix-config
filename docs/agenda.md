@@ -291,9 +291,16 @@ Each tick:
 The notification is titled `TODO`. Its text is the bullet's text, or the
 task file's first heading (its name if it has none). It plays the
 notification sound, and tapping it opens the original file at the
-reminder's line with `~/bin/hx` in a new foreground Termux session. The
-line number is captured when the notification is posted; editing above it
-afterward can move that line. This calls Termux's own service;
+reminder's current line with `~/bin/hx` in a new foreground Termux session.
+The tap action calls `td open-reminder` with the original path, line number,
+and a snapshot of the reminder line. It reads the saved file again and
+prefers an exact line match, then the same task text and stamp, then the
+same task text with dates, repeaters and tags ignored (and checkbox state
+on bullets ignored). Thus inserting lines above a reminder or advancing a recurring
+date still finds it. When several matches remain, it chooses the one
+nearest the original line; when none remain, it uses the original line,
+clamped to the current file length. It does not follow renamed or moved
+files, and a missing file is not recreated. This calls Termux's own service;
 `allow-external-apps` and `~/bin/termux-file-editor` are not needed.
 Notifications already posted before this change keep their old tap action;
 test a fresh one with `td fire ~/tasks/todo.md`.
@@ -494,6 +501,7 @@ is `++0d` (it would never move), so those lines are just marked done.
 | `td file NAME` | create the file task `~/tasks/<slug>.md` headed `# [ ] NAME` (an existing file is left alone) and print the path to open (`space , n`) |
 | `td next` | print the next time due (for a status line); a repeating reminder counts at its next time |
 | `td fire PATH` | fire a file's notification now (testing) |
+| `td open-reminder PATH LINE SNAPSHOT` | notification tap action: find the reminder's current line in the saved file, then open it in a new foreground Helix session |
 | `td test [-v]` | run the tests |
 
 ## Cache files
