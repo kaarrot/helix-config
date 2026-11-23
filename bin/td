@@ -123,6 +123,7 @@ Commands:
                        (~/.cache/tl/summary.txt), the entry's line; else
                        PATH:LINE (stay).
   td set PATH LINE S   rewrite checkbox char at PATH:LINE to S (" "/Y/A/x/!)
+  td inbox             print the configured inbox path, for Helix's :open
   td toggle S          stdin: a line. Toggle the checkbox between " " and S
                        in place. With --from the agenda, the row stays as
                        it is (it is a view): the task it shows changes
@@ -206,12 +207,15 @@ Env: $TL_DIR (default ~/tasks), $TD_FILE (default $TL_DIR/todo.md),
 """
 import atexit
 import calendar
+from contextlib import contextmanager, redirect_stdout
 import fcntl
 import hashlib
+import json
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -219,6 +223,7 @@ import time
 from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 TASK = re.compile(r"^(?P<indent>\s*)- \[(?P<state>[ xXyYaAwW!])\]\s+(?P<text>.*?)\s*$")
 # A scheduled timestamp is any YYYY-MM-DD [Xxx ]HH:MM. The optional
@@ -258,6 +263,7 @@ CHECKBOX = re.compile(r"- \[[ xXyYaAwW!]\]")
 TAG_CLUSTER = re.compile(r"(?<!\S)(?:#[A-Za-z][A-Za-z0-9_-]*)+(?![A-Za-z0-9_-])")
 TAG_NAME = re.compile(r"#([A-Za-z][A-Za-z0-9_-]*)")
 TAG_ROW = re.compile(r"^- #(?P<tag>[A-Za-z][A-Za-z0-9_-]*)(?: \(\d+\))?\s*$")
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 STATE_NAMES = {" ": "todo", "Y": "today", "A": "active", "W": "waiting",
                "x": "done", "X": "done", "!": "ignore"}
@@ -272,6 +278,11 @@ def canon(state):
     the same."""
     return {"y": "Y", "a": "A", "w": "W"}.get(state, state)
 
+def _next_state(current, requested):
+    # Preserve the spelling shown in the agenda, but treat both done states alike.
+    return " " if current.lower() == requested.lower() else requested
+
+
 CACHE = Path("~/.cache/td").expanduser()
 FIRED_PATH = CACHE / "fired"
 ADDED_PATH = CACHE / "added"
@@ -283,6 +294,7 @@ LIST_PATH = CACHE / "agenda.md"
 # The `td list` options the agenda was last built with, so a rebuild after a
 # change keeps the view's order (space , A) instead of falling back to added.
 LIST_ARGS_PATH = CACHE / "agenda-args"
+AGENDA_LOCK = CACHE / "agenda.lock"
 # Legacy filenames stay linked even after their original tags are edited away.
 FILE_LINKS_PATH = CACHE / "file-links"
 # Cursor column `space , s` and `+`/`-` hand from Helix to td (and back).
@@ -294,6 +306,7 @@ OPEN_PATH = CACHE / "open"
 CUT_PATH = CACHE / "cut"
 # The bullet `space , ret` was pressed on, as PATH:LINE: `td day` keeps it for `td day --cut -`.
 DAY_PATH = CACHE / "day"
+MOVE_LOCK = CACHE / "move.lock"
 TICK_SHIM = Path("~/.config/helix/bin/td-tick").expanduser()
 TICK_LOCK = CACHE / "tick.lock"
 # The reminder alarm (see bin/TdAlarm.java): built by `td install`, run
@@ -621,12 +634,26 @@ def _reminder_text(path, lineno, raw):
         r"^\s*(?:[-*+]|#+)\s+(?:\[[ xXyYaAwW!]\]\s+)?", "", raw))
 
 
+def _outside_fences(lines):
+    """Yield numbered Markdown lines outside backtick and tilde code fences."""
+    fence = None
+    for i, raw in enumerate(lines, 1):
+        m = FENCE.match(raw)
+        if fence:
+            if m and m[1].startswith(fence) and not m[2].strip():
+                fence = None
+        elif m and (m[1][0] == "~" or "`" not in m[2]):
+            fence = m[1]
+        else:
+            yield i, raw
+
+
 def scan_schedules(lookup=None):
     """All schedule candidates across $TL_DIR files + inbox bullets.
 
     Any `YYYY-MM-DD HH:MM` timestamp counts — no `SCHEDULE:` marker needed —
-    except the leading time of a tl log entry (see TL_ENTRY); a line with
-    two has two reminders. On inbox bullets, only open states ([ ], [Y],
+    outside fenced code blocks, except the leading time of a tl log entry
+    (see TL_ENTRY); a line with two has two reminders. On inbox bullets, only open states ([ ], [Y],
     [A], [W]) are eligible — [x]/[!] skip. A dedicated file follows its
     inbox bullet (the one whose slug is the file name), as the agenda does:
     it is skipped unless that bullet is open, whatever its heading says, so
@@ -648,11 +675,11 @@ def scan_schedules(lookup=None):
     for f in files:
         is_inbox = _same_file(f, inbox)
         try:
-            lines = f.read_bytes().decode("utf-8", "surrogateescape").splitlines()
+            lines = list(_outside_fences(f.read_bytes().decode("utf-8", "surrogateescape").splitlines()))
         except OSError:
             continue
         file_title, file_state = f.stem, None
-        for raw in lines:
+        for _, raw in lines:
             hm = H1.match(raw)
             if hm:
                 file_title = hm[1]
@@ -665,7 +692,7 @@ def scan_schedules(lookup=None):
                     continue
             elif file_state in ("x", "X", "!"):
                 continue
-        for i, raw in enumerate(lines, 1):
+        for i, raw in lines:
             stamps = find_stamps(raw)
             if not stamps:
                 continue
@@ -1723,6 +1750,12 @@ def _write_agenda(text):
     save a read-only file. It is replaced by a rename, which needs no write
     permission on the file, and Helix's auto-reload still picks it up."""
     CACHE.mkdir(parents=True, exist_ok=True)
+    try:
+        if (not LIST_PATH.stat().st_mode & 0o222
+                and LIST_PATH.read_bytes() == text.encode("utf-8", "surrogateescape")):
+            return
+    except FileNotFoundError:
+        pass
     tmp = LIST_PATH.with_name(LIST_PATH.name + ".tmp")
     try:
         tmp.unlink()
@@ -1733,17 +1766,33 @@ def _write_agenda(text):
     os.replace(tmp, LIST_PATH)
 
 
+@contextmanager
+def _locked(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def _render_agenda(args=None):
+    with _locked(AGENDA_LOCK):
+        if args is None:
+            saved = _read_sidecar(LIST_ARGS_PATH)
+            return _write_agenda(build_list(saved[0].split() if saved else []))
+        state, sort, tag, by_tag = _parse_list_args(args)
+        text = build_list(args)
+        _write_agenda(text)
+        saved = f"--state {state} --sort {sort}"
+        if tag:
+            saved += f" --tag {tag}"
+        if by_tag:
+            saved += " --by-tag"
+        LIST_ARGS_PATH.write_text(saved + "\n", encoding="utf-8")
+        return text
+
+
 def cmd_list(args):
-    state, sort, tag, by_tag = _parse_list_args(args)
-    text = build_list(args)
-    _write_agenda(text)
-    saved = f"--state {state} --sort {sort}"
-    if tag:
-        saved += f" --tag {tag}"
-    if by_tag:
-        saved += " --by-tag"
-    LIST_ARGS_PATH.write_text(saved + "\n", encoding="utf-8")
-    sys.stdout.write(text)
+    sys.stdout.write(_render_agenda(args))
     return 0
 
 
@@ -1751,10 +1800,72 @@ def refresh_list():
     """Rebuild agenda.md, with the options it was last listed with, without
     touching stdout (used after a state change)."""
     try:
-        saved = _read_sidecar(LIST_ARGS_PATH)
-        _write_agenda(build_list(saved[0].split() if saved else []))
+        _render_agenda()
     except Exception:
         pass
+
+
+def _after_save(path):
+    if not (_same_file(path, td_file()) or (path.suffix == ".md" and _in_task_folder(path))):
+        return
+    if TERMUX:
+        cmd_tick()
+    if LIST_PATH.is_file():
+        _render_agenda()
+
+
+def _lsp_messages():
+    stream = sys.stdin.buffer
+    while True:
+        headers = {}
+        while (line := stream.readline()) not in (b"\r\n", b"\n", b""):
+            key, value = line.split(b":", 1)
+            headers[key.lower()] = value.strip()
+        if not line:
+            return
+        yield json.loads(stream.read(int(headers[b"content-length"])))
+
+
+def _lsp_send(**message):
+    data = json.dumps({"jsonrpc": "2.0", **message}).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
+    sys.stdout.buffer.flush()
+
+
+def cmd_save_server(editor):
+    """Use Helix's didSave event so the agenda and alarm read the saved bytes."""
+    show_request = 0
+    for message in _lsp_messages():
+        method = message.get("method")
+        if method == "initialize":
+            _lsp_send(id=message["id"], result={"capabilities": {
+                "textDocumentSync": {"save": {"includeText": True}},
+            }})
+        elif method == "textDocument/didSave":
+            params = message["params"]
+            uri = urlsplit(params["textDocument"]["uri"])
+            if uri.scheme == "file" and uri.netloc in ("", "localhost"):
+                path = Path(unquote(uri.path)).resolve()
+                target = None
+                if _move_cache(editor, "pending").is_file() or _move_history(editor, path).is_file():
+                    try:
+                        target = _move_after_save(path, editor, params.get("text"))
+                    except OSError as e:
+                        _lsp_send(method="window/showMessage", params={"type": 2, "message": f"td: {e}"})
+                if target:
+                    show_request += 1
+                    _lsp_send(id=f"open-{show_request}", method="window/showDocument",
+                              params={"uri": target.as_uri(), "takeFocus": True})
+                with redirect_stdout(sys.stderr):
+                    try:
+                        _after_save(path)
+                    except OSError as e:
+                        print(f"td: {e}", file=sys.stderr)
+        elif method == "exit":
+            break
+        elif method and "id" in message:
+            _lsp_send(id=message["id"], result=None)
+    return 0
 
 
 def _from_arg(args):
@@ -2035,7 +2146,7 @@ def cmd_rename(args):
         _carry_over(bullet_hash(str(task.path), task.name), bullet_hash(str(new_file), name), name)
     else:
         inbox = td_file()
-        lines, hits, _ = _find_bullet_lines(inbox, task.name, task.state) if inbox.is_file() else ([], [], "")
+        lines, hits = _find_bullet_lines(inbox, task.name, task.state) if inbox.is_file() else ([], [])
         if not hits:
             sys.exit("td: no such bullet in todo.md now (space , a rebuilds the agenda)")
         m = TASK.match(_split_eol(lines[hits[0]])[0])
@@ -2371,9 +2482,7 @@ def _goto(source, lineno, raw, want_file):
                 tag = tm["tag"].lower()
                 saved = _read_sidecar(LIST_ARGS_PATH)
                 _, sort, _, _ = _parse_list_args(saved[0].split() if saved else [])
-                _write_agenda(build_list(["--sort", sort, "--tag", tag]))
-                LIST_ARGS_PATH.write_text(
-                    f"--state all --sort {sort} --tag {tag}\n", encoding="utf-8")
+                _render_agenda(["--sort", sort, "--tag", tag])
                 _nudge_later(LIST_PATH)
                 return f"{LIST_PATH}:1"
         raw = _source_agenda_row(raw, lineno)
@@ -2400,7 +2509,7 @@ def _goto(source, lineno, raw, want_file):
     if _same_file(source, LIST_PATH) and not want_file:
         inbox = td_file()
         if inbox.is_file():
-            _, hits, _ = _find_bullet_lines(inbox, bm["text"], bm["state"])
+            _, hits = _find_bullet_lines(inbox, MARKER.sub("", bm["text"]), bm["state"])
             if hits:
                 return f"{inbox}:{hits[0] + 1}"
         return here
@@ -2432,6 +2541,16 @@ def _is_own_file(dedicated, source):
                 and _same_file(dedicated.parent, inbox.parent)))
 
 
+def _promotion(source, raw):
+    m = TASK.match(raw)
+    named = _task_name(LINK.sub("", MARKER.sub("", m["text"]))) if m else None
+    if (not named or _same_file(source, LIST_PATH)
+            or (source and source.name == "summary.txt" and _same_file(source, _tl().VIEW_PATH))):
+        return None
+    core, slug = named
+    return _task_file(slug), core, canon(m["state"])
+
+
 def cmd_promote(args):
     """stdin: a line; --from PATH:LINE says where it is. The `space , P` key
     pipes the line from the buffer, so a bullet not saved yet counts.
@@ -2452,23 +2571,19 @@ def cmd_promote(args):
     CUT_PATH.unlink(missing_ok=True)  # an old one, from a P that stopped half-way
     source, lineno = _from_spec(args)
     raw = sys.stdin.read().rstrip("\r\n")
-    m = TASK.match(raw)
-    named = _task_name(LINK.sub("", MARKER.sub("", m["text"]))) if m else None
-    if (named and not _same_file(source, LIST_PATH)
-            and not (source and source.name == "summary.txt" and _same_file(source, _tl().VIEW_PATH))):
-        core, slug = named
-        folder = task_folder()
-        folder.mkdir(parents=True, exist_ok=True)
-        dedicated = _task_file(slug)
+    plan = _promotion(source, raw)
+    if plan:
+        dedicated, core, state = plan
+        dedicated.parent.mkdir(parents=True, exist_ok=True)
         if _is_own_file(dedicated, source):
             print(f"td: a task named {core!r} would be its own file {dedicated}: not promoted",
                   file=sys.stderr)
         else:
             if not dedicated.exists():
-                dedicated.write_text(f"# [{canon(m['state'])}] {_without_stamps(core)}\n\n",
+                dedicated.write_text(f"# [{state}] {_without_stamps(core)}\n\n",
                                      encoding="utf-8", errors="surrogateescape")
             else:
-                _retag_dedicated_h1(core, canon(m["state"]), sync_tags=True)
+                _retag_dedicated_h1(core, state, sync_tags=True)
             if lineno and _same_file(source, td_file()):
                 CACHE.mkdir(parents=True, exist_ok=True)
                 CUT_PATH.write_text(f"{source}:{lineno}\n{dedicated}\n", encoding="utf-8",
@@ -2476,6 +2591,19 @@ def cmd_promote(args):
             refresh_list()
     _hand_back(_goto(source, lineno, raw, want_file=True))
     return 0
+
+
+def _promotion_notes(lines, i):
+    """Cut the notes belonging to this bullet and return them without their shared indent."""
+    end = _tl().section_end(lines, i)
+    moved = lines[i + 1:end + 1]
+    if not moved:
+        return ""
+    del lines[i + 1:end + 1]
+    common = os.path.commonprefix([re.match(r"[ \t]*", raw)[0] for raw in moved if raw.strip()])
+    text = "".join(raw[len(common):] if raw.strip() else raw.lstrip(" \t") for raw in moved)
+    text = text.lstrip("\r\n")
+    return text if text.endswith("\n") else text + "\n"
 
 
 def _cut_section(args):
@@ -2497,20 +2625,13 @@ def _cut_section(args):
     i = int(m[2]) - 1 if m and _same_file(Path(m[1]).expanduser(), source) else None
     if (i is not None and _same_file(source, td_file()) and 0 <= i < len(lines)
             and TASK.match(lines[i].rstrip("\r\n"))):
-        end = _tl().section_end(lines, i)
-        moved = lines[i + 1:end + 1]
-        if moved:
-            common = os.path.commonprefix([re.match(r"[ \t]*", raw)[0] for raw in moved if raw.strip()])
-            text = "".join(raw[len(common):] if raw.strip() else raw.lstrip(" \t") for raw in moved)
-            text = text.lstrip("\r\n")  # the file has its blank line under the heading
+        text = _promotion_notes(lines, i)
+        if text:
             path = Path(dedicated)
             old = path.read_bytes().decode("utf-8", "surrogateescape") if path.is_file() else ""
             if old and not old.endswith("\n"):
                 old += "\n"
-            if not text.endswith("\n"):
-                text += "\n"
             path.write_bytes((old + text).encode("utf-8", "surrogateescape"))
-            del lines[i + 1:end + 1]
     sys.stdout.buffer.write("".join(lines).encode("utf-8", "surrogateescape"))
     return 0
 
@@ -2580,6 +2701,31 @@ def _fenced(lines, eol):
     return [fence, *lines, fence]
 
 
+def _archive_section(lines, i, old):
+    """Cut the bullet's section and append it to the day log."""
+    tl = _tl()
+    end = tl.section_end(lines, i)
+    deep = tl.width(lines[i])
+    moved = [_dedent(raw, deep) for raw in lines[i:end + 1]]
+    del lines[i:end + 1]
+    old = old.splitlines(keepends=True)
+    while old and not old[-1].strip():
+        old.pop()
+    if old and not old[-1].endswith("\n"):
+        old[-1] += "\n"
+    if old and tl.HEADING_LINE.match(old[-1]):
+        old.append("\n")
+    if not moved[-1].endswith("\n"):
+        moved[-1] += "\n"
+    head = _as_heading(moved[0])
+    if head:
+        eol = head[len(head.rstrip("\r\n")):] or "\n"
+        moved = [head, *_fenced([*moved[1:], _moved_entry(tl)], eol)]
+    else:
+        moved.append(_moved_entry(tl))
+    return "".join(old + moved)
+
+
 def _cut_to_day(args):
     """td day --cut - [--file PATH]: the next step of `space , ret`, on the whole buffer of
     PATH, after `td day` kept the bullet in DAY_PATH. If the bullet is still a bullet on that
@@ -2603,32 +2749,214 @@ def _cut_to_day(args):
     day = task_folder() / "day.md"
     if (i is not None and 0 <= i < len(lines) and TASK.match(lines[i].rstrip("\r\n"))
             and not _same_file(source, day)):
-        tl = _tl()
-        end = tl.section_end(lines, i)
-        deep = tl.width(lines[i])
-        moved = [_dedent(raw, deep) for raw in lines[i:end + 1]]
-        old = day.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True) if day.is_file() else []
-        while old and not old[-1].strip():
-            old.pop()
-        if old and not old[-1].endswith("\n"):
-            old[-1] += "\n"
-        if old and tl.HEADING_LINE.match(old[-1]):
-            old.append("\n")
-        if not moved[-1].endswith("\n"):
-            moved[-1] += "\n"
-        head = _as_heading(moved[0])
-        if head:  # the heading, then all that was under it and the entry, folded
-            eol = head[len(head.rstrip("\r\n")):] or "\n"
-            moved = [head, *_fenced([*moved[1:], _moved_entry(tl)], eol)]
-        else:
-            moved.append(_moved_entry(tl))
+        old = day.read_bytes().decode("utf-8", "surrogateescape") if day.is_file() else ""
         day.parent.mkdir(parents=True, exist_ok=True)
-        day.write_bytes("".join(old + moved).encode("utf-8", "surrogateescape"))
-        del lines[i:end + 1]
+        day.write_bytes(_archive_section(lines, i, old).encode("utf-8", "surrogateescape"))
     if i is not None:
         _set_open(f"{source}:{max(1, min(i + 1, len(lines)))}")
     sys.stdout.buffer.write("".join(lines).encode("utf-8", "surrogateescape"))
     return 0
+
+
+def _read_move_file(path):
+    try:
+        return path.read_bytes().decode("utf-8", "surrogateescape")
+    except FileNotFoundError:
+        return None
+
+
+def _replace_move_file(path, before, after):
+    if _read_move_file(path) != before:
+        raise OSError(f"{tilde(path)} changed during the move")
+    if after == before:
+        return
+    if before is not None and not os.access(path, os.W_OK):
+        raise OSError(f"{tilde(path)} is read-only")
+    if after is None:
+        path.unlink()
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as tmp:
+        staged = Path(tmp.name)
+        try:
+            tmp.write(after.encode("utf-8", "surrogateescape"))
+            tmp.close()
+            if before is not None:
+                staged.chmod(stat.S_IMODE(path.stat().st_mode))
+            if _read_move_file(path) != before:
+                raise OSError(f"{tilde(path)} changed during the move")
+            staged.replace(path)
+        finally:
+            staged.unlink(missing_ok=True)
+
+
+def _move_cache(editor, name):
+    if not editor.isdecimal():
+        raise ValueError("td: expected a Helix process ID")
+    return CACHE / f"move-{name}-{editor}"
+
+
+def _move_hash(text):
+    return hashlib.sha256(text.encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def _move_history(editor, source):
+    return _move_cache(editor, "history-" + _move_hash(str(source))[:16])
+
+
+def _apply_move(action, source, before, data, i, editor):
+    """Apply an editor move after the full original source has been saved."""
+    lines = data.splitlines(keepends=True)
+    if not 0 <= i < len(lines) or not TASK.match(lines[i].rstrip("\r\n")):
+        return None
+    if action == "promote":
+        plan = _promotion(source, lines[i].rstrip("\r\n"))
+        if not plan or _is_own_file(plan[0], source):
+            return None
+        dest, title, state = plan
+        dest = dest.resolve()
+        old = _read_move_file(dest)
+        new = (_retag_heading(old, state, title) if old is not None
+               else f"# [{state}] {_without_stamps(title)}\n\n")
+        notes = _promotion_notes(lines, i) if _same_file(source, td_file()) else ""
+        if notes:
+            new += ("" if not new or new.endswith("\n") else "\n") + notes
+    else:
+        dest = (task_folder() / "day.md").resolve()
+        if source is None or _same_file(source, dest):
+            return None
+        old = _read_move_file(dest)
+        new = _archive_section(lines, i, old or "")
+    after = "".join(lines)
+    if before and before.startswith("\ufeff"):
+        after = "\ufeff" + after
+    if source is not None and _read_move_file(source) != before:
+        raise OSError(f"{tilde(source)} changed before the move")
+    if source is not None and before != after:
+        if not os.access(source, os.W_OK):
+            raise OSError(f"{tilde(source)} is read-only")
+        # Store the changed tail plus a fingerprint of the shared prefix. The
+        # day log's existing contents needn't be copied into every undo entry.
+        prefix = os.path.commonprefix([old or "", new])
+        keep = len(prefix)
+        record = [_move_hash(before), _move_hash(after), str(dest), keep, _move_hash(prefix),
+                  old[keep:] if old is not None else None, new[keep:]]
+        history = _move_history(editor, source)
+        with history.open("a", encoding="utf-8") as out:
+            offset = out.tell()
+            out.write(json.dumps(record) + "\n")
+            out.flush()
+            try:
+                _replace_move_file(dest, old, new)
+                try:
+                    _replace_move_file(source, before, after)
+                except OSError:
+                    _replace_move_file(dest, new, old)
+                    raise
+            except OSError:
+                if _read_move_file(dest) == old:
+                    out.truncate(offset)
+                raise
+    else:
+        _replace_move_file(dest, old, new)
+    return dest
+
+
+def cmd_editor_move(args):
+    action, editor = args
+    position = _move_cache(editor, "position")
+    pending = _move_cache(editor, "pending")
+    error = _move_cache(editor, "error")
+    error.unlink(missing_ok=True)
+    data = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
+    spec = position.read_text(encoding="utf-8").rstrip("\n")
+    filename, lineno, _ = spec.rsplit(":", 2)
+    source = Path(filename).expanduser().resolve() if filename != "[scratch]" else None
+    i = int(lineno) - 1
+    try:
+        with _locked(MOVE_LOCK):
+            pending.unlink(missing_ok=True)
+            lines = data.splitlines()
+            raw = lines[i] if 0 <= i < len(lines) else ""
+            if _same_file(source, LIST_PATH) or _same_file(source, _tl().VIEW_PATH):
+                if action == "promote":
+                    target = _goto(source, i + 1, raw, want_file=True)
+                    if target != f"{source}:{i + 1}":
+                        position.write_text(target, encoding="utf-8")
+                return 0
+            if not TASK.match(raw) or (action == "day" and _same_file(source, task_folder() / "day.md")):
+                return 0
+            before = _read_move_file(source) if source is not None else None
+            if source is not None and (before is None or before.removeprefix("\ufeff") != data):
+                # A dirty buffer is saved by Helix first. Only the matching didSave
+                # may apply the move. A refused write leaves both files as-is.
+                expected = [_move_hash(text) for text in (data, data + "\n", data + "\r\n")]
+                pending.write_text(json.dumps([str(source), action, i, expected]), encoding="utf-8")
+                return 0
+            dest = _apply_move(action, source, before, data, i, editor)
+        if dest is not None:
+            if action == "promote":
+                position.write_text(str(dest), encoding="utf-8")
+            refresh_list()
+            _tick_later(Path(__file__).resolve())
+    except OSError as e:
+        error.write_text(str(e), encoding="utf-8")
+    return 0
+
+
+def cmd_move_result(editor, current="", message=False):
+    position = _move_cache(editor, "position")
+    error = _move_cache(editor, "error")
+    if message:
+        problem = _read_move_file(error)
+        error.unlink(missing_ok=True)
+        if problem:
+            print(f"td: {problem}")
+    else:
+        target = (_read_move_file(position) or "").removesuffix("\n")
+        saved = re.fullmatch(r"(.+):\d+:\d+", target)
+        # A full selection in an empty buffer can jump back to another file.
+        # Restore the source in that case, without reopening it otherwise.
+        if not saved or saved[1] != current:
+            print(target, end="")
+    position.unlink(missing_ok=True)
+    return 0
+
+
+def _move_after_save(source, editor, saved_text):
+    with _locked(MOVE_LOCK):
+        data = _read_move_file(source)
+        if data is None:
+            return None
+        text = data.removeprefix("\ufeff")
+        if saved_text is not None and text != saved_text:
+            return None  # a newer write already superseded this event
+        pending = _move_cache(editor, "pending")
+        saved = _read_move_file(pending)
+        if saved:
+            path, action, i, expected = json.loads(saved)
+            if str(source) == path and _move_hash(text) in expected:
+                pending.unlink()
+                dest = _apply_move(action, source, data, text, i, editor)
+                return dest if action == "promote" else None
+
+        digest = _move_hash(data)
+        for line in reversed(_read_sidecar(_move_history(editor, source))):
+            before, after, dest, keep, prefix_hash, old, new = json.loads(line)
+            if digest not in (before, after):
+                continue
+            dest = Path(dest)
+            current = _read_move_file(dest)
+            prefix = (current or "")[:keep]
+            if _move_hash(prefix) != prefix_hash:
+                raise OSError(f"{tilde(dest)} changed during the move")
+            old = prefix + old if old is not None else None
+            new = prefix + new
+            expected, replacement = (new, old) if digest == before else (old, new)
+            if current != replacement:
+                _replace_move_file(dest, expected, replacement)
+            break
+    return None
 
 
 def cmd_jump(args):
@@ -2682,8 +3010,8 @@ def cmd_toggle(args):
       • Otherwise reads stdin, writes the toggled line to stdout, keeping
         its newline. The Helix bindings :pipe the line this way with
         --from; Helix puts stderr in place of the line, so that mode is
-        silent on stderr. They add `--row N`, the cursor's line, which only
-        the agenda uses.
+        silent on stderr. They add `--row N`, the cursor's line, to locate
+        agenda rows and distinguish the task title from later headings.
 
     The agenda is a view: a row comes back unchanged, and the task it
     shows changes where it lives (see _toggle_agenda_row; a subtask row's
@@ -2769,11 +3097,12 @@ def cmd_toggle(args):
     own_slug = _dedicated_slug(from_path)
     in_tasks = from_inbox or _in_task_folder(from_path)
     bm = TASK.match(raw)
-    hm = H1_PARTS.match(raw) if own_slug and not bm else None
+    title_row = line_no or row
+    hm = H1_PARTS.match(raw) if own_slug and not bm and title_row in (None, 1) else None
     if hm:
         # The dedicated file's heading: its file names the inbox bullet.
         cur = canon(hm["state"] or " ")
-        wanted = " " if cur == state else state
+        wanted = _next_state(cur, state)
         inbox_line = _set_inbox_state(inbox, own_slug, wanted)
         if inbox_line:
             new_state = canon(TASK.match(inbox_line)["state"])
@@ -2801,7 +3130,7 @@ def cmd_toggle(args):
         emit(raw if bumped is None else bumped)
         return 0
 
-    wanted = " " if canon(bm["state"]) == state else state
+    wanted = _next_state(bm["state"], state)
     new_raw = _set_state(raw, wanted)
     emit(new_raw)
     if not in_tasks:
@@ -2837,7 +3166,7 @@ def _toggle_agenda_row(raw, state, row=None):
         if found:
             cmd_toggle([state, "--from", str(found[0]), "--line", str(found[1])])
     elif bm:
-        wanted = " " if canon(bm["state"]) == state else state
+        wanted = _next_state(bm["state"], state)
         path = _row_file(raw)
         if path:
             lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
@@ -2846,7 +3175,7 @@ def _toggle_agenda_row(raw, state, row=None):
                 if new_lines != lines:
                     path.write_bytes("".join(new_lines).encode("utf-8", "surrogateescape"))
         elif td_file().is_file():
-            lines, hits, _ = _find_bullet_lines(td_file(), bm["text"], bm["state"])
+            lines, hits = _find_bullet_lines(td_file(), MARKER.sub("", bm["text"]), bm["state"])
             if hits:
                 old = _split_eol(lines[hits[0]])[0]
                 new = _set_state(old, wanted)
@@ -2961,29 +3290,18 @@ def _write_line(path, lines, i, new):
     path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
 
 
-def _find_bullet_lines(path, text, old_state, exact=False):
-    """Lines whose checkbox state and text match -> (lines, hits, needle).
-
-    The caller's trailing ` (*)` is dropped: the agenda appends it for
-    display; it is not part of the inbox bullet. With exact, the rest must
-    match as is. Otherwise both sides also drop their `→ link` (core text).
-    """
-    def key(t):
-        # Marker before link: the agenda writes `→ link (*)` and LINK is
-        # anchored at end of line, so the marker has to come off first.
-        t = MARKER.sub("", t).strip()
-        return t if exact else LINK.sub("", t).strip()
-
-    needle = key(text)
+def _find_bullet_lines(path, text, old_state):
+    """Find inbox lines by state and full text, including any visible link."""
+    needle = text.strip()
     data = path.read_bytes().decode("utf-8", "surrogateescape")
     lines = data.splitlines(keepends=True)
     hits = []
     for i, raw in enumerate(lines):
         m = TASK.match(raw.rstrip("\r\n"))
-        if (m and canon(m["state"]) == canon(old_state)
-                and key(m["text"]) == needle):
+        if (m and m["state"].lower() == old_state.lower()
+                and m["text"].strip() == needle):
             hits.append(i)
-    return lines, hits, needle
+    return lines, hits
 
 
 H1_WITH_STATE = re.compile(r"^(#\s+)(?:\[[ xXyYaAwW!]\]\s+)?(.+?)(\s*)$")
@@ -3005,6 +3323,14 @@ def _retag_dedicated_h1(text, new_state, sync_tags=False):
     if not path.is_file():
         return False
     data = path.read_bytes().decode("utf-8", "surrogateescape")
+    retagged = _retag_heading(data, new_state, core if sync_tags else "")
+    if retagged == data:
+        return False
+    path.write_bytes(retagged.encode("utf-8", "surrogateescape"))
+    return True
+
+
+def _retag_heading(data, new_state, tags_from=""):
     lines = data.splitlines(keepends=True)
     for i, raw in enumerate(lines):
         body, tail = _split_eol(raw)
@@ -3012,10 +3338,10 @@ def _retag_dedicated_h1(text, new_state, sync_tags=False):
         if not m:
             continue
         title = m[2]
-        if sync_tags:
+        if tags_from:
             have = set(find_tags(title))
             missing = []
-            for cm in TAG_CLUSTER.finditer(core):
+            for cm in TAG_CLUSTER.finditer(tags_from):
                 for raw_tag in TAG_NAME.findall(cm.group(0)):
                     low = raw_tag.lower()
                     if low not in have:
@@ -3023,13 +3349,9 @@ def _retag_dedicated_h1(text, new_state, sync_tags=False):
                         missing.append(f"#{raw_tag}")
             if missing:
                 title = f"{title} {' '.join(missing)}"
-        new = f"{m[1]}[{new_state}] {title}{tail}"
-        if new == raw:
-            return False
-        lines[i] = new
-        path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
-        return True
-    return False
+        lines[i] = f"{m[1]}[{new_state}] {title}{tail}"
+        return "".join(lines)
+    return data
 
 
 def cmd_fire(args):
@@ -3142,6 +3464,16 @@ def main(argv):
         return cmd_tick(rest)
     if cmd == "list":
         return cmd_list(rest)
+    if cmd == "inbox":
+        print(td_file().absolute())
+        return 0
+    if cmd == "save-server":
+        return cmd_save_server(rest[0] if rest else str(os.getppid()))
+    if cmd == "editor-move":
+        return cmd_editor_move(rest)
+    if cmd == "move-result":
+        return cmd_move_result(rest[0], rest[1] if len(rest) > 1 else "",
+                               message=rest[1:] == ["--message"])
     if cmd == "next":
         return cmd_next()
     if cmd == "new":
@@ -3793,6 +4125,14 @@ def run_tests(verbose=False):
             self.assertLess(out.index("bravo"), out.index("alpha"))
 
     class Tick(Case):
+        def test_fences_do_not_arm_reminders(self):
+            self.put_dedicated("day.md", "# day\n" +
+                               "````" + "\nReference 2026-10-10 12:00\n" +
+                               "```" + "\nAnother one 2026-10-10 12:05\n" +
+                               "````" + "\n~~~markdown\nExample 2026-10-10 12:10\n"
+                               "~~~\nActual reminder 2026-10-10 12:30\n")
+            self.assertIn("would arm: 2026-10-10 12:30:00", self.td("tick"))
+
         def test_agenda_refresh_starts_detached_tick_after_script_exit(self):
             self.put_inbox("- [ ] future reminder [2026-10-10 Sat 12:00]\n")
             # Unlike the dry-run tests, exercise real script shutdown and its
@@ -4998,6 +5338,71 @@ def run_tests(verbose=False):
             self.assertFalse((self.cache / "day").exists())
             self.assertEqual(self.day(), "# Today\n\n- [ ] a\n  note\n")
 
+    class EditorSave(Case):
+        def notify_save(self, path, saved_text):
+            payload = json.dumps({"method": "textDocument/didSave", "params": {
+                "textDocument": {"uri": path.as_uri()}, "text": saved_text,
+            }})
+            return self.td("save-server", "123", stdin=f"Content-Length: {len(payload)}\r\n\r\n{payload}")
+
+        def request_move(self, action, text):
+            self.cache.mkdir(parents=True, exist_ok=True)
+            (self.cache / "move-position-123").write_text(f"{self.inbox}:1:9\n")
+            self.td("editor-move", action, "123", stdin=text)
+
+        def test_save_rebuilds_the_current_agenda_and_arms_a_reminder(self):
+            self.put_inbox("- [ ] open\n")
+            self.td("list", "--state", "done", "--sort", "modified")
+            text = "- [x] finished\n- [ ] next 2026-10-10 12:00\n"
+            self.put_inbox(text)
+            self.notify_save(self.inbox, text)
+            self.assertIn("finished", self.read_cache("agenda.md"))
+            self.assertNotIn("next", self.read_cache("agenda.md"))
+            self.assertIn("2026-10-10T12:00", self.read_cache("scheduled"))
+
+        def test_promotion_waits_for_the_requested_save(self):
+            original = "- [ ] original\nnotes\n"
+            edited = original.replace("original", "edited")
+            dest = self.tasks / "edited.md"
+            self.put_inbox(original)
+            self.request_move("promote", edited)
+            self.assertEqual(self.inbox.read_text(), original)
+            self.assertFalse(dest.exists())
+            self.assertEqual(self.td("move-result", "123", str(self.inbox)), "")
+            self.notify_save(self.inbox, original)
+            self.assertFalse(dest.exists())
+            self.put_inbox(edited)
+            self.assertIn("window/showDocument", self.notify_save(self.inbox, edited))
+            self.assertEqual(self.inbox.read_text(), "- [ ] edited\n")
+            self.assertEqual(dest.read_text(), "# [ ] edited\n\nnotes\n")
+
+        def test_a_saved_undo_and_redo_apply_to_the_destination(self):
+            original = "- [x] finished\nnotes\n- [ ] next\n"
+            source = self.put_inbox(original)
+            dest = self.put_dedicated("day.md", "# Day\n")
+            self.request_move("day", original)
+            cut, archived = source.read_text(), dest.read_text()
+            self.assertEqual(cut, "- [ ] next\n")
+            self.assertIn("notes", archived)
+            self.put_inbox(original)
+            self.notify_save(source, original)
+            self.assertEqual(dest.read_text(), "# Day\n")
+            self.put_inbox(cut)
+            self.notify_save(source, cut)
+            self.assertEqual(dest.read_text(), archived)
+
+        def test_undo_preserves_a_destination_edited_after_the_move(self):
+            original = "- [ ] thing\nnotes\n"
+            source = self.put_inbox(original)
+            self.request_move("promote", original)
+            dest = self.tasks / "thing.md"
+            self.assertEqual(self.td("move-result", "123"), str(dest))
+            edited = dest.read_text() + "extra notes\n"
+            dest.write_text(edited)
+            self.put_inbox(original)
+            self.assertIn("changed during the move", self.notify_save(source, original))
+            self.assertEqual(dest.read_text(), edited)
+
     class Marker(Case):
         def test_bullet_with_dedicated_file_gets_marker(self):
             self.put_inbox("- [A] refactor td parser\n- [ ] call jon\n")
@@ -5541,6 +5946,20 @@ def run_tests(verbose=False):
             out = self.td("toggle", state, "--from", str(agenda), *args, stdin=row)
             self.assertEqual(out, row[:-1] + " \n")  # one edit, which the keys undo
             return self.read_cache("agenda.md")
+
+        def test_agenda_targets_a_full_link_and_reopens_uppercase_done(self):
+            alpha = "- [ ] Send update → https://example.test/alpha\n"
+            beta = "- [ ] Send update → https://example.test/beta\n"
+            inbox = self.put_inbox(alpha + beta.replace("[ ]", "[X]"))
+            self.td("list", "--state", "done")
+            self.toggle_row("x", "/beta")
+            self.assertEqual(inbox.read_text(), alpha + beta)
+            self.td("list")
+            agenda = self.cache / "agenda.md"
+            row = agenda.read_text().splitlines().index(beta.rstrip()) + 1
+            self.assertEqual(self.td("jump", "--from", f"{agenda}:{row}", stdin=beta).strip(), f"{inbox}:2")
+            self.toggle_row("x", "/beta")
+            self.assertEqual(inbox.read_text(), alpha + beta.replace("[ ]", "[x]"))
 
         def test_empty_line_still_makes_an_edit(self):
             # On the agenda's last, empty line the pipe gets "": giving "" back would make no
@@ -6677,7 +7096,7 @@ def run_tests(verbose=False):
     loader = unittest.defaultTestLoader
     suite = unittest.TestSuite(loader.loadTestsFromTestCase(c)
                                for c in (Parse, List, TagUpgrade, Tick, New, Stamp, Next,
-                                         Promote, Day, Marker, Reschedule, Jump, SetToggle,
+                                         Promote, Day, EditorSave, Marker, Reschedule, Jump, SetToggle,
                                          AgendaToggle, File, WeekView, Rename, Alarm, Fire, Recurring,
                                          TlAgrees,
                                          KeysDoc))

@@ -57,15 +57,11 @@ termux-notification --title "Helix reminder check" --content "Notifications work
 1. On an open task in `~/tasks/todo.md` or a task file, press `space , s`.
 2. Adjust the stamp to a **future** time, by editing it or using `+` / `-`
    on its date or time. A stamp left at "now" is recorded without notifying.
-3. Save with `:w`.
-4. Open the agenda with `space , a`. This starts a background scheduler
-   tick after 2 seconds and arms the next Android alarm.
+3. Save with `:w`. Helix's `td-save` language server runs a scheduler tick
+   after the write and arms the next Android alarm.
 
-`space , s`, `+`, `-`, and a plain `:w` do not run the scheduler. After
-changing a reminder, save and open the agenda, or run
-`~/.config/helix/bin/td tick` in a shell. A reboot or force-stop clears
-Android's alarms: open the agenda or run `~/.config/helix/bin/td tick` to
-re-arm them.
+A reboot or force-stop clears Android's alarms. Open the agenda or run
+`~/.config/helix/bin/td tick` to re-arm them.
 
 New notifications find the reminder's current line when tapped, so saved
 lines added above it and advancing recurring dates do not leave a stale

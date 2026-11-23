@@ -38,6 +38,10 @@ entries go under the todos (see [Time in todo.md](#time-in-todomd)).
 | `r` | **Recent files.** A popup with the 9 most recently changed task files, newest first, each with its last entry. Open one with `:o <path>` |
 | `l` | **Summary** (time log). Saves, then shows time per day for the last 14 days in a popup: per task file its total and title, and under it the `# headings` it was worked under. Running entries come first, and problems (overlaps, duplicates, typos, entries over 12 hours) last, as `~/path:line` you can open with `gf`. Always over all task files, wherever you press it (the agenda too) |
 
+On an agenda task row, `i` and `I` follow the same source location as
+`p` before switching timers. A heading or tag group leaves the timer
+running where it was.
+
 ### Time in todo.md
 
 A todo you jot notes under and work on before it deserves a file of its
@@ -108,22 +112,22 @@ it from its file.
 
 | Key | What it does |
 |---|---|
-| `t` | Open the inbox, `~/tasks/todo.md` |
-| `q` | **New todo.** Opens todo.md and adds `- [ ] ` on a new first line, in insert mode: type the task, then save. If the first line already is an empty `- [ ] ` (say a `q` you left without typing), it goes there instead of adding a second one; anything else moves down a line. Works from anywhere, the agenda too; the agenda shows the task after the next `a` |
+| `t` | Open the configured inbox. Uses `TD_FILE` or defaults to `$TL_DIR/todo.md` |
+| `q` | **New todo.** Opens todo.md and adds `- [ ] ` on a new first line, in insert mode: type the task, then save. If the first line already is an empty `- [ ] ` (say a `q` you left without typing), it goes there instead of adding a second one; anything else moves down a line. Works from anywhere, including the agenda. Saving refreshes the latest agenda view |
 | `Q` | **New todo at the end.** The same as `q`, on a new last line of todo.md: an empty `- [ ] ` already last is used |
 | `space` | The same as `q` |
 | `n` | **New file task**, for a task clear enough to skip todo.md. Opens the command prompt at `# name: `; type the task's name and press Enter (Esc does nothing). Creates `~/tasks/<slug>.md`, named like a bullet's own file (`Buy a car!` → `Buy-a-car.md`), with `# [ ] Buy a car!` on its first line, and opens it on the blank line under the heading. It is a file task: the agenda lists it under TODO, and the status keys on its heading set its state. If the file exists, it just opens it. The name needs no quoting; only `%` is special (`%%` for one), and it can't contain `}` |
 | `N` | **Rename a task**, from its agenda row (including an unfolded task row in `g`/`G`), or from inside its own file `~/tasks/<slug>.md`. Opens the command prompt at `# name: ` with the task's current name filled in (in the file, the title of its first-line `# [S] title` heading: the cursor goes to that line, and the file is saved first); edit it, or delete it and type a new one (including `#tag` or `#tag1#tag2`), then press Enter (Esc does nothing). Tags present only in the other source (the file heading or todo.md bullet) stay there; tags shown in the prompt follow your edits, including removal. The new name goes through the same check as `n`'s, and the task changes where it lives: a file task's (or orphan's) file is renamed to the new name's slug (leaving `#tag` tokens out of the filename) and its first-line heading gets the name, keeping its `[S]`; a bullet row's todo.md bullet gets the name as its text, and its own file, if any, is renamed and retitled with it (stamps left out, `#tag` kept), so the two stay linked. The agenda reloads, and the task keeps its place in it. Inside the file the same buffer follows the renamed file, and shows the new heading a moment later (the file is reloaded when Helix is idle): the heading, the file name and the todo.md bullet that owns the file change together, and the bullet keeps its stamps and repeater (the prompt shows the heading's title, which has none). Refused, changing nothing, when a file already has the new name, the name has no letter or digit, or the row shows no task (a subtask row or `- #tag (N)` header: `p` to a subtask and edit it there). As with `n`, `%` is typed `%%`, and the name can't contain `}`. Don't rename a file you have open in another buffer: that buffer keeps the old name. Typing in the buffer within that second after Enter keeps the old heading until you `:reload` (Helix says the file changed) |
 | `a` | **Agenda.** Opens a snapshot of todo.md grouped TODAY, ACTIVE, TODO, WAITING, newest-added first; done and ignored bullets are hidden. After TODAY, under RESCHEDULE, the reminders that went off while their task is still open (not those on a line with a `++`/`.+` repeater), each pointing at its date: `p` there to move it with `+`/`-`. A bullet with its own file shows ` (*)`, and under an open task with its own file, indented, come the file's open subtasks (its `[ ]`, `[Y]`, `[A]` and `[W]` bullets), folded under it as `⋯ N lines`: `za` on the task's row unfolds them and folds them again, `zR` unfolds all, `zM` folds all. Each `a` folds them all again; a status key keeps a task you unfolded open. Files without a bullet are listed by the status on their first line (`# [W] renew passport`), or under ORPHANS if they have none; their rows end in ` (*)` as well. View only: Helix shows `[readonly]`, and anything typed there is thrown away by the next `a`. But `x` and the status keys work on its rows: they change the task itself (see below), and the agenda reloads. `q` adds a new task, `n` a new file task, and `N` renames the task on a row. For anything else, `p` takes you to the task |
-| `A` | The same agenda, most recently changed first: a bullet's line (state, text, stamp) or its own file. Edits by hand count from the next `a`, `A` or status key |
-| `D` | **Done tasks.** The agenda with only the done ones under DONE: `[x]` bullets and files whose first line is `# [x] title`, most recently changed first, as `A` orders them. `x` on a row takes the task back to `[ ]` and the row drops out; `p` goes to the task. `a` brings back the open ones |
+| `A` | The same agenda, most recently changed first. The order follows saved changes to a bullet or its task file |
+| `D` | **Done tasks.** The agenda with only the done ones under DONE, including `[x]` and `[X]` bullets and completed task files, most recently changed first, as `A` orders them. `x` on a row takes the task back to `[ ]` and the row drops out; `p` goes to the task. `a` brings back the open ones |
 | `g` | **Tags.** The agenda grouped under `# TAGS` by `- #tag (N)` headers (from inline `#tag` and `#tag1#tag2` tokens on todo.md bullets and anywhere in their dedicated files, including standalone file tasks' headings, notes and subtasks), sorted alphabetically, with each tag's open tasks indented under it (ordered by state priority, then newest added first) and folded as `⋯ N lines`. Each row hides the tag named by its group header and keeps other tags visible; the source keeps all tags, and `N` retains the hidden group tag (use `p` to edit its source to remove it). `za` unfolds a tag's tasks; `x`, the status keys, `N`, `p`, and `P` work on unfolded task rows as in the normal agenda, and `p` on a `- #tag (N)` header switches the agenda to the full state-grouped view filtered to that tag (`a`/`A` resets) |
 | `G` | The same `# TAGS` view, most recently changed first within each state |
 | `p` | **Go to the task.** On a bullet: open its own file, if it has one; otherwise stay. On an agenda row (including an unfolded task row in `g`/`G`): go to that bullet's line in todo.md; a row for a file goes to the file; a `- #tag (N)` row switches the agenda to `--tag tag` and refreshes; a subtask row goes to its line in the task's file; a RESCHEDULE row goes to the reminder's line, the cursor on its day. On the week summary view (`space , L`), go to the entry's timestamp line (for a `- heading` row, a task row, a day row, or a running/warning row). Never creates anything. Uses the line as it is in the buffer, saved or not |
 | `P` | **Give the task a file.** Creates `~/tasks/<slug>.md` for the bullet, with a heading `# [S] title` that carries the bullet's state (the title leaves out the bullet's stamp and repeater, and the brackets around them, so `[… 09:50 ++1h]` doesn't leave a `[ ]` in the name or the file name: the reminder stays on the bullet; `#tag` and `#tag1#tag2` tokens stay on the heading while being left out of `<slug>`), and opens it. In todo.md the bullet's section (its notes and time entries: the lines under it, up to the next todo) moves to the end of the file, without the indent its lines share, and the bullet stays as the link; todo.md is saved. From todo.md, `ga` and `Ctrl+o` return to the original line and column. An existing file is reused, its heading's state updated and any new `#tag` from the bullet added, and gets them at its end. On an agenda row (including an unfolded task row in `g`/`G`) it only opens the row's file, if any. Works on a bullet you have just typed, saved or not |
 | `Enter` | **Move to day.md.** Moves the bullet on the cursor's line, with its section (its notes, time entries and sub-todos: the lines under it, up to the next todo not under it or a heading, one right above a time entry excepted), to the end of `~/tasks/day.md`, and saves the buffer; the cursor stays on the line the bullet was on. The bullet's indent comes off, so a sub-todo lands at the left. A `[ ]` or `[x]` bullet comes out as a `# heading` of its words, like the other logged entries, with everything that was under it and the time entry in a code fence (`` ``` ``), which hx folds and opens closed (markdown's `folds.scm`, helix main-kuba), so day.md reads as a list of headings; a done one loses its stamps and repeater with the checkbox (its reminders are off, and a stamp left in a heading would fire). It stays a bullet when it is open with a stamp (a reminder is done, or a repeater moved on, with its checkbox, and a heading has none), when it is `[Y]` `[A]` `[W]` or `[!]` (states a heading would lose), or when it is only a stamp. Moved this way, the todo is out of the agenda's reach, as a heading is no todo. The section ends with a time entry of no length at the minute of the move (inside the fence, for a heading), like `i` then `O` writes (`2026-10-31 13:52 - 13:52 = 0h 00min`), so `space , l` lists the bullet under the day it was moved, in `day`. It works in any task file, from the buffer as you have it, saved or not. In day.md, blank lines at the end are dropped first, and a heading last there gets one blank line under it (day.md needs none: a missing or empty one just gets the bullet). Does nothing on a line that is not a bullet, in day.md itself, or on the agenda. A reminder on a bullet that stays a bullet keeps working, but it fires under the file's title (its first `# heading`, else `day`), not the bullet's text; and the agenda, which reads only todo.md, no longer lists the bullet |
 | `x` | **Done.** Toggles `[ ]` ↔ `[x]`. If the line has a repeater after its stamp, `++Nu` or `.+Nu` (N a number, u = `d`/`w`/`m`/`y`), the date moves instead and the bullet stays `[ ]`: `++1m` moves it a month at a time until it is in the future (rent on the 1st), `.+2w` sets it to today + 2 weeks (water the plants). An hourly one (`++1h`, a reminder every hour until done) is just marked done. A task file with no todo.md bullet repeats the same way, with the date and repeater on any line but a bullet (`2026-12-15 Tue 11:50 ++2m` under `# [ ] haircut`). See [Status keys in other files](#status-keys-in-other-files) |
-| `s` | **Stamp.** On a line with no date, adds today's date and the current time at the end, in brackets: `[2026-10-13 Tue 09:30]`, which keeps it grey and out of an open task's bold. On a line with one, changes its date to today and keeps the time. With the cursor on the date (after editing it by hand), keeps the date and only fixes the weekday. A time-log entry's leading time is history, so a fresh stamp is added at the end. A stamp of "now" never fires a reminder; edit it to a later time and it will. With two stamps on the line, the cursor picks which one changes. Doesn't save: the reminder alarm learns the new time once the file is saved, at the next tick (opening the agenda runs one) |
+| `s` | **Stamp.** On a line with no date, adds today's date and the current time at the end, in brackets: `[2026-10-13 Tue 09:30]`, which keeps it grey and out of an open task's bold. On a line with one, changes its date to today and keeps the time. With the cursor on the date (after editing it by hand), keeps the date and only fixes the weekday. A time-log entry's leading time is history, so a fresh stamp is added at the end. A stamp of "now" never fires a reminder; edit it to a later time and it will. With two stamps on the line, the cursor picks which one changes. Save with `:w` to arm the reminder |
 | `, y` | Toggle `[ ]` ↔ `[Y]` (today) |
 | `, a` | Toggle `[ ]` ↔ `[A]` (active) |
 | `, w` | Toggle `[ ]` ↔ `[W]` (waiting) |
@@ -143,16 +147,16 @@ Each `, ` status key is the letter its checkbox gets: `, y` writes `[Y]`,
 save the file. They also keep the task's other copies in step:
 
 - **On an agenda row:** the row itself stays as it is; the task it shows
-  changes where it lives: the todo.md bullet (found by its state and text,
+  changes where it lives: the todo.md bullet (found by its state and full text, including its link,
   as `p` finds it, and its own file's heading follows), or, on a file-task
   row, that file's `# [S] title` heading, or, on a subtask row, its line
-  in the task's file, as the key does there. Then the agenda is rebuilt, in
-  the order you opened it (`a` or `A`), and Helix reloads it. A row that
+  in the task's file, as the key does there. The agenda refreshes with its
+  current sort and filters. A row that
   is out of date (its bullet changed since) only gets the rebuild.
 
 - **In todo.md:** the bullet changes, and so does the state on its own
   file's heading.
-- **On a task file's heading** `# [S] title`: the heading toggles, and the
+- **On a task file's first-line heading** `# [S] title`: the heading toggles, and the
   todo.md bullet the file belongs to gets the same state. The file name
   finds the bullet, so a heading you retitled still works. Marking a
   repeating bullet done moves its date, and the heading goes back to `[ ]`.
@@ -172,9 +176,18 @@ If several todo.md bullets have the same text (an old done `call mom` and a
 new one), the open one changes. A state typed by hand doesn't reach other
 copies; only these keys do. Reminders don't depend on that: a task file
 fires while its todo.md bullet is open, whatever its heading says.
+The status keys recognize either spelling of a completed checkbox.
 
 `space . x` (not a `td` key) toggles `[ ]` ↔ `[X]` with `sed` in any file:
 no repeaters, and no other copies change.
+
+### Undoing a move
+
+After `P` or `Enter`, use normal-mode `u` in the original source buffer,
+then save to reverse the destination edit too. Use `U` and save to redo
+the move. Save the undo or redo before making further edits to the source. If
+the destination has changed on disk, Helix reports the conflict and
+keeps the edited destination.
 
 ## Moving a stamp or a time-log entry (normal mode, no `space ,`)
 
@@ -183,9 +196,7 @@ no repeaters, and no other copies change.
 stamps, the one the cursor is on, else the first). The cursor stays on that
 part, so pressing again keeps moving it. The weekday follows the date, and
 one undo reverts one press. A line with no stamp is left alone, and so is
-the agenda. These keys don't save, so the reminder alarm learns the new
-time as it does a hand edit: once saved, at the next tick (opening the
-agenda runs one).
+the agenda. Save with `:w` to run the scheduler with the new time.
 
 On the week summary view (`space , L`), `-` shows the previous week and `+`
 the next one, wherever the cursor is.
@@ -228,8 +239,9 @@ starting Python, so it sees the saved file in practice.
   so the change shows at once and unsaved edits are kept. `td` writes other
   files (todo.md, a task file's heading, the agenda) itself.
 - **Status keys and `x`** then run
-  `:earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}`
-  and `:update`. A key can't branch, and `:pipe` always marks the buffer
+  a conditional `:earlier` for the agenda
+  and `:update`. The successful write refreshes the agenda through
+  `td-save`. A key can't branch, and `:pipe` always marks the buffer
   modified, even when the line comes back the same. On the agenda, td has
   already changed the task and rebuilt `agenda.md`, so `:earlier 1` takes
   back the pipe's edit, `:update` has nothing to save (the read-only file
@@ -246,45 +258,18 @@ starting Python, so it sees the saved file in practice.
   pressing again toggled it back; `:write` then `%sh{td … --line N}` and
   `:reload` raced the save, so Helix refused to save over `td`'s change and
   `:reload` dropped unsaved edits.
-- **`p`, `P`:** `:pipe-to` sends the line to `td` without changing the
-  buffer. `td` writes where to go to `~/.cache/td/open`, and
-  `:open %sh{cat …}` goes there, then deletes the file so a failed run
-  can't send you somewhere old. (`P` used to create the file with `:sh` and
-  open it with `%sh{}`, so whether it opened depended on which finished
-  first.) `td promote` also keeps an inbox bullet's place, and its file,
-  in `~/.cache/td/cut`. `P` then pipes the whole buffer through `td
-  promote --cut -`: in todo.md that takes the bullet's section out of the
-  buffer and adds it to the file on disk; anywhere else the text comes
-  back as it was. Then the conditional undo and `:update`, as the status
-  keys do: on the agenda `:earlier 1` takes the pipe back and nothing is
-  saved; anywhere else `:update` saves, so todo.md is saved before you
-  leave it (`td` writes it when you change the state in the new file).
-  `P` restores the source cursor before opening the task file and discards
-  the temporary jump from restoring it.
-- **`ret`:** built like `P`: `:pipe-to` sends the bullet's line to `td day`,
-  which keeps its place in `~/.cache/td/day`, then `td day --cut -` takes
-  the whole buffer and returns it without the bullet and its section, which
-  it has added to day.md on disk. `select_all` and `:pipe` leave the cursor
-  at the end of the buffer, so `td` also writes the line the bullet was on to
-  `~/.cache/td/open`, and the key ends with `:open` of it, as `P` does, to put
-  the cursor back. Nothing is kept when the line is not a bullet, so the text
-  comes back as it was.
-  The bullet is made a heading by `_as_heading`; the sub-todos under it are not touched.
-  What was under it, and the entry, go in a fence by `_fenced`, one backtick longer than
-  any fence in the notes, so a fenced block of the notes' own stays inside. `tl` reads
-  an entry in a fence as anywhere (only a `# ` line in one is no heading), and `td`
-  knows no fences: a stamp or sub-todo in the notes is still a reminder or a todo.
-  The moved section is ended with a time entry (`td`'s `_moved_entry`, built with
-  `tl`'s own `render`, so the two can't disagree on its shape). It has no heading
-  of its own: in any task file `l` lists an entry under the todo whose section
-  holds it, as it does in todo.md, and a heading right above an entry still
-  comes first. Two moves in one minute make the same entry twice, which `l`
-  lists under "Check by hand" as a duplicate; the bullets still show.
-  The section goes to the file on disk, not its buffer: a pipe in that
-  buffer would move its cursor to the end even with nothing to add.
-  Auto-reload then shows it in the file's buffer, if you have it open. With
-  unsaved edits there, Helix refuses to save them over the change on disk:
-  `:w!` would drop the moved lines, so copy your edits over first.
+- **`p`** passes the current line to `td jump` and opens the path it
+  returns via `~/.cache/td/open`.
+- **`P` and `ret`** pass the full buffer and original cursor to `td`.
+  The keys use the jumplist to restore the source cursor.
+  When the buffer matches the saved file, `td` moves the section
+  immediately. Otherwise `:update` saves the original source first.
+  The `td-save` language server applies a pending move after the matching
+  save. Helix reloads the source from disk, so its undo history records
+  the changed text. `P` opens the promoted file after the move.
+- **The day log** stores an archived section and its zero-minute time
+  entry in a fence longer than any backtick fence in the notes. The time
+  summary includes that entry, and the scheduler skips the fenced notes.
 - **`s`, `+`, `-`** need the cursor column, but `extend_to_line_bounds`
   moves the cursor to the line end. So the first command saves
   `%{cursor_column}` to `~/.cache/td/stamp-col`, and `td` reads it. `+`/`-`
@@ -306,8 +291,8 @@ starting Python, so it sees the saved file in practice.
   kept (writing that file behind Helix's back would clash with it). In
   order:
   1. `:open %sh{tl running --from …}` goes to the file with the latest
-     running entry (this buffer if nothing runs); `tl` keeps this
-     buffer's name and the cursor's line in `~/.cache/tl/from`.
+     running entry after resolving a writable target. `tl` keeps the
+     target file and line in a per-editor cache file.
   2. That whole buffer goes through `:pipe tl stop -`, and `:update` saves
      it.
   3. `:open %sh{tl next --skip …}` ends what still runs in the other files
@@ -316,8 +301,8 @@ starting Python, so it sees the saved file in practice.
      entry (on a new last line; in todo.md, under the todo the cursor was
      on; `I` passes `--here` to fill a blank cursor line or insert directly
      below a nonblank one, in any file, including todo.md) and writes its
-     line to `~/.cache/tl/goto`. `:write!` saves it,
-     and `:open %sh{cat ~/.cache/tl/goto …}` puts the cursor on it. The `!`
+     line to the per-editor cache. `:write!` saves it,
+     and `:open` puts the cursor on it. The `!`
      is needed when this is the buffer step 2 saved: a second save of one
      buffer in one key otherwise fails with "file modified by an external
      process", since Helix hasn't recorded the first one yet. The pipe

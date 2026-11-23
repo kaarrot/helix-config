@@ -85,6 +85,10 @@ args = ["--stdio"]
 command = "polski-ls"
 args = ["--stdio"]
 
+[language-server.td-save]
+command = "env"
+args = ["BASH_ENV=$HOME/bashrc", "bash", "-c", 'exec python3 "$HOME/.config/helix/bin/td" save-server "$PPID"']
+
 
 [[language]]
 name = "python"
@@ -113,11 +117,11 @@ name = "plaintext"
 scope = "text.plain"
 file-types = ["txt"]
 language-id = "plaintext"
-language-servers = ["polski-ls"]
+language-servers = ["polski-ls", "td-save"]
 
 [[language]]
 name = "markdown"
-language-servers = ["harper-ls"]
+language-servers = ["harper-ls", "td-save"]
 comment-tokens = ["-", "+", "*", "- [ ]", ">"]
 
 # td task files: markdown plus td's task colours (runtime/queries/td, td.inline).
@@ -131,7 +135,7 @@ scope = "source.td"
 grammar = "markdown"
 language-id = "markdown"
 file-types = [{ glob = "tasks/*.md" }, { glob = ".cache/td/agenda.md" }]
-language-servers = ["harper-ls"]
+language-servers = ["harper-ls", "td-save"]
 comment-tokens = ["-", "+", "*", "- [ ]", ">"]
 block-comment-tokens = { start = "<!--", end = "-->" }
 indent = { tab-width = 2, unit = "  " }

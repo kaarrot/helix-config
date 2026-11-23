@@ -97,6 +97,7 @@ import contextlib
 import io
 import os
 import re
+import runpy
 import sys
 from collections import defaultdict, namedtuple
 from datetime import date, datetime, timedelta
@@ -279,11 +280,13 @@ def cmd_start(args):
     # next` printed. The line the key was pressed on is in FROM_PATH, if it was pressed in F.
     lines = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").splitlines(keepends=True)
     source = opt(args, "--file") or ""
-    try:
-        kept = FROM_PATH.read_text(encoding="utf-8").strip()
-        FROM_PATH.unlink()
-    except OSError:
-        kept = ""
+    from_path = _clock_cache(FROM_PATH, args)
+    goto = _clock_cache(GOTO_PATH, args)
+    kept = _clock_from(args)
+    from_path.unlink(missing_ok=True)
+    if kept.startswith("!"):
+        goto.write_text(kept[1:] + "\n", encoding="utf-8", errors="surrogateescape")
+        return 1  # tell Helix to leave the selection's text alone
     m = re.fullmatch(r"(.+):(\d+)", kept)
     here = int(m[2]) - 1 if m and source and same_path(m[1], source) else None
     eol = next((raw[len(raw.rstrip("\r\n")):] for raw in lines if raw.endswith("\n")), "\n")
@@ -320,8 +323,8 @@ def cmd_start(args):
             at = put(here + 1, stamp)
     else:
         at = put(len(lines), stamp)
-    GOTO_PATH.parent.mkdir(parents=True, exist_ok=True)
-    GOTO_PATH.write_text(f"{source}:{at + 1}\n", encoding="utf-8", errors="surrogateescape")
+    goto.parent.mkdir(parents=True, exist_ok=True)
+    goto.write_text(f"{source}:{at + 1}\n", encoding="utf-8", errors="surrogateescape")
     sys.stdout.buffer.write("".join(lines).encode("utf-8", "surrogateescape"))
     return 0
 
@@ -372,7 +375,10 @@ def cmd_stop(args):
     # bytes in and out, so line endings and odd bytes survive a whole-buffer :pipe
     if args[:1] == ["-"]:
         lines = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").splitlines(keepends=True)
-        source = Path(args[2]) if args[1:2] == ["--file"] and len(args) > 2 else None
+        if opt(args, "--editor") and _clock_from(args).startswith("!"):
+            return 1
+        name = opt(args, "--file")
+        source = Path(name).expanduser() if name else None
         stop_lines(lines, t, bool(source and is_td_inbox(source)))
         sys.stdout.buffer.write("".join(lines).encode("utf-8", "surrogateescape"))
         return 0
@@ -411,6 +417,38 @@ def opt(args, name):
     return args[args.index(name) + 1] if name in args[:-1] else None
 
 
+def _clock_cache(path, args):
+    editor = opt(args, "--editor")
+    return path.with_name(f"{path.name}-{editor}") if editor and editor.isdecimal() else path
+
+
+def _clock_from(args):
+    try:
+        return _clock_cache(FROM_PATH, args).read_text(encoding="utf-8").rstrip("\n")
+    except OSError:
+        return "!" if opt(args, "--editor") else ""
+
+
+def _agenda_clock_target(here):
+    """Resolve a task row through td, using the same source location as space , p."""
+    filename, _, row = here.rpartition(":")
+    agenda = Path(filename).expanduser()
+    try:
+        lines = agenda.read_bytes().decode("utf-8", "surrogateescape").splitlines()
+    except FileNotFoundError:
+        return here
+    td = runpy.run_path(str(Path(__file__).with_name("td")))
+    i = int(row) if row.isdecimal() else 0
+    raw = lines[i - 1] if 1 <= i <= len(lines) else ""
+    if not TODO.match(raw) and not td["_row_file"](raw):
+        return here
+    target = td["_goto"](agenda, i, raw, want_file=False)
+    # A subtask jump includes a column; clock-in only needs the row.
+    if re.search(r":\d+$", target):
+        return re.sub(r"(:\d+):\d+$", r"\1", target)
+    return f"{target}:1"
+
+
 def entry_starts(t):
     """-> ([(start, mtime, index, path)] of every entry already started, [the same] of those running),
     over the task files on disk; index is the line's, from 0.
@@ -438,11 +476,23 @@ def cmd_running(args):
     latest entry running on disk, so the key ends it in that file's buffer, where its unsaved edits
     are; F when nothing runs. F:LINE, the buffer the key was pressed in and its line, is kept for
     `tl next` and `tl start -`."""
-    _, running = entry_starts(now())
     here = opt(args, "--from") or ""
-    FROM_PATH.parent.mkdir(parents=True, exist_ok=True)
-    FROM_PATH.write_text(here, encoding="utf-8")
-    print(max(running)[-1] if running else re.sub(r":\d+$", "", here), end="")  # no newline: for :open %sh{}
+    name = re.sub(r":\d+$", "", here)
+    agenda = Path("~/.cache/td/agenda.md").expanduser()
+    if same_path(name, str(agenda)):
+        here = _agenda_clock_target(here)
+        name = re.sub(r":\d+$", "", here)
+    path = Path(name).expanduser()
+    writable = (path.is_file() and os.access(path, os.W_OK)
+                if path.exists() else os.access(path.parent, os.W_OK))
+    valid = bool(name and name != "[scratch]" and writable
+                 and not same_path(name, str(agenda))
+                 and not same_path(name, str(VIEW_PATH)))
+    from_path = _clock_cache(FROM_PATH, args)
+    from_path.parent.mkdir(parents=True, exist_ok=True)
+    from_path.write_text(here if valid else "!" + here, encoding="utf-8")
+    _, running = entry_starts(now()) if valid else ([], [])
+    print(max(running)[-1] if running else name, end="")  # for :open %sh{}
     return 0
 
 
@@ -453,11 +503,10 @@ def cmd_next(args):
     start -`), else R."""
     t = now()
     skip = opt(args, "--skip")
-    try:
-        target = re.sub(r":\d+$", "", FROM_PATH.read_text(encoding="utf-8").strip()) or None
-    except OSError:
-        target = None
-    stop_files(Path(skip) if skip else None, t)
+    kept = _clock_from(args)
+    target = re.sub(r":\d+$", "", kept.removeprefix("!")) or None
+    if not kept.startswith("!"):
+        stop_files(Path(skip) if skip else None, t)
     print(target or skip or "", end="")  # no newline: for :open %sh{}
     return 0
 
@@ -1428,6 +1477,21 @@ def run_tests(verbose=False):
 
     class Switch(Case):
         """tl running / tl next, as space , i / I run them, and tl where, as space , o does."""
+
+        def test_agenda_resolves_tasks_and_rejects_headings_before_stopping(self):
+            todo = self.put("todo.md", "- [ ] call\nnotes\n")
+            running = "2026-10-09 13:00 -\n"
+            work = self.put("A.md", running)
+            cache = self.home / ".cache" / "td"
+            cache.mkdir(parents=True)
+            agenda = self.put("agenda.md", "# TODO\n\n- [ ] call\n", folder=cache)
+            self.assertEqual(self.tl("running", "--from", f"{agenda}:1"), str(agenda))
+            self.assertEqual(self.tl("next", "--skip", str(agenda)), str(agenda))
+            self.assertEqual(work.read_text(), running)
+            self.assertEqual(self.tl("running", "--from", f"{agenda}:3"), str(work))
+            self.assertEqual(self.tl("next", "--skip", str(work)), str(todo))
+            out = self.tl("start", "-", "--here", "--file", str(todo), stdin=todo.read_text())
+            self.assertEqual(out, "- [ ] call\n2026-10-09 14:05 - \nnotes\n")
 
         def test_running_names_the_file_to_end_the_entry_in(self):
             a = self.put("A.md", "2026-10-09 09:00 - 10:00\n2026-10-09 13:00 -\n")

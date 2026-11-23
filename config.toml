@@ -57,8 +57,8 @@ C-4 = ":run-shell-command echo -n \"%(buffer_name)\" | xclip -selection clipboar
 
 # td stamp keys (docs/keys.md): move the line's stamp, or a time-log entry's date/start/end, later / earlier by the part under
 # the cursor; on the week summary view (space , L), show the next / previous week
-"+" = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td shift +1 --col $(cat ~/.cache/td/stamp-col) --from %{buffer_name}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/tl/summary.txt ] || [ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", "collapse_selection", ":open %sh{echo %{buffer_name}:%{cursor_line}:$(cat ~/.cache/td/stamp-col)}", ":echo ''"]
-"-" = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td shift -1 --col $(cat ~/.cache/td/stamp-col) --from %{buffer_name}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/tl/summary.txt ] || [ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", "collapse_selection", ":open %sh{echo %{buffer_name}:%{cursor_line}:$(cat ~/.cache/td/stamp-col)}", ":echo ''"]
+"+" = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td shift +1 --col $(cat ~/.cache/td/stamp-col) --from \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}", ":earlier %sh{p=\"${BASH_EXECUTION_STRING#*'; exit #' }\"; [ \"$p\" -ef ~/.cache/tl/summary.txt ] || [ \"$p\" -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0; exit # %{buffer_name}}", "collapse_selection", ":open -- %sh{printf '%%s:%%s:%%s\\n' \"${BASH_EXECUTION_STRING#*'; exit #' }\" %{cursor_line} \"$(cat ~/.cache/td/stamp-col)\"; exit # %{buffer_name}}", ":echo ''"]
+"-" = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td shift -1 --col $(cat ~/.cache/td/stamp-col) --from \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}", ":earlier %sh{p=\"${BASH_EXECUTION_STRING#*'; exit #' }\"; [ \"$p\" -ef ~/.cache/tl/summary.txt ] || [ \"$p\" -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0; exit # %{buffer_name}}", "collapse_selection", ":open -- %sh{printf '%%s:%%s:%%s\\n' \"${BASH_EXECUTION_STRING#*'; exit #' }\" %{cursor_line} \"$(cat ~/.cache/td/stamp-col)\"; exit # %{buffer_name}}", ":echo ''"]
 
 [keys.normal.g]
     "\\" = ":sh echo 'https://...myaddress.../-/blob/master/%{buffer_name}#L%{cursor_line}' | xclip -selection clipboard"
@@ -94,16 +94,16 @@ q = ["save_selection", "goto_file_start", "extend_to_line_bounds", ":pipe-to pyt
 k = ":pipe-to ryk --send"
 
 # tl/td keys live under `space ,` (`space .` holds the AI tools).
-# See docs/keys.md for the commands each key runs.
+# See docs/keys.md for the commands each key runs. Paths after '; exit #' are shell data.
 
 [keys.normal.space.","]
 
 ### Time log (tl) ###
 
 # Clock in: stop the running entry, start a new one at the end of the buffer (in todo.md, at the end of the todo you are on), normal mode at its end
-i = [":open %sh{~/.config/helix/bin/tl running --from %{buffer_name}:%{cursor_line}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{~/.config/helix/bin/tl next --skip %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl start - --file %{buffer_name}", "collapse_selection", ":write!", ":open %sh{cat ~/.cache/tl/goto && rm ~/.cache/tl/goto}", "goto_line_end"]
+i = [":open -- %sh{~/.config/helix/bin/tl running --editor \"$PPID\" --from \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}:%{cursor_line}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --editor \"$PPID\" --file \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}", "collapse_selection", ":update", ":open -- %sh{~/.config/helix/bin/tl next --editor \"$PPID\" --skip \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl start - --editor \"$PPID\" --file \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}", "collapse_selection", ":write!", ":open -- %sh{p=~/.cache/tl/goto-$PPID; cat \"$p\" && rm -- \"$p\"; exit}", "goto_line_end"]
 # Clock in at the cursor: use a blank line, otherwise a new line below, in any buffer (todo.md too); normal mode at the entry's end
-I = [":open %sh{~/.config/helix/bin/tl running --from %{buffer_name}:%{cursor_line}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --file %{buffer_name}", "collapse_selection", ":update", ":open %sh{~/.config/helix/bin/tl next --skip %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl start - --here --file %{buffer_name}", "collapse_selection", ":write!", ":open %sh{cat ~/.cache/tl/goto && rm ~/.cache/tl/goto}", "goto_line_end"]
+I = [":open -- %sh{~/.config/helix/bin/tl running --editor \"$PPID\" --from \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}:%{cursor_line}}", "select_all", ":pipe ~/.config/helix/bin/tl stop - --editor \"$PPID\" --file \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}", "collapse_selection", ":update", ":open -- %sh{~/.config/helix/bin/tl next --editor \"$PPID\" --skip \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}}", "select_all", ":pipe ~/.config/helix/bin/tl start - --here --editor \"$PPID\" --file \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}", "collapse_selection", ":write!", ":open -- %sh{p=~/.cache/tl/goto-$PPID; cat \"$p\" && rm -- \"$p\"; exit}", "goto_line_end"]
 # Go to the running time-log entry, in whichever task file it is
 o = [":open %sh{~/.config/helix/bin/tl where --visit --from %{buffer_name}:%{cursor_line}}", "select_all", ":pipe-to ~/.config/helix/bin/tl where --locate - --file %{buffer_name}", ":open %sh{cat ~/.cache/tl/goto && rm ~/.cache/tl/goto}", ":echo %sh{~/.config/helix/bin/tl where --say}"]
 # Clock out: end the running entry and go to its task file, in insert mode on a "# " heading above it, to type what you did
@@ -119,14 +119,14 @@ L = [":write", ":open %sh{~/.config/helix/bin/tl summary --week --view}", ":relo
 
 ### Todos (td) ###
 
-# Open the inbox, ~/tasks/todo.md
-t = ":open ~/tasks/todo.md"
+# Open the configured inbox ($TD_FILE, or $TL_DIR/todo.md)
+t = ":open -- %sh{~/.config/helix/bin/td inbox}"
 # New todo: a "- [ ] " line at the top of todo.md, in insert mode (from anywhere, the agenda too); an empty one already first is reused
-q = [":open ~/tasks/todo.md", "goto_file_start", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td new - --above", "collapse_selection", "goto_file_start", "insert_at_line_end"]
+q = [":open -- %sh{~/.config/helix/bin/td inbox}", "goto_file_start", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td new - --above", "collapse_selection", "goto_file_start", "insert_at_line_end"]
 # The same at the end of todo.md; an empty one already last is reused
-Q = [":open ~/tasks/todo.md", "goto_last_line", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td new -", "collapse_selection", "goto_last_line", "insert_at_line_end"]
+Q = [":open -- %sh{~/.config/helix/bin/td inbox}", "goto_last_line", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td new -", "collapse_selection", "goto_last_line", "insert_at_line_end"]
 # The same as q (a key can't name another key, so the list is repeated)
-space = [":open ~/tasks/todo.md", "goto_file_start", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td new - --above", "collapse_selection", "goto_file_start", "insert_at_line_end"]
+space = [":open -- %sh{~/.config/helix/bin/td inbox}", "goto_file_start", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td new - --above", "collapse_selection", "goto_file_start", "insert_at_line_end"]
 # New file task, no todo.md bullet: type its name at the prompt; opens ~/tasks/<name>.md headed "# [ ] name"
 n = "@:open %sh{~/.config/helix/bin/td file \"$BASH_EXECUTION_STRING\" # name: }<left>"
 # Rename the task on an agenda row, or in its own file: its name comes up in the prompt to edit (file and heading, or bullet and file). In its own file the cursor goes to the heading
@@ -134,7 +134,7 @@ n = "@:open %sh{~/.config/helix/bin/td file \"$BASH_EXECUTION_STRING\" # name: }
 # td has renamed the file), so no old buffer is left, and Helix reloads the new heading when idle. On the agenda :move gets the agenda's own path and does nothing.
 N = '@:update<ret>:goto %sh{~/.config/helix/bin/td rename --focus --from %{buffer_name}:%{cursor_line}}<ret>xS^\s*[-#] (?:\[.\] )?|(?: \(\*\))?\n<ret>),"ty;:move %sh{~/.config/helix/bin/td rename --from %{buffer_name}:%{cursor_line} "$BASH_EXECUTION_STRING" # name: }<left><C-r>t'
 # Stamp the line: add today's date and time, or move its date to today; on the date: fix the weekday
-s = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td stamp --col $(cat ~/.cache/td/stamp-col) --from %{buffer_name}"]
+s = [":echo %sh{mkdir -p ~/.cache/td; echo %{cursor_column} >~/.cache/td/stamp-col}", "extend_to_line_bounds", ":pipe ~/.config/helix/bin/td stamp --col $(cat ~/.cache/td/stamp-col) --from \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}"]
 # Agenda of todo.md, newest added first (view only; the status keys work on its rows), with
 # every task's subtasks folded (za toggles one). fold_all needs an hx that folds (helix
 # main-kuba): another one refuses this config as an unknown command, so drop it there.
@@ -149,44 +149,41 @@ g = [":open %sh{~/.config/helix/bin/td list --by-tag >/dev/null; echo ~/.cache/t
 G = [":open %sh{~/.config/helix/bin/td list --by-tag --sort modified >/dev/null; echo ~/.cache/td/agenda.md}", ":reload", "fold_all"]
 # Give the bullet its own file ~/tasks/<slug>.md, and open it; in todo.md, its notes and time entries move there
 P = [
-  # Keep the source position before extending the selection.
-  ":noop %sh{mkdir -p ~/.cache/td && echo \"${BASH_EXECUTION_STRING##*# cursor: }\" >~/.cache/td/promote-cursor-$PPID; exit # cursor: %{buffer_name}:%{cursor_line}:%{cursor_column}}",
-  "extend_to_line_bounds",
-  ":pipe-to ~/.config/helix/bin/td promote --from %{buffer_name}:%{cursor_line}",
+  ":noop %sh{mkdir -p ~/.cache/td && printf '%%s\\n' \"${BASH_EXECUTION_STRING#*'; exit #' }\" >~/.cache/td/move-position-$PPID; exit # %{buffer_name}:%{cursor_line}:%{cursor_column}}",
+  "save_selection",
   "select_all",
-  ":pipe ~/.config/helix/bin/td promote --cut - --file %{buffer_name}",
-  ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}",
-  "collapse_selection",
-  ":update",
-  # Reopen at the source position, save that selection, then back up one jump.
-  # Restore the saved selection so opening the task records the original cursor.
-  ":open -- %sh{saved=$(cat ~/.cache/td/promote-cursor-$PPID) && rm ~/.cache/td/promote-cursor-$PPID; case \"$saved\" in \"[scratch]:\"*) cat ~/.cache/td/open;; *) echo \"$saved\";; esac}",
-  "select_mode",
-  "restore_selection",
-  "select_all",
+  ":pipe-to ~/.config/helix/bin/td editor-move promote \"$PPID\"; exit",
+  ":update --no-format",
   "jump_backward",
-  "restore_selection",
-  "collapse_selection",
-  ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}",
+  ":open -- %sh{~/.config/helix/bin/td move-result \"$PPID\" \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}}",
+  ":echo %sh{~/.config/helix/bin/td move-result \"$PPID\" --message; exit}",
 ]
 # Open the bullet's own file; on the agenda, its line in todo.md
-p = ["extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td jump --from %{buffer_name}:%{cursor_line}", "collapse_selection", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
+p = ["extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td jump --from \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}:%{cursor_line}", "collapse_selection", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
 # Move the bullet and its section (notes, time entries, subtodos) to the end of ~/tasks/day.md, ended with a zero-minute time entry that dates the move, which `space , l` lists (a [ ] or [x] bullet comes out as a # heading, with what was under it and the entry in a ``` fence, which hx folds); the buffer is saved and the cursor stays on the line it was on
-# Use only the cursor's line: a selection spanning notes would not parse as a bullet.
-ret = ["collapse_selection", "extend_to_line_bounds", ":pipe-to ~/.config/helix/bin/td day --from %{buffer_name}:%{cursor_line}", "select_all", ":pipe ~/.config/helix/bin/td day --cut - --file %{buffer_name}", "collapse_selection", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update", ":open %sh{cat ~/.cache/td/open && rm ~/.cache/td/open}"]
+ret = [
+  ":noop %sh{mkdir -p ~/.cache/td && printf '%%s\\n' \"${BASH_EXECUTION_STRING#*'; exit #' }\" >~/.cache/td/move-position-$PPID; exit # %{buffer_name}:%{cursor_line}:%{cursor_column}}",
+  "save_selection",
+  "select_all",
+  ":pipe-to ~/.config/helix/bin/td editor-move day \"$PPID\"; exit",
+  ":update --no-format",
+  "jump_backward",
+  ":open -- %sh{~/.config/helix/bin/td move-result \"$PPID\" \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}}",
+  ":echo %sh{~/.config/helix/bin/td move-result \"$PPID\" --message; exit}",
+]
 # Mark done (a ++/.+ repeater moves the date instead, but an hourly one); on the agenda, in todo.md
-x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{buffer_name} --row %{cursor_line}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
+x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --row %{cursor_line} --from \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}", ":earlier %sh{[ \"${BASH_EXECUTION_STRING#*'; exit #' }\" -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0; exit # %{buffer_name}}", ":update"]
 
 # Status keys, `space , ,` then the checkbox letter: toggle the line's state
 # (on the agenda, the task's state in todo.md or its file; the agenda then reloads)
 [keys.normal.space.",".","]
 # Today [Y]
-y = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle Y --from %{buffer_name} --row %{cursor_line}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
+y = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle Y --row %{cursor_line} --from \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}", ":earlier %sh{[ \"${BASH_EXECUTION_STRING#*'; exit #' }\" -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0; exit # %{buffer_name}}", ":update"]
 # Active [A]
-a = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle A --from %{buffer_name} --row %{cursor_line}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
+a = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle A --row %{cursor_line} --from \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}", ":earlier %sh{[ \"${BASH_EXECUTION_STRING#*'; exit #' }\" -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0; exit # %{buffer_name}}", ":update"]
 # Waiting [W]
-w = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle W --from %{buffer_name} --row %{cursor_line}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
+w = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle W --row %{cursor_line} --from \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}", ":earlier %sh{[ \"${BASH_EXECUTION_STRING#*'; exit #' }\" -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0; exit # %{buffer_name}}", ":update"]
 # Done [x], the same as space , x
-x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --from %{buffer_name} --row %{cursor_line}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
+x = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle x --row %{cursor_line} --from \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}", ":earlier %sh{[ \"${BASH_EXECUTION_STRING#*'; exit #' }\" -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0; exit # %{buffer_name}}", ":update"]
 # Back to todo [ ]
-space = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle todo --from %{buffer_name} --row %{cursor_line}", ":earlier %sh{[ %{buffer_name} -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0}", ":update"]
+space = ["extend_to_line_bounds", ":pipe ~/.config/helix/bin/td toggle todo --row %{cursor_line} --from \"${BASH_EXECUTION_STRING#*'; exit #' }\"; exit # %{buffer_name}", ":earlier %sh{[ \"${BASH_EXECUTION_STRING#*'; exit #' }\" -ef ~/.cache/td/agenda.md ] && echo 1 || echo 0; exit # %{buffer_name}}", ":update"]
