@@ -123,6 +123,7 @@ language-servers = ["polski-ls", "td-save"]
 name = "markdown"
 language-servers = ["harper-ls", "td-save"]
 comment-tokens = ["-", "+", "*", "- [ ]", ">"]
+completion-display = "statusline"
 
 # td task files: markdown plus td's task colours (runtime/queries/td, td.inline).
 # A language of its own keeps those colours out of other markdown (READMEs, PR
@@ -140,6 +141,7 @@ comment-tokens = ["-", "+", "*", "- [ ]", ">"]
 block-comment-tokens = { start = "<!--", end = "-->" }
 indent = { tab-width = 2, unit = "  " }
 word-completion.trigger-length = 4
+completion-display = "statusline"
 
 [language.auto-pairs]
 '(' = ')'

@@ -22,7 +22,6 @@ completion-trigger-len = 3
 #completion-auto-select=true
 
 
-completion-display = "statusline"
 completion-mouse-append-whitespace = true
 
 
