@@ -85,11 +85,10 @@ Commands:
   td promote --cut - [--file PATH]
                        the next step of `space , P`, on the whole buffer of
                        PATH: stdin to stdout, but if PATH is the inbox and
-                       holds the bullet promote kept, its section (the lines
-                       under it, up to the next bullet not under it or a
-                       heading: notes, time entries, subtodos) moves to the
-                       end of the bullet's file, without the indent its
-                       lines share.
+                       holds the bullet promote kept, move the lines under
+                       it up to the next checkbox at the same or shallower
+                       indent. Append them to the bullet's file without the
+                       indent they share.
   td day [--from PATH:LINE]
                        stdin: a line, at PATH:LINE. The first step of `space ,
                        ret`: a bullet's place is kept in ~/.cache/td/day, for
@@ -2594,12 +2593,20 @@ def cmd_promote(args):
 
 
 def _promotion_notes(lines, i):
-    """Cut the notes belonging to this bullet and return them without their shared indent."""
-    end = _tl().section_end(lines, i)
-    moved = lines[i + 1:end + 1]
+    """Cut notes up to the next checkbox at the same or shallower indent."""
+    width = _tl().width
+    indent = width(lines[i])
+    start = end = i + 1
+    for j in range(start, len(lines)):
+        body = lines[j].rstrip("\r\n")
+        if TASK.match(body) and width(body) <= indent:
+            break
+        if body.strip():
+            end = j + 1
+    moved = lines[start:end]
     if not moved:
         return ""
-    del lines[i + 1:end + 1]
+    del lines[start:end]
     common = os.path.commonprefix([re.match(r"[ \t]*", raw)[0] for raw in moved if raw.strip()])
     text = "".join(raw[len(common):] if raw.strip() else raw.lstrip(" \t") for raw in moved)
     text = text.lstrip("\r\n")
@@ -2609,11 +2616,9 @@ def _promotion_notes(lines, i):
 def _cut_section(args):
     """td promote --cut - [--file PATH]: the next step of `space , P`, on the whole buffer of
     PATH, after `td promote` kept the bullet and its file in CUT_PATH. If PATH is the inbox and
-    the bullet is still a bullet there, move its section (the lines under it, up to the next
-    bullet not under it or a heading: notes, time entries, subtodos; see tl's section_end) out of
-    the text and to the end of the file, on disk, without the indent its lines share and the blank
-    lines it starts with: subtodos come out as the file's subtasks. Else the text passes
-    through."""
+    the bullet is still there, move the lines below it up to the next checkbox at the same or
+    shallower indent. Append them to the task file without their shared indent or leading blank
+    lines. Deeper checkboxes become the file's subtasks. Else the text passes through."""
     lines = sys.stdin.buffer.read().decode("utf-8", "surrogateescape").splitlines(keepends=True)
     source = Path(args[args.index("--file") + 1]).expanduser() if "--file" in args[:-1] else None
     try:
@@ -4995,18 +5000,17 @@ def run_tests(verbose=False):
             self.assertEqual(self.press(text, 1), "- [ ] this is a test\n\n\n- [ ] Spanish\n")
             self.assertEqual((self.tasks / "this-is-a-test.md").read_text(),
                              "# [ ] this is a test\n\n2026-10-21 16:20 - 16:20 = 0h 00min  \n\n\nsomething to remember\n")
-            # a heading ends the section too
-            self.assertEqual(self.press("- [ ] beta\nnote\n# later\nnot beta's\n", 1), "- [ ] beta\n# later\nnot beta's\n")
-            self.assertEqual((self.tasks / "beta.md").read_text(), "# [ ] beta\n\nnote\n")
+            self.assertEqual(self.press("- [ ] beta\nnote\n# Details\nlast line", 1), "- [ ] beta\n")
+            self.assertEqual((self.tasks / "beta.md").read_text(), "# [ ] beta\n\nnote\n# Details\nlast line\n")
 
-        def test_cut_takes_a_heading_right_above_an_entry(self):
-            # `o`'s heading is in the section; one with text under it still ends it
+        def test_cut_takes_headings_and_time_entries(self):
             self.put_inbox("")
-            text = ("- [ ] gamma\nnote\n# did x\n2026-10-10 09:00 - 10:00 = 1h 00min\n\n# later\nnot gamma's\n"
-                    "- [ ] call\n")
-            self.assertEqual(self.press(text, 1), "- [ ] gamma\n\n# later\nnot gamma's\n- [ ] call\n")
+            text = ("- [ ] gamma\nnote\n# did x\n2026-10-10 09:00 - 10:00 = 1h 00min\n\n"
+                    "# Details\nfollow up\n\n- [W] call\ncall notes\n")
+            self.assertEqual(self.press(text, 1), "- [ ] gamma\n\n- [W] call\ncall notes\n")
             self.assertEqual((self.tasks / "gamma.md").read_text(),
-                             "# [ ] gamma\n\nnote\n# did x\n2026-10-10 09:00 - 10:00 = 1h 00min\n")
+                             "# [ ] gamma\n\nnote\n# did x\n2026-10-10 09:00 - 10:00 = 1h 00min\n\n"
+                             "# Details\nfollow up\n")
 
         def test_cut_with_nothing_under_it_passes_through(self):
             self.put_inbox("")
@@ -5015,11 +5019,11 @@ def run_tests(verbose=False):
                 self.assertEqual(self.press(text, 1), text)
             self.assertEqual((self.tasks / "alpha.md").read_text(), "# [ ] alpha\n\n")
 
-        def test_cut_a_sub_bullet_takes_only_its_own_lines(self):
+        def test_cut_a_sub_bullet_includes_dedented_notes(self):
             self.put_inbox("")
-            text = "- [ ] a\n  - [ ] b\n    note b\nnote a\n"
-            self.assertEqual(self.press(text, 2), "- [ ] a\n  - [ ] b\nnote a\n")
-            self.assertEqual((self.tasks / "b.md").read_text(), "# [ ] b\n\nnote b\n")
+            text = "- [ ] a\n  - [ ] b\n    note b\nmore about b\n- [ ] c\n"
+            self.assertEqual(self.press(text, 2), "- [ ] a\n  - [ ] b\n- [ ] c\n")
+            self.assertEqual((self.tasks / "b.md").read_text(), "# [ ] b\n\n    note b\nmore about b\n")
 
         def test_cut_leaves_out_the_blank_lines_the_section_starts_with(self):
             self.put_inbox("")
@@ -5361,7 +5365,9 @@ def run_tests(verbose=False):
             self.assertIn("2026-10-10T12:00", self.read_cache("scheduled"))
 
         def test_promotion_waits_for_the_requested_save(self):
-            original = "- [ ] original\nnotes\n"
+            notes = "notes\n\n# Details\nmore notes\n  - [ ] subtask\n"
+            next_task = "\n- [A] next\nnext task's notes\n"
+            original = "- [ ] original\n" + notes + next_task
             edited = original.replace("original", "edited")
             dest = self.tasks / "edited.md"
             self.put_inbox(original)
@@ -5373,8 +5379,8 @@ def run_tests(verbose=False):
             self.assertFalse(dest.exists())
             self.put_inbox(edited)
             self.assertIn("window/showDocument", self.notify_save(self.inbox, edited))
-            self.assertEqual(self.inbox.read_text(), "- [ ] edited\n")
-            self.assertEqual(dest.read_text(), "# [ ] edited\n\nnotes\n")
+            self.assertEqual(self.inbox.read_text(), "- [ ] edited\n" + next_task)
+            self.assertEqual(dest.read_text(), "# [ ] edited\n\n" + notes)
 
         def test_a_saved_undo_and_redo_apply_to_the_destination(self):
             original = "- [x] finished\nnotes\n- [ ] next\n"
