@@ -54,9 +54,11 @@ Commands:
                        their first line is `# [S] title` (done/ignored ones
                        hidden), else in # ORPHANS, " (*)" too, no path. --tag TAG
                        (with or without `#`) filters tasks and RESCHEDULE rows
-                       to that tag (no # ORPHANS); --by-tag groups open tasks
-                       under `# TAGS` by `#tag (N)` headers, each task indented
-                       for folding, with its group tag hidden on the row.
+                       to that tag, including done tasks under # DONE (no
+                       # ORPHANS); --by-tag groups open and done tasks under
+                       `# TAGS` by `#tag (N)` headers (open tasks first by
+                       state priority, then done), each task indented for
+                       folding, with its group tag hidden on the row.
                        Tags in a dedicated file's heading, notes and subtasks
                        all apply to the parent task. The options are kept in
                        ~/.cache/td/agenda-args, so a rebuild after a change
@@ -269,6 +271,7 @@ STATE_NAMES = {" ": "todo", "Y": "today", "A": "active", "W": "waiting",
 STATE_FROM_NAME = {"todo": " ", "today": "Y", "active": "A", "waiting": "W",
                    "done": "x", "ignore": "!"}
 VISIBLE = {" ", "Y", "A", "W"}
+TAG_VISIBLE = VISIBLE | {"x", "X"}
 GROUPS = ("today", "active", "todo", "waiting")
 
 
@@ -1667,8 +1670,11 @@ def build_list(args):
         if b.state in VISIBLE:
             slug = _linked_slug(b.text, lookup) if _same_file(b.path, inbox) else b.path.stem.lower()
             tags_by_slug.setdefault(slug, set()).update(tags)
-    kept = [b for b in bullets if (b.state in VISIBLE if state == "all"
-                                   else STATE_NAMES[b.state] == state)]
+    if state == "all":
+        allowed = TAG_VISIBLE if (by_tag or tag) else VISIBLE
+        kept = [b for b in bullets if b.state in allowed]
+    else:
+        kept = [b for b in bullets if STATE_NAMES[b.state] == state]
     if tag:
         kept = [b for b in kept if tag in task_tags_map[id(b)]]
     if sort == "modified":
@@ -1707,11 +1713,12 @@ def build_list(args):
                 out.append(f"  {row(b, t)}")
         out.append("")
     elif state == "all":
-        groups = {name: [] for name in GROUPS}
+        group_names = (*GROUPS, "done") if tag else GROUPS
+        groups = {name: [] for name in group_names}
         for b in kept:
             groups[STATE_NAMES[b.state]].append(b)
         sections = []
-        for name in GROUPS:
+        for name in group_names:
             sections.append((name.upper(), [r for b in groups[name] for r in rows(b)]))
             if name == "today":
                 fired = _fired_reminders(now(), lookup)
@@ -2480,8 +2487,8 @@ def _goto(source, lineno, raw, want_file):
             if tm:
                 tag = tm["tag"].lower()
                 saved = _read_sidecar(LIST_ARGS_PATH)
-                _, sort, _, _ = _parse_list_args(saved[0].split() if saved else [])
-                _render_agenda(["--sort", sort, "--tag", tag])
+                state, sort, _, _ = _parse_list_args(saved[0].split() if saved else [])
+                _render_agenda(["--state", state, "--sort", sort, "--tag", tag])
                 _nudge_later(LIST_PATH)
                 return f"{LIST_PATH}:1"
         raw = _source_agenda_row(raw, lineno)
@@ -3999,38 +4006,53 @@ def run_tests(verbose=False):
                 "- [Y] bravo #coop#Home\n"
                 "- [A] charlie #coop\n"
                 "- [x] done #coop\n"
+                "- [X] finished #coop\n"
+                "- [!] ignored #coop\n"
                 "- [ ] untagged\n")
+            self.put_dedicated("finished.md", "# [X] finished\n\n- [ ] done subtask\n")
             self.td("list", now_="2026-10-10 11:00")
             self.put_dedicated("passport.md", "# [W] renew passport #coop #Travel\n")
+            self.put_dedicated("archived.md", "# [x] archived #coop\n")
             self.put_dedicated("alpha.md", "# [ ] alpha\n\n- [ ] subtask\n")
             self.put_dedicated("orphan.md", "# just notes #coop\n")
             out = self.td("list", "--by-tag", now_="2026-10-10 11:05")
             self.assertIn("# TAGS\n\n"
-                          "- #coop (3)\n"
+                          "- #coop (6)\n"
                           "  - [Y] bravo #Home\n"
                           "  - [A] charlie\n"
                           "  - [W] renew passport #Travel (*)\n"
+                          "  - [x] archived (*)\n"
+                          "  - [x] done\n"
+                          "  - [X] finished (*)\n"
                           "- #home (2)\n"
                           "  - [Y] bravo #coop\n"
                           "  - [ ] alpha (*)\n"
                           "- #travel (1)\n"
                           "  - [W] renew passport #coop (*)\n", out)
-            for absent in ("untagged", "done", "subtask", "ORPHANS", "orphan"):
+            for absent in ("untagged", "ignored", "subtask", "done subtask", "ORPHANS", "orphan"):
                 self.assertNotIn(absent, out)
             self.assertEqual(self.read_cache("agenda-args"), "--state all --sort added --by-tag\n")
-            # Modified sort orders same-state tasks within a tag group.
+            # Modified sort orders same-state tasks within a tag group, keeping open before done.
             (self.tasks / "alpha.md").unlink()
+            (self.tasks / "finished.md").unlink()
+            (self.tasks / "archived.md").unlink()
             self.put_inbox(
                 "- [ ] alpha #home\n"
                 "- [ ] delta #home\n"
-                "- [Y] bravo #coop#Home\n")
+                "- [Y] bravo #coop#Home\n"
+                "- [x] done-old #home\n"
+                "- [X] done-new #home\n")
             self.td("list", "--by-tag", now_="2026-10-10 11:10")
             self.td("toggle", "Y", "--from", str(inbox), "--line", "1", now_="2026-10-10 11:15")
             self.td("toggle", "Y", "--from", str(inbox), "--line", "1", now_="2026-10-10 11:16")
+            self.td("toggle", "x", "--from", str(inbox), "--line", "4", now_="2026-10-10 11:17")
+            self.td("toggle", "x", "--from", str(inbox), "--line", "4", now_="2026-10-10 11:18")
             out = self.td("list", "--by-tag", "--sort", "modified", now_="2026-10-10 11:20")
-            home_block = out.split("- #home (3)\n", 1)[1].split("- #", 1)[0]
-            self.assertLess(home_block.index("alpha"), home_block.index("delta"))
+            home_block = out.split("- #home (5)\n", 1)[1].split("- #", 1)[0]
             self.assertLess(home_block.index("bravo"), home_block.index("alpha"))
+            self.assertLess(home_block.index("alpha"), home_block.index("delta"))
+            self.assertLess(home_block.index("delta"), home_block.index("done-old"))
+            self.assertLess(home_block.index("done-old"), home_block.index("done-new"))
             # No tagged tasks still shows # TAGS cleanly.
             self.put_inbox("- [ ] plain\n")
             (self.tasks / "passport.md").unlink()
@@ -4040,8 +4062,11 @@ def run_tests(verbose=False):
             self.put_inbox(
                 "- [Y] call jon #coop 2026-10-10 10:00\n"
                 "- [ ] buy milk #home 2026-10-10 10:00\n"
-                "- [ ] fuga czarna #dom#coop\n")
+                "- [ ] fuga czarna #dom#coop\n"
+                "- [x] done task #coop 2026-10-10 10:00\n"
+                "- [!] ignored task #coop\n")
             fuga = self.put_dedicated("fuga-czarna.md", "# [ ] fuga czarna #dom#coop\n\n- [ ] sub\n")
+            self.put_dedicated("done-task.md", "# [x] done task\n\n- [ ] hidden sub\n")
             self.put_dedicated("trip.md", "# [ ] trip #coop\n\n"
                                "- [ ] book taxi 2026-10-10 10:30\n")
             self.put_dedicated("orphan.md", "# just notes #coop\n")
@@ -4052,11 +4077,14 @@ def run_tests(verbose=False):
                 self.assertIn("- [Y] call jon #coop 2026-10-10 10:00", out)
                 self.assertIn("- [ ] fuga czarna #dom#coop (*)\n  - [ ] sub\n", out)
                 self.assertIn("- [ ] trip #coop (*)", out)
-                self.assertIn("- call jon #coop 2026-10-10 10:00", out.split("# RESCHEDULE")[1])
-                self.assertIn("- trip: book taxi 2026-10-10 10:30", out.split("# RESCHEDULE")[1])
-                self.assertNotIn("buy milk", out)
-                self.assertNotIn("ORPHANS", out)
-                self.assertNotIn("orphan", out)
+                reschedule = out.split("# RESCHEDULE")[1].split("# TODO")[0]
+                self.assertIn("- call jon #coop 2026-10-10 10:00", reschedule)
+                self.assertIn("- trip: book taxi 2026-10-10 10:30", reschedule)
+                self.assertNotIn("done task", reschedule)
+                self.assertIn("# DONE\n\n- [x] done task #coop 2026-10-10 10:00 (*)\n", out)
+                self.assertLess(out.index("# TODO"), out.index("# DONE"))
+                for absent in ("buy milk", "hidden sub", "ignored task", "ORPHANS", "orphan"):
+                    self.assertNotIn(absent, out)
                 self.assertEqual(self.read_cache("agenda-args"), "--state all --sort added --tag coop\n")
             # A tag only on the dedicated file's H1 still matches the inbox bullet.
             fuga.write_text("# [ ] fuga czarna #dom#coop #extra\n\n- [ ] sub\n")
@@ -5649,26 +5677,37 @@ def run_tests(verbose=False):
                 self.assertEqual(self.go(cmd, agenda, lineno), str(d), cmd)
 
         def test_jump_from_by_tag_rows(self):
-            inbox = self.put_inbox("- [ ] alpha #coop\n- [ ] bravo #home\n")
+            inbox = self.put_inbox("- [ ] alpha #coop\n- [ ] bravo #home\n- [x] finished #coop\n")
             alpha = self.put_dedicated("alpha.md", "# [ ] alpha #coop\n\n- [ ] sub\n")
+            finished = self.put_dedicated("finished.md", "# [x] finished\n")
             passport = self.put_dedicated("passport.md", "# [W] renew passport #coop#urgent\n")
+            archived = self.put_dedicated("archived.md", "# [x] archived #coop\n")
             self.td("list", "--by-tag", "--sort", "modified")
             # Indented task rows under - #tag (N) jump to inbox (p) / dedicated file (P),
-            # not as subtasks; file-task rows jump to their file.
+            # not as subtasks; file-task rows jump to their file (including done tasks).
             agenda, alpha_row = self.agenda_line("- [ ] alpha (*)")
             self.assertEqual(self.go("jump", agenda, alpha_row), f"{inbox}:1")
             self.assertEqual(self.go("promote", agenda, alpha_row), str(alpha))
+            _, done_row = self.agenda_line("- [x] finished (*)")
+            self.assertEqual(self.go("jump", agenda, done_row), f"{inbox}:3")
+            self.assertEqual(self.go("promote", agenda, done_row), str(finished))
             _, pass_row = self.agenda_line("renew passport")
             self.assertEqual(self.go("jump", agenda, pass_row), str(passport))
             self.assertEqual(self.go("promote", agenda, pass_row), str(passport))
+            _, arch_row = self.agenda_line("- [x] archived (*)")
+            self.assertEqual(self.go("jump", agenda, arch_row), str(archived))
+            self.assertEqual(self.go("promote", agenda, arch_row), str(archived))
             # p on a - #tag (N) header switches agenda.md to --tag tag, keeping sort.
-            _, tag_row = self.agenda_line("- #coop (2)")
+            _, tag_row = self.agenda_line("- #coop (4)")
             self.assertEqual(self.go("jump", agenda, tag_row), f"{agenda}:1")
             self.assertEqual(self.read_cache("agenda-args"),
                              "--state all --sort modified --tag coop\n")
             filtered = agenda.read_text()
             self.assertIn("- [ ] alpha #coop (*)\n  - [ ] sub\n", filtered)
             self.assertIn("- [W] renew passport #coop#urgent (*)", filtered)
+            self.assertIn("# DONE\n", filtered)
+            self.assertIn("- [x] finished #coop (*)", filtered)
+            self.assertIn("- [x] archived #coop (*)", filtered)
             self.assertNotIn("bravo", filtered)
 
         def test_by_tag_same_title_uses_group_to_find_source(self):
@@ -6121,12 +6160,23 @@ def run_tests(verbose=False):
             agenda = self.toggle_row("A", "renew passport")
             self.assertEqual(ft.read_text(), "# [A] renew passport #coop\n")
             self.assertIn("  - [A] renew passport (*)", agenda)
-            # Marking done in --tag filter keeps the --tag filter on rebuild.
+            # Marking done in --by-tag keeps the task at the end of the tag group; x again reopens it.
+            agenda = self.toggle_row("x", "alpha")
+            self.assertEqual(p.read_text(), "- [x] alpha #coop#home\n- [ ] bravo #coop\n")
+            self.assertEqual(d.read_text(), "# [x] alpha #coop#home\n")
+            coop_block = agenda.split("- #coop (3)\n", 1)[1].split("- #", 1)[0]
+            self.assertLess(coop_block.index("bravo"), coop_block.index("alpha"))
+            agenda = self.toggle_row("x", "alpha")
+            self.assertEqual(p.read_text(), "- [ ] alpha #coop#home\n- [ ] bravo #coop\n")
+            # Marking done in --tag filter keeps the --tag filter and moves the task under # DONE.
             self.td("list", "--tag", "home")
             agenda = self.toggle_row("x", "alpha")
             self.assertEqual(p.read_text(), "- [x] alpha #coop#home\n- [ ] bravo #coop\n")
-            self.assertNotIn("alpha", agenda)
+            self.assertIn("# DONE\n\n- [x] alpha #coop#home (*)\n", agenda)
             self.assertEqual(self.read_cache("agenda-args"), "--state all --sort added --tag home\n")
+            agenda = self.toggle_row("x", "alpha")
+            self.assertIn("# TODO\n\n- [ ] alpha #coop#home (*)\n", agenda)
+            self.assertNotIn("# DONE", agenda)
 
         def test_body_tag_rows_toggle_parent_and_keep_body(self):
             inbox = self.put_inbox("- [ ] alpha\n")

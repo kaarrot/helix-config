@@ -389,14 +389,15 @@ test a fresh one with `td fire ~/tasks/todo.md`.
   task back to todo.
 - `space , g` (newest added first within each state) and `space , G` (most
   recently changed first) open the agenda grouped by tag under `# TAGS`:
-  `- #tag (N)` headers sorted alphabetically, with each tag's open tasks
-  indented under it (ordered by state priority, then the active sort) and
+  `- #tag (N)` headers sorted alphabetically, with each tag's open and done
+  tasks indented under it (open tasks first in state priority, then done
+  tasks, ordered by the active sort; ignored `[!]` tasks stay hidden) and
   folded closed (`za` toggles a tag). The tag named by the group header is
   hidden on its task rows; other tags stay visible, and the source keeps all
   its tags. Tasks carrying multiple tags appear under each tag. Pressing
   `space , p` on a `- #tag (N)` header switches the agenda to
-  `td list --tag tag`, showing the standard state-grouped
-  agenda (`TODAY`, `RESCHEDULE`, `ACTIVE`, `TODO`, `WAITING`) filtered to
+  `td list --tag tag`, showing the state-grouped agenda (`TODAY`,
+  `RESCHEDULE`, `ACTIVE`, `TODO`, `WAITING`, and `DONE`) filtered to
   that tag; on an unfolded task row, `space , p`, `space , P`, `space , N`,
   `space , x`, and the status keys work as in the main agenda, and status
   rebuilds keep the active `--by-tag` or `--tag` view. `space , a` / `A`
